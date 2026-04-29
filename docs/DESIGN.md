@@ -366,6 +366,18 @@ Still open:
 
 9. **JAXA LULC raster as basemap.** `2024JPN_v25.04_100m.tif` (uint8, 15 categorical classes, EPSG:4326) loads through `qgis_load_layer` → `qgis_render_map` already, no new tool needed. Worth documenting as an optional `basemap_paths` entry for choropleth/trajectory renders that want land-cover context. Default styling: per-class palette matching JAXA's published legend (assets/jaxa_lulc_legend.png available).
 
+Resolved during v0.3 (2026-04-30):
+
+10. ~~**`crs` override on `qgis_load_layer`**~~ → Deferred to v0.4. v0.3 raises `NotImplementedError` when `crs != None`, with a pointer to `qgis_eval`. Plugin already has a `set_layer_crs` dispatch command, so v0.4 work is just MCP-side wiring + a parametrized test.
+
+11. ~~**Choropleth memory-layer architecture**~~ → Implemented as a single plugin command (`render_choropleth`) rather than 8 MCP-side dispatch round-trips. Reason: plugin's `get_layer_features(include_geometry=True)` returns geometry summaries, not full WKT (token-efficiency optimisation in upstream). Decision: keep the CSV-parse + `value_dict` build on the MCP side (matches "approach B" intent — stdlib `csv` only), but push the geometry copy + style + render into one atomic plugin command that cleans up after itself.
+
+12. **`qgis_figures_to_pptx` layout fidelity.** v0.3 ships `title_and_image` and `image_only` with full python-pptx fidelity; `two_column` and `title_image_caption` are accepted but degrade to `title_only`. Promoting them is mechanical and can land in any later release.
+
+Still open after v0.3:
+
+13. **`polbnda_jpn_new.shp` prefecture-id field name.** Not yet verified against the live shapefile — requires running `qgis_layer_inspect` end-to-end with QGIS open. Once verified, drop the actual field name into the v0.3 demo prompt and §10 of this doc.
+
 ---
 
 ## 9. References
