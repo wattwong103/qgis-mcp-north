@@ -15,6 +15,11 @@ from typing import ClassVar
 from qgis.core import (
     Qgis,
     QgsApplication,
+    QgsDiagramLayerSettings,
+    QgsDiagramSettings,
+    QgsHistogramDiagram,
+    QgsPieDiagram,
+    QgsSingleCategoryDiagramRenderer,
     QgsCategorizedSymbolRenderer,
     QgsClassificationEqualInterval,
     QgsClassificationJenks,
@@ -34,6 +39,17 @@ from qgis.core import (
     QgsLayerTreeGroup,
     QgsLayerTreeLayer,
     QgsLayoutExporter,
+    QgsLayoutItemLabel,
+    QgsLayoutItemLegend,
+    QgsLayoutItemMap,
+    QgsLayoutItemPicture,
+    QgsLayoutItemScaleBar,
+    QgsLayoutPoint,
+    QgsLayoutSize,
+    QgsPrintLayout,
+    QgsUnitTypes,
+    QgsArrowSymbolLayer,
+    QgsFillSymbol,
     QgsLineSymbol,
     QgsMapRendererParallelJob,
     QgsMapSettings,
@@ -45,6 +61,7 @@ from qgis.core import (
     QgsRasterLayer,
     QgsRectangle,
     QgsRendererCategory,
+    QgsRendererRange,
     QgsSettings,
     QgsSingleSymbolRenderer,
     QgsStyle,
@@ -53,7 +70,7 @@ from qgis.core import (
     QgsVectorLayer,
     QgsWkbTypes,
 )
-from qgis.PyQt.QtCore import QBuffer, QByteArray, QObject, QSize, QTimer, QUrl, QVariant
+from qgis.PyQt.QtCore import QBuffer, QByteArray, QObject, QSize, QSizeF, QTimer, QUrl, QVariant
 from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon
 from qgis.PyQt.QtWidgets import (
     QAction,
@@ -275,6 +292,8 @@ class QgisMCPServer(QObject):
                 "render_map_base64": self.render_map_base64,
                 "render_layers_to_path": self.render_layers_to_path,
                 "render_choropleth": self.render_choropleth,
+                "render_diagram_map": self.render_diagram_map,
+                "render_catchment": self.render_catchment,
                 "render_trajectory": self.render_trajectory,
                 "render_od_flows": self.render_od_flows,
                 "render_link_density": self.render_link_density,
@@ -303,6 +322,7 @@ class QgisMCPServer(QObject):
                 "find_layer": self.find_layer,
                 "list_layouts": self.list_layouts,
                 "export_layout": self.export_layout,
+                "compose_layout": self.compose_layout,
                 # Phase 3 — Plugin development & system management
                 "get_message_log": self.get_message_log,
                 "list_plugins": self.list_plugins,
@@ -1089,6 +1109,144 @@ class QgisMCPServer(QObject):
         "pretty": QgsClassificationPrettyBreaks,
     }
 
+    def _load_basemap_layer(self, basemap_spec, project, transient_ids):
+        """Load an XYZ tile basemap from a basemap_spec, or return (None, ...).
+
+        Returns ``(layer_or_None, source_label_or_None)``. On success the raster
+        layer is added to ``project`` and its id appended to ``transient_ids`` so
+        the existing ``finally`` teardown removes it. The user's project keeps no
+        surviving state. source_label is for the response (e.g. "positron (live xyz)").
+        """
+        if not basemap_spec:
+            return None, None
+        name = basemap_spec.get("name", "basemap")
+        url = basemap_spec["url"]
+        zmin = basemap_spec.get("zmin", 0)
+        zmax = basemap_spec.get("zmax", 19)
+        uri = f"type=xyz&url={url}&zmax={zmax}&zmin={zmin}"
+        bm = QgsRasterLayer(uri, "_basemap_xyz", "wms")
+        if not bm.isValid():
+            QgsMessageLog.logMessage(
+                f"Basemap {name!r} failed to load: {uri}", self.LOG_TAG, MSG_WARNING
+            )
+            return None, f"{name} (failed)"
+        opacity = float(basemap_spec.get("opacity", 1.0))
+        if opacity < 1.0:
+            try:
+                bm.renderer().setOpacity(opacity)
+            except Exception:
+                pass
+        project.addMapLayer(bm)
+        transient_ids.append(bm.id())
+        return bm, f"{name} (live xyz)"
+
+    def _reproject_extent_to_3857(self, rect, src_crs):
+        """Reproject a QgsRectangle from src_crs to EPSG:3857 (Web Mercator).
+
+        XYZ tiles are served in 3857; the map canvas CRS and extent must match
+        the tiles or the data and basemap won't align.
+        """
+        dest = QgsCoordinateReferenceSystem("EPSG:3857")
+        if src_crs == dest:
+            return QgsRectangle(rect)
+        xform = QgsCoordinateTransform(src_crs, dest, QgsProject.instance())
+        return xform.transformBoundingBox(rect)
+
+    def _resolve_color_ramp(self, name, diverging=False):
+        """Resolve a color-ramp name to a QgsColorRamp.
+
+        Order: vendored scientific ramp (colormaps.build_ramp) → QGIS default
+        style ramp (keeps YlOrRd/Blues/Spectral working) → a sane default
+        (vik when diverging, else Spectral). Unknown names never raise.
+        """
+        from . import colormaps
+
+        ramp = colormaps.build_ramp(name)
+        if ramp is not None:
+            return ramp
+        ramp = QgsStyle.defaultStyle().colorRamp(name)
+        if ramp is not None:
+            return ramp
+        if diverging:
+            fallback = colormaps.build_ramp("vik")
+            if fallback is not None:
+                return fallback
+        return QgsStyle.defaultStyle().colorRamp("Spectral")
+
+    def _build_graduated_renderer(
+        self, layer, field, *, n_classes, mode, palette, diverging=False, center=0.0
+    ):
+        """Build a graduated renderer; return (renderer, breaks, one_sided).
+
+        Sequential (default): QGIS classification over the resolved ramp —
+        identical to the legacy path. Diverging: symmetric class breaks around
+        ``center`` with colors sampled so ``center`` sits on the ramp's neutral
+        midpoint (``mode`` is ignored). See colormaps.diverging_breaks.
+        """
+        symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+        ramp = self._resolve_color_ramp(palette, diverging=diverging)
+
+        if not diverging:
+            renderer = QgsGraduatedSymbolRenderer(field)
+            renderer.setSourceSymbol(symbol.clone())
+            renderer.setSourceColorRamp(ramp)
+            renderer.setClassificationMethod(self._CLASSIFICATION_METHODS[mode]())
+            renderer.updateClasses(layer, int(n_classes))
+            ranges = list(renderer.ranges())
+            breaks = []
+            if ranges:
+                breaks.append(float(ranges[0].lowerValue()))
+                for r in ranges:
+                    breaks.append(float(r.upperValue()))
+            return renderer, breaks, False
+
+        from . import colormaps
+
+        values = []
+        for feat in layer.getFeatures():
+            try:
+                values.append(float(feat.attribute(field)))
+            except (TypeError, ValueError):
+                continue
+        vmin = min(values) if values else center
+        vmax = max(values) if values else center
+        bc = colormaps.diverging_breaks(
+            vmin, vmax, center=center, n_classes=int(n_classes)
+        )
+        ranges = []
+        for i in range(len(bc.positions)):
+            lo, hi = bc.breaks[i], bc.breaks[i + 1]
+            sym = symbol.clone()
+            sym.setColor(ramp.color(bc.positions[i]))
+            ranges.append(QgsRendererRange(lo, hi, sym, f"{lo:.4g}-{hi:.4g}"))
+        renderer = QgsGraduatedSymbolRenderer(field, ranges)
+        return renderer, list(bc.breaks), bc.one_sided
+
+    def _apply_label_halo(self, layer, field, size=9.0, buffer_mm=1.0):
+        """Enable simple labeling on ``field`` with a white halo (text buffer)."""
+        from qgis.core import (
+            QgsPalLayerSettings,
+            QgsTextBufferSettings,
+            QgsTextFormat,
+            QgsVectorLayerSimpleLabeling,
+        )
+
+        settings = QgsPalLayerSettings()
+        settings.fieldName = field
+        fmt = QgsTextFormat()
+        try:
+            fmt.setSize(float(size))
+        except Exception:
+            pass
+        buf = QgsTextBufferSettings()
+        buf.setEnabled(True)
+        buf.setSize(float(buffer_mm))
+        buf.setColor(QColor("white"))
+        fmt.setBuffer(buf)
+        settings.setFormat(fmt)
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+        layer.setLabelsEnabled(True)
+
     def render_choropleth(
         self,
         zones_path,
@@ -1099,7 +1257,11 @@ class QgisMCPServer(QObject):
         n_classes=5,
         mode="quantile",
         palette="YlOrRd",
+        diverging=False,
+        center=0.0,
+        label_field=None,
         basemap_paths=None,
+        basemap_spec=None,
         width=1600,
         height=1200,
         dpi=150,
@@ -1145,7 +1307,11 @@ class QgisMCPServer(QObject):
                 )
 
             crs_authid = zones.crs().authid() or "EPSG:4326"
-            uri = f"Polygon?crs={crs_authid}&field={join_field}:string&field={value_field}:double"
+            label_clause = "&field=_label:string" if label_field else ""
+            uri = (
+                f"Polygon?crs={crs_authid}"
+                f"&field={join_field}:string&field={value_field}:double{label_clause}"
+            )
             mem = QgsVectorLayer(uri, "_choropleth", "memory")
             if not mem.isValid():
                 raise Exception(f"Failed to create memory layer: {uri}")
@@ -1155,6 +1321,7 @@ class QgisMCPServer(QObject):
             mem_provider = mem.dataProvider()
             join_idx_mem = mem.fields().indexOf(join_field)
             value_idx_mem = mem.fields().indexOf(value_field)
+            label_idx_mem = mem.fields().indexOf("_label") if label_field else -1
             n_matched = 0
             n_unmatched = 0
             sample_layer_keys: list[str] = []
@@ -1179,6 +1346,12 @@ class QgisMCPServer(QObject):
                 new_f.setGeometry(QgsGeometry(f.geometry()))
                 new_f.setAttribute(join_idx_mem, key_str)
                 new_f.setAttribute(value_idx_mem, val if val is not None else None)
+                if label_idx_mem >= 0:
+                    try:
+                        lab = f.attribute(label_field)
+                    except Exception:
+                        lab = None
+                    new_f.setAttribute(label_idx_mem, str(lab) if lab is not None else "")
                 new_features.append(new_f)
 
             ok, _ = mem_provider.addFeatures(new_features)
@@ -1193,23 +1366,14 @@ class QgisMCPServer(QObject):
                     f"Sample CSV keys: {csv_sample}; sample layer keys: {sample_layer_keys}"
                 )
 
-            symbol = QgsSymbol.defaultSymbol(mem.geometryType())
-            ramp = QgsStyle.defaultStyle().colorRamp(palette)
-            if not ramp:
-                ramp = QgsStyle.defaultStyle().colorRamp("Spectral")
-            renderer = QgsGraduatedSymbolRenderer(value_field)
-            renderer.setSourceSymbol(symbol.clone())
-            renderer.setSourceColorRamp(ramp)
-            renderer.setClassificationMethod(method_cls())
-            renderer.updateClasses(mem, int(n_classes))
+            renderer, breaks, diverging_one_sided = self._build_graduated_renderer(
+                mem, value_field, n_classes=n_classes, mode=mode,
+                palette=palette, diverging=diverging, center=center,
+            )
             mem.setRenderer(renderer)
-
+            if label_field:
+                self._apply_label_halo(mem, "_label")
             ranges = list(renderer.ranges())
-            breaks: list[float] = []
-            if ranges:
-                breaks.append(float(ranges[0].lowerValue()))
-                for r in ranges:
-                    breaks.append(float(r.upperValue()))
 
             values_only = []
             for feat in mem.getFeatures():
@@ -1234,7 +1398,13 @@ class QgisMCPServer(QObject):
                         f"Basemap skipped (invalid): {bm_path}", self.LOG_TAG, MSG_WARNING
                     )
 
-            ordered_layers = [mem, *basemap_layers]  # top→bottom for setLayers
+            tile_bm, basemap_source = self._load_basemap_layer(
+                basemap_spec, project, transient_ids
+            )
+            # top→bottom for setLayers: data, vector basemaps, then tile basemap at the very bottom
+            ordered_layers = [mem, *basemap_layers]
+            if tile_bm is not None:
+                ordered_layers.append(tile_bm)
 
             extent_rect = QgsRectangle(mem.extent())
             for bm in basemap_layers:
@@ -1248,10 +1418,19 @@ class QgisMCPServer(QObject):
 
             ms = QgsMapSettings()
             ms.setLayers(ordered_layers)
-            ms.setExtent(extent_rect)
             ms.setOutputSize(QSize(int(width), int(height)))
             ms.setOutputDpi(int(dpi))
-            ms.setDestinationCrs(mem.crs())
+            # A tile basemap forces Web Mercator so the XYZ tiles stay crisp and
+            # aligned; the vector data reprojects on the fly. Without a basemap,
+            # keep the legacy data-CRS behavior so existing figures are byte-stable.
+            if tile_bm is not None:
+                out_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+                extent_rect = self._reproject_extent_to_3857(extent_rect, mem.crs())
+                ms.setDestinationCrs(out_crs)
+            else:
+                out_crs = mem.crs()
+                ms.setDestinationCrs(out_crs)
+            ms.setExtent(extent_rect)
             color = QColor(background)
             if not color.isValid():
                 color = QColor(255, 255, 255)
@@ -1273,7 +1452,7 @@ class QgisMCPServer(QObject):
                     extent_rect.xMinimum(), extent_rect.yMinimum(),
                     extent_rect.xMaximum(), extent_rect.yMaximum(),
                 ],
-                "crs": mem.crs().authid(),
+                "crs": out_crs.authid(),
                 "n_layers": len(ordered_layers),
                 "field": value_field,
                 "n_classes": len(ranges),
@@ -1284,6 +1463,11 @@ class QgisMCPServer(QObject):
                 "n_features": len(values_only),
                 "n_matched": n_matched,
                 "n_unmatched": n_unmatched,
+                "diverging": diverging,
+                "center": center,
+                "diverging_one_sided": diverging_one_sided,
+                "basemap_attribution": basemap_spec.get("attribution") if basemap_spec else None,
+                "basemap_source": basemap_source,
             }
         finally:
             for tid in transient_ids:
@@ -1561,13 +1745,62 @@ class QgisMCPServer(QObject):
         renderer = QgsCategorizedSymbolRenderer(field, categories)
         layer.setRenderer(renderer)
 
+    def _build_od_arrow_symbol(self, denom, curved=False):
+        """Directional arrow line symbol; width + head scale with trip_count.
+
+        ``denom`` is the max flow (linear scaling). ``curved`` bends the arc.
+        Degrades to a static arrow if the data-defined / curve API is absent
+        (older QGIS), so the render never hard-fails on symbology.
+        """
+        arrow = QgsArrowSymbolLayer()
+        for setter, value in (("setIsCurved", bool(curved)), ("setIsRepeated", False)):
+            try:
+                getattr(arrow, setter)(value)
+            except Exception:
+                pass
+        fill = QgsFillSymbol.createSimple({"color": "#1f78b4", "outline_style": "no"})
+        try:
+            fill.setOpacity(0.85)
+        except Exception:
+            pass
+        arrow.setSubSymbol(fill)
+        width_expr = f'"trip_count" / {denom} * 3.0 + 0.4'
+        head_expr = f'"trip_count" / {denom} * 4.0 + 1.4'
+        dd_ok = False
+        try:
+            arrow.setDataDefinedProperty(
+                QgsSymbolLayer.PropertyArrowWidth, QgsProperty.fromExpression(width_expr)
+            )
+            arrow.setDataDefinedProperty(
+                QgsSymbolLayer.PropertyArrowHeadLength, QgsProperty.fromExpression(head_expr)
+            )
+            arrow.setDataDefinedProperty(
+                QgsSymbolLayer.PropertyArrowHeadThickness, QgsProperty.fromExpression(head_expr)
+            )
+            dd_ok = True
+        except Exception:
+            pass
+        if not dd_ok:
+            for setter, value in (
+                ("setArrowWidth", 1.2), ("setHeadLength", 3.0), ("setHeadThickness", 3.0)
+            ):
+                try:
+                    getattr(arrow, setter)(value)
+                except Exception:
+                    pass
+        symbol = QgsLineSymbol()
+        symbol.changeSymbolLayer(0, arrow)
+        return symbol
+
     def render_od_flows(
         self,
         output_png,
         zones_path,
         zone_id_field="zone_id",
         flows=None,
+        arc_style="line",
         basemap_paths=None,
+        basemap_spec=None,
         width=1600,
         height=1200,
         dpi=150,
@@ -1643,21 +1876,23 @@ class QgisMCPServer(QObject):
             mem.dataProvider().addFeatures(new_features)
             mem.updateExtents()
 
-            # Line symbol with data-defined stroke width based on trip_count.
-            symbol = QgsLineSymbol.createSimple({"line_color": "#1f78b4", "line_width": "0.4"})
-            symbol_layer = symbol.symbolLayer(0)
-            width_expr = f'"trip_count" / {max(max_flow, 1e-9)} * 4.0 + 0.3'
-            try:
-                symbol_layer.setDataDefinedProperty(
-                    QgsSymbolLayer.PropertyStrokeWidth,
-                    QgsProperty.fromExpression(width_expr),
-                )
-            except Exception:
-                # Older QGIS API surface; fall back to a uniform medium width.
-                QgsMessageLog.logMessage(
-                    "data-defined stroke width unavailable; using uniform 1.0",
-                    self.LOG_TAG, MSG_WARNING,
-                )
+            # Symbol: straight line (default) or a directional arrow that can curve.
+            denom = max(max_flow, 1e-9)
+            if arc_style in ("arrow", "curved"):
+                symbol = self._build_od_arrow_symbol(denom, curved=(arc_style == "curved"))
+            else:
+                symbol = QgsLineSymbol.createSimple({"line_color": "#1f78b4", "line_width": "0.4"})
+                width_expr = f'"trip_count" / {denom} * 4.0 + 0.3'
+                try:
+                    symbol.symbolLayer(0).setDataDefinedProperty(
+                        QgsSymbolLayer.PropertyStrokeWidth,
+                        QgsProperty.fromExpression(width_expr),
+                    )
+                except Exception:
+                    QgsMessageLog.logMessage(
+                        "data-defined stroke width unavailable; using uniform width",
+                        self.LOG_TAG, MSG_WARNING,
+                    )
             mem.setRenderer(QgsSingleSymbolRenderer(symbol))
 
             basemap_layers = []
@@ -1668,7 +1903,12 @@ class QgisMCPServer(QObject):
                     transient_ids.append(bm.id())
                     basemap_layers.append(bm)
 
+            tile_bm, basemap_source = self._load_basemap_layer(
+                basemap_spec, project, transient_ids
+            )
             ordered_layers = [mem, zones, *basemap_layers]
+            if tile_bm is not None:
+                ordered_layers.append(tile_bm)
 
             extent_rect = QgsRectangle(zones.extent())
             dx = extent_rect.width() * 0.05
@@ -1680,10 +1920,16 @@ class QgisMCPServer(QObject):
 
             ms = QgsMapSettings()
             ms.setLayers(ordered_layers)
-            ms.setExtent(extent_rect)
             ms.setOutputSize(QSize(int(width), int(height)))
             ms.setOutputDpi(int(dpi))
-            ms.setDestinationCrs(zones.crs())
+            if tile_bm is not None:
+                out_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+                extent_rect = self._reproject_extent_to_3857(extent_rect, zones.crs())
+                ms.setDestinationCrs(out_crs)
+            else:
+                out_crs = zones.crs()
+                ms.setDestinationCrs(out_crs)
+            ms.setExtent(extent_rect)
             color = QColor(background)
             if not color.isValid():
                 color = QColor(255, 255, 255)
@@ -1705,8 +1951,10 @@ class QgisMCPServer(QObject):
                     extent_rect.xMinimum(), extent_rect.yMinimum(),
                     extent_rect.xMaximum(), extent_rect.yMaximum(),
                 ],
-                "crs": zones.crs().authid() or "EPSG:4326",
+                "crs": out_crs.authid() or "EPSG:4326",
                 "n_layers": len(ordered_layers),
+                "basemap_attribution": basemap_spec.get("attribution") if basemap_spec else None,
+                "basemap_source": basemap_source,
                 "n_flows": len(flows),
                 "n_flows_rendered": len(rendered_flows),
                 "n_zones": len(centroids),
@@ -1714,6 +1962,267 @@ class QgisMCPServer(QObject):
                 "min_flow_rendered": float(min_flow) if rendered_flows else 0.0,
                 "n_unmatched_origins": unmatched_o,
                 "n_unmatched_destinations": unmatched_d,
+            }
+        finally:
+            for tid in transient_ids:
+                try:
+                    project.removeMapLayer(tid)
+                except Exception:
+                    pass
+
+    def render_catchment(
+        self,
+        points_path,
+        output_png,
+        method="voronoi",
+        extent=None,
+        basemap_spec=None,
+        width=1600,
+        height=1200,
+        dpi=150,
+        background="white",
+        **kwargs,
+    ):
+        """Render Voronoi service-area catchments around point features. v2 tool.
+
+        Runs native:voronoipolygons on the points, fills each cell semi-
+        transparently with outlines, draws the points on top. Buffer rings /
+        network isochrones are future methods. Requires QGIS Processing.
+        """
+        project = QgsProject.instance()
+        transient_ids = []
+        try:
+            pts = QgsVectorLayer(points_path, "_catch_pts", "ogr")
+            if not pts.isValid():
+                raise Exception(f"Points layer not readable: {points_path}")
+            project.addMapLayer(pts)
+            transient_ids.append(pts.id())
+
+            # Voronoi via geometry op — no Processing framework dependency.
+            pts_xy = [
+                feat.geometry().asPoint()
+                for feat in pts.getFeatures()
+                if feat.geometry() and not feat.geometry().isEmpty()
+            ]
+            if len(pts_xy) < 3:
+                raise Exception(f"render_catchment needs >= 3 points, got {len(pts_xy)}")
+            voro_geom = QgsGeometry.fromMultiPointXY(pts_xy).voronoiDiagram()
+            if voro_geom.isEmpty():
+                raise Exception("Voronoi diagram came out empty")
+            crs_authid = pts.crs().authid() or "EPSG:4326"
+            voro = QgsVectorLayer(f"Polygon?crs={crs_authid}", "_voronoi", "memory")
+            cells = []
+            for part in voro_geom.asGeometryCollection():
+                nf = QgsFeature()
+                nf.setGeometry(part)
+                cells.append(nf)
+            voro.dataProvider().addFeatures(cells)
+            voro.updateExtents()
+            project.addMapLayer(voro)
+            transient_ids.append(voro.id())
+
+            fill = QgsFillSymbol.createSimple({
+                "color": "200,220,240,90",
+                "outline_color": "70,90,120",
+                "outline_width": "0.3",
+            })
+            voro.setRenderer(QgsSingleSymbolRenderer(fill))
+            psym = QgsMarkerSymbol.createSimple({
+                "name": "circle", "color": "#b2182b", "size": "1.4", "outline_style": "no",
+            })
+            pts.setRenderer(QgsSingleSymbolRenderer(psym))
+
+            tile_bm, basemap_source = self._load_basemap_layer(
+                basemap_spec, project, transient_ids
+            )
+            ordered_layers = [pts, voro]
+            if tile_bm is not None:
+                ordered_layers.append(tile_bm)
+
+            if extent is not None:
+                extent_rect = QgsRectangle(extent[0], extent[1], extent[2], extent[3])
+            else:
+                extent_rect = QgsRectangle(voro.extent())
+                dx, dy = extent_rect.width() * 0.05, extent_rect.height() * 0.05
+                extent_rect = QgsRectangle(
+                    extent_rect.xMinimum() - dx, extent_rect.yMinimum() - dy,
+                    extent_rect.xMaximum() + dx, extent_rect.yMaximum() + dy,
+                )
+
+            ms = QgsMapSettings()
+            ms.setLayers(ordered_layers)
+            ms.setOutputSize(QSize(int(width), int(height)))
+            ms.setOutputDpi(int(dpi))
+            if tile_bm is not None:
+                out_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+                extent_rect = self._reproject_extent_to_3857(extent_rect, pts.crs())
+                ms.setDestinationCrs(out_crs)
+            else:
+                out_crs = pts.crs()
+                ms.setDestinationCrs(out_crs)
+            ms.setExtent(extent_rect)
+            color = QColor(background)
+            if not color.isValid():
+                color = QColor(255, 255, 255)
+            ms.setBackgroundColor(color)
+
+            job = QgsMapRendererParallelJob(ms)
+            job.start()
+            job.waitForFinished()
+            if not job.renderedImage().save(output_png):
+                raise Exception(f"Failed to save render to {output_png}")
+
+            return {
+                "output_path": output_png,
+                "width": int(width), "height": int(height), "dpi": int(dpi),
+                "extent": [
+                    extent_rect.xMinimum(), extent_rect.yMinimum(),
+                    extent_rect.xMaximum(), extent_rect.yMaximum(),
+                ],
+                "crs": out_crs.authid() or "EPSG:4326",
+                "n_layers": len(ordered_layers),
+                "method": method,
+                "n_points": pts.featureCount(),
+                "n_catchments": voro.featureCount(),
+                "basemap_attribution": basemap_spec.get("attribution") if basemap_spec else None,
+                "basemap_source": basemap_source,
+            }
+        finally:
+            for tid in transient_ids:
+                try:
+                    project.removeMapLayer(tid)
+                except Exception:
+                    pass
+
+    def render_diagram_map(
+        self,
+        layer_path,
+        value_fields,
+        output_png,
+        diagram_type="pie",
+        size=10.0,
+        palette="Set2",
+        extent=None,
+        basemap_spec=None,
+        width=1600,
+        height=1200,
+        dpi=150,
+        background="white",
+        **kwargs,
+    ):
+        """Render pie/bar charts on each feature (chart-in-map). v2 workflow tool.
+
+        Loads the layer transiently, applies a QgsDiagramRenderer with one
+        pie slice / bar per value_field (colored from ``palette``), over a light
+        base fill, and renders to PNG. No surviving project state.
+        """
+        project = QgsProject.instance()
+        transient_ids = []
+        try:
+            layer = QgsVectorLayer(layer_path, "_diagram", "ogr")
+            if not layer.isValid():
+                raise Exception(f"Layer not readable: {layer_path}")
+            project.addMapLayer(layer)
+            transient_ids.append(layer.id())
+
+            field_names = [fld.name() for fld in layer.fields()]
+            for vf in value_fields:
+                if vf not in field_names:
+                    raise Exception(f"Field {vf!r} not found; available: {field_names}")
+
+            base = QgsSymbol.defaultSymbol(layer.geometryType())
+            try:
+                base.setColor(QColor(236, 236, 236))
+            except Exception:
+                pass
+            layer.setRenderer(QgsSingleSymbolRenderer(base))
+
+            ramp = self._resolve_color_ramp(palette)
+            n = len(value_fields)
+            colors = [ramp.color((i / (n - 1)) if n > 1 else 0.0) for i in range(n)]
+
+            diagram = QgsPieDiagram() if diagram_type == "pie" else QgsHistogramDiagram()
+            ds = QgsDiagramSettings()
+            ds.enabled = True
+            ds.categoryAttributes = list(value_fields)
+            ds.categoryColors = colors
+            ds.size = QSizeF(float(size), float(size))
+            try:
+                ds.sizeType = QgsUnitTypes.RenderMillimeters
+            except Exception:
+                pass
+            ds.penColor = QColor("white")
+            ds.penWidth = 0.2
+
+            dr = QgsSingleCategoryDiagramRenderer()
+            dr.setDiagram(diagram)
+            dr.setDiagramSettings(ds)
+            layer.setDiagramRenderer(dr)
+
+            dls = QgsDiagramLayerSettings()
+            try:
+                dls.setPlacement(QgsDiagramLayerSettings.OverPoint)
+            except Exception:
+                try:
+                    dls.placement = QgsDiagramLayerSettings.OverPoint
+                except Exception:
+                    pass
+            layer.setDiagramLayerSettings(dls)
+
+            tile_bm, basemap_source = self._load_basemap_layer(
+                basemap_spec, project, transient_ids
+            )
+            ordered_layers = [layer]
+            if tile_bm is not None:
+                ordered_layers.append(tile_bm)
+
+            if extent is not None:
+                extent_rect = QgsRectangle(extent[0], extent[1], extent[2], extent[3])
+            else:
+                extent_rect = QgsRectangle(layer.extent())
+                dx, dy = extent_rect.width() * 0.05, extent_rect.height() * 0.05
+                extent_rect = QgsRectangle(
+                    extent_rect.xMinimum() - dx, extent_rect.yMinimum() - dy,
+                    extent_rect.xMaximum() + dx, extent_rect.yMaximum() + dy,
+                )
+
+            ms = QgsMapSettings()
+            ms.setLayers(ordered_layers)
+            ms.setOutputSize(QSize(int(width), int(height)))
+            ms.setOutputDpi(int(dpi))
+            if tile_bm is not None:
+                out_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+                extent_rect = self._reproject_extent_to_3857(extent_rect, layer.crs())
+                ms.setDestinationCrs(out_crs)
+            else:
+                out_crs = layer.crs()
+                ms.setDestinationCrs(out_crs)
+            ms.setExtent(extent_rect)
+            color = QColor(background)
+            if not color.isValid():
+                color = QColor(255, 255, 255)
+            ms.setBackgroundColor(color)
+
+            job = QgsMapRendererParallelJob(ms)
+            job.start()
+            job.waitForFinished()
+            if not job.renderedImage().save(output_png):
+                raise Exception(f"Failed to save render to {output_png}")
+
+            return {
+                "output_path": output_png,
+                "width": int(width), "height": int(height), "dpi": int(dpi),
+                "extent": [
+                    extent_rect.xMinimum(), extent_rect.yMinimum(),
+                    extent_rect.xMaximum(), extent_rect.yMaximum(),
+                ],
+                "crs": out_crs.authid() or "EPSG:4326",
+                "n_layers": len(ordered_layers),
+                "diagram_type": diagram_type,
+                "value_fields": list(value_fields),
+                "n_features": layer.featureCount(),
+                "basemap_attribution": basemap_spec.get("attribution") if basemap_spec else None,
+                "basemap_source": basemap_source,
             }
         finally:
             for tid in transient_ids:
@@ -1735,6 +2244,7 @@ class QgisMCPServer(QObject):
         palette="YlOrRd",
         extent=None,
         basemap_paths=None,
+        basemap_spec=None,
         width=1600,
         height=1200,
         dpi=150,
@@ -1805,9 +2315,7 @@ class QgisMCPServer(QObject):
                 )
 
             # 4. Graduated renderer
-            ramp = QgsStyle.defaultStyle().colorRamp(palette)
-            if not ramp:
-                ramp = QgsStyle.defaultStyle().colorRamp("YlOrRd")
+            ramp = self._resolve_color_ramp(palette)
             symbol = QgsLineSymbol.createSimple({"line_width": "0.6"})
             renderer = QgsGraduatedSymbolRenderer(density_field)
             renderer.setSourceSymbol(symbol.clone())
@@ -1840,8 +2348,13 @@ class QgisMCPServer(QObject):
                         f"Basemap skipped (invalid): {bm_path}", self.LOG_TAG, MSG_WARNING
                     )
 
+            tile_bm, basemap_source = self._load_basemap_layer(
+                basemap_spec, project, transient_ids
+            )
             # basemaps below, DRM links on top
             ordered_layers = [drm_layer, *basemap_layers]
+            if tile_bm is not None:
+                ordered_layers.append(tile_bm)
 
             # Compute extent: explicit bbox or DRM layer extent with 5% padding
             if extent is not None:
@@ -1857,10 +2370,16 @@ class QgisMCPServer(QObject):
 
             ms = QgsMapSettings()
             ms.setLayers(ordered_layers)
-            ms.setExtent(extent_rect)
             ms.setOutputSize(QSize(int(width), int(height)))
             ms.setOutputDpi(int(dpi))
-            ms.setDestinationCrs(drm_layer.crs())
+            if tile_bm is not None:
+                out_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+                extent_rect = self._reproject_extent_to_3857(extent_rect, drm_layer.crs())
+                ms.setDestinationCrs(out_crs)
+            else:
+                out_crs = drm_layer.crs()
+                ms.setDestinationCrs(out_crs)
+            ms.setExtent(extent_rect)
             ms.setBackgroundColor(QColor("white"))
 
             job = QgsMapRendererParallelJob(ms)
@@ -1879,8 +2398,10 @@ class QgisMCPServer(QObject):
                     extent_rect.xMinimum(), extent_rect.yMinimum(),
                     extent_rect.xMaximum(), extent_rect.yMaximum(),
                 ],
-                "crs": drm_layer.crs().authid() or "EPSG:4326",
+                "crs": out_crs.authid() or "EPSG:4326",
                 "n_layers": len(ordered_layers),
+                "basemap_attribution": basemap_spec.get("attribution") if basemap_spec else None,
+                "basemap_source": basemap_source,
                 "n_links_with_traffic": len(density),
                 "n_links_rendered": n_links_rendered,
                 "n_unmatched_link_ids": n_unmatched_link_ids,
@@ -1991,6 +2512,8 @@ class QgisMCPServer(QObject):
         classes=5,
         color_ramp="Spectral",
         mode="equal_interval",
+        diverging=False,
+        center=0.0,
         **kwargs,
     ):
         """Apply categorical / graduated / single-symbol style to a vector layer.
@@ -2064,24 +2587,12 @@ class QgisMCPServer(QObject):
                     f"Unknown mode {mode!r}. Use one of: {list(self._CLASSIFICATION_METHODS)}."
                 )
 
-            symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-            ramp = QgsStyle.defaultStyle().colorRamp(color_ramp)
-            if not ramp:
-                ramp = QgsStyle.defaultStyle().colorRamp("Spectral")
-
-            renderer = QgsGraduatedSymbolRenderer(field)
-            renderer.setSourceSymbol(symbol.clone())
-            renderer.setSourceColorRamp(ramp)
-            renderer.setClassificationMethod(method_cls())
-            renderer.updateClasses(layer, int(classes))
+            renderer, breaks, diverging_one_sided = self._build_graduated_renderer(
+                layer, field, n_classes=classes, mode=mode,
+                palette=color_ramp, diverging=diverging, center=center,
+            )
             layer.setRenderer(renderer)
-
             ranges = list(renderer.ranges())
-            breaks = []
-            if ranges:
-                breaks.append(float(ranges[0].lowerValue()))
-                for r in ranges:
-                    breaks.append(float(r.upperValue()))
 
             # Per-range feature counts via in-memory iteration (no QGIS API for this).
             class_entries = []
@@ -2109,6 +2620,9 @@ class QgisMCPServer(QObject):
                 "classes": class_entries,
                 "breaks": breaks,
                 "mode": mode,
+                "diverging": diverging,
+                "center": center,
+                "diverging_one_sided": diverging_one_sided,
             }
         else:
             raise Exception(
@@ -2261,6 +2775,167 @@ class QgisMCPServer(QObject):
                 }
             )
         return {"layouts": layouts, "count": len(layouts)}
+
+    def compose_layout(
+        self,
+        layer_paths,
+        output_path,
+        title=None,
+        extent=None,
+        page="a4_landscape",
+        legend=True,
+        scale_bar=True,
+        north_arrow=True,
+        dpi=300,
+        **kwargs,
+    ):
+        """Build a print layout programmatically and export it. v2 workflow tool.
+
+        Loads layer_paths transiently (bottom->top), lays out a single map panel
+        with optional title, legend, scale bar and north arrow, exports to
+        PNG/PDF/SVG (by output_path extension). The user's project keeps no state.
+        """
+        project = QgsProject.instance()
+        transient_ids = []
+        try:
+            layers = []
+            for p in layer_paths or []:
+                lyr = QgsVectorLayer(p, os.path.basename(p), "ogr")
+                if not lyr.isValid():
+                    lyr = QgsRasterLayer(p, os.path.basename(p))
+                if not lyr.isValid():
+                    QgsMessageLog.logMessage(
+                        f"compose_layout: skipped invalid layer {p}", self.LOG_TAG, MSG_WARNING
+                    )
+                    continue
+                project.addMapLayer(lyr)
+                transient_ids.append(lyr.id())
+                layers.append(lyr)
+            if not layers:
+                raise Exception("compose_layout: no valid layers in layer_paths")
+
+            if extent is not None:
+                rect = QgsRectangle(extent[0], extent[1], extent[2], extent[3])
+            else:
+                rect = QgsRectangle(layers[0].extent())
+                for lyr in layers[1:]:
+                    rect.combineExtentWith(lyr.extent())
+                dx, dy = rect.width() * 0.05, rect.height() * 0.05
+                rect = QgsRectangle(
+                    rect.xMinimum() - dx, rect.yMinimum() - dy,
+                    rect.xMaximum() + dx, rect.yMaximum() + dy,
+                )
+
+            pages = {
+                "a4_landscape": (297, 210), "a4_portrait": (210, 297),
+                "a3_landscape": (420, 297), "square": (250, 250),
+            }
+            pw, ph = pages.get(page, (297, 210))
+            mm = QgsUnitTypes.LayoutMillimeters
+
+            layout = QgsPrintLayout(project)
+            layout.initializeDefaults()
+            layout.pageCollection().page(0).setPageSize(QgsLayoutSize(pw, ph, mm))
+
+            margin = 8.0
+            title_h = 12.0 if title else 0.0
+            map_w = pw - 2 * margin
+            map_h = ph - 2 * margin - title_h
+
+            m = QgsLayoutItemMap(layout)
+            layout.addLayoutItem(m)
+            m.attemptMove(QgsLayoutPoint(margin, margin + title_h, mm))
+            m.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+            m.setLayers(list(reversed(layers)))  # paths are bottom->top; setLayers wants top first
+            m.setCrs(layers[0].crs())
+            m.setExtent(rect)
+            items = ["map"]
+
+            if title:
+                lbl = QgsLayoutItemLabel(layout)
+                lbl.setText(str(title))
+                try:
+                    from qgis.core import QgsTextFormat
+
+                    tf = QgsTextFormat()
+                    fnt = tf.font()
+                    fnt.setBold(True)
+                    tf.setFont(fnt)
+                    tf.setSize(18)
+                    lbl.setTextFormat(tf)
+                except Exception:
+                    font = lbl.font()
+                    font.setPointSize(18)
+                    font.setBold(True)
+                    lbl.setFont(font)
+                layout.addLayoutItem(lbl)
+                lbl.attemptMove(QgsLayoutPoint(margin, 3.0, mm))
+                lbl.attemptResize(QgsLayoutSize(map_w, title_h, mm))
+                items.append("title")
+
+            if legend:
+                leg = QgsLayoutItemLegend(layout)
+                leg.setLinkedMap(m)
+                layout.addLayoutItem(leg)
+                leg.attemptMove(QgsLayoutPoint(pw - margin - 46, margin + title_h + 4, mm))
+                items.append("legend")
+
+            if scale_bar:
+                sb = QgsLayoutItemScaleBar(layout)
+                sb.setLinkedMap(m)
+                try:
+                    sb.applyDefaultSize()
+                except Exception:
+                    pass
+                layout.addLayoutItem(sb)
+                sb.attemptMove(QgsLayoutPoint(margin + 2, ph - margin - 14, mm))
+                items.append("scalebar")
+
+            if north_arrow:
+                svg_path = None
+                for base in QgsApplication.svgPaths():
+                    cand = os.path.join(base, "arrows", "NorthArrow_02.svg")
+                    if os.path.exists(cand):
+                        svg_path = cand
+                        break
+                if svg_path:
+                    pic = QgsLayoutItemPicture(layout)
+                    pic.setPicturePath(svg_path)
+                    layout.addLayoutItem(pic)
+                    pic.attemptMove(QgsLayoutPoint(pw - margin - 16, margin + title_h + 4, mm))
+                    pic.attemptResize(QgsLayoutSize(12, 12, mm))
+                    items.append("north_arrow")
+
+            exporter = QgsLayoutExporter(layout)
+            fmt = output_path.rsplit(".", 1)[-1].lower() if "." in output_path else "png"
+            if fmt == "pdf":
+                settings = QgsLayoutExporter.PdfExportSettings()
+                settings.dpi = int(dpi)
+                res = exporter.exportToPdf(output_path, settings)
+            elif fmt == "svg":
+                settings = QgsLayoutExporter.SvgExportSettings()
+                settings.dpi = int(dpi)
+                res = exporter.exportToSvg(output_path, settings)
+            else:
+                settings = QgsLayoutExporter.ImageExportSettings()
+                settings.dpi = int(dpi)
+                res = exporter.exportToImage(output_path, settings)
+            if res != LAYOUT_SUCCESS:
+                raise Exception(f"compose_layout export failed with code {res}")
+
+            return {
+                "output_path": output_path,
+                "format": fmt,
+                "n_layers": len(layers),
+                "items": items,
+                "page_size_mm": [float(pw), float(ph)],
+            }
+        finally:
+            for tid in transient_ids:
+                try:
+                    project.removeMapLayer(tid)
+                except Exception:
+                    pass
 
     def export_layout(
         self,

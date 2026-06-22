@@ -207,6 +207,69 @@ class StyleResult(BaseModel):
 class GraduatedStyleResult(StyleResult):
     breaks: list[float]
     mode: str
+    diverging: bool = False
+    center: float = 0.0
+    diverging_one_sided: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Basemap tile presets — no-API-key XYZ providers drawn UNDER the data.
+# Each entry: (url_template, attribution, zmax). Esri REST tiles use {z}/{y}/{x}
+# order; that ordering is encoded in the template and passed to the plugin verbatim.
+# URLs sourced from the xyzservices registry; copied (not imported) to keep the
+# live-XYZ path dependency-free.
+# ---------------------------------------------------------------------------
+
+BasemapName = Literal["none", "positron", "dark_matter", "voyager", "osm", "esri_imagery"]
+
+_BASEMAP_PRESETS: dict[str, tuple[str, str, int]] = {
+    "positron": (
+        "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
+        "© OpenStreetMap contributors © CARTO",
+        20,
+    ),
+    "dark_matter": (
+        "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
+        "© OpenStreetMap contributors © CARTO",
+        20,
+    ),
+    "voyager": (
+        "https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
+        "© OpenStreetMap contributors © CARTO",
+        20,
+    ),
+    "osm": (
+        "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "© OpenStreetMap contributors",
+        19,
+    ),
+    "esri_imagery": (
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        "Esri, Maxar, Earthstar Geographics",
+        19,
+    ),
+}
+
+
+def _resolve_basemap(basemap: str, opacity: float) -> dict | None:
+    """Resolve a basemap preset name into the ``basemap_spec`` sent to the plugin.
+
+    ``"none"`` returns ``None`` (legacy white-background behavior, unchanged).
+    A known preset returns a live-XYZ spec the plugin loads via
+    ``QgsRasterLayer(type=xyz, provider="wms")``.
+    """
+    if basemap == "none":
+        return None
+    url, attribution, zmax = _BASEMAP_PRESETS[basemap]
+    return {
+        "kind": "xyz",
+        "name": basemap,
+        "url": url,
+        "zmin": 0,
+        "zmax": zmax,
+        "attribution": attribution,
+        "opacity": float(opacity),
+    }
 
 
 class RenderResult(BaseModel):
@@ -217,6 +280,8 @@ class RenderResult(BaseModel):
     extent: list[float]
     crs: str
     n_layers: int
+    basemap_attribution: str | None = None
+    basemap_source: str | None = None
 
 
 class JoinResult(BaseModel):
@@ -235,6 +300,9 @@ class ChoroplethResult(RenderResult):
     max_value: float
     n_features: int
     join: JoinResult | None = None
+    diverging: bool = False
+    center: float = 0.0
+    diverging_one_sided: bool = False
 
 
 class TrajectoryResult(RenderResult):
@@ -276,6 +344,26 @@ class ExportResult(BaseModel):
     format: str
     n_pages: int
     layout_name: str
+
+
+class ComposeLayoutResult(BaseModel):
+    output_path: str
+    format: str
+    n_layers: int
+    items: list[str]
+    page_size_mm: list[float]
+
+
+class DiagramMapResult(RenderResult):
+    diagram_type: str
+    value_fields: list[str]
+    n_features: int
+
+
+class CatchmentResult(RenderResult):
+    method: str
+    n_points: int
+    n_catchments: int
 
 
 class BatchManifestEntry(BaseModel):
@@ -587,6 +675,8 @@ def qgis_style_graduated(
     n_classes: Annotated[int, Field(description="Number of bins.", ge=2, le=15)] = 5,
     mode: Annotated[Literal["quantile", "equal_interval", "natural_breaks", "pretty"], Field(description="Binning strategy.")] = "quantile",
     palette: Annotated[str, Field(description='Sequential colorbrewer palette, e.g. "YlOrRd", "Blues", "Viridis".')] = "YlOrRd",
+    diverging: Annotated[bool, Field(description="Diverging color scheme with a fixed neutral midpoint, for signed data (e.g. net flux). Replaces mode-based boundaries with symmetric breaks around center; pair with a diverging palette (vik/RdBu/balance).")] = False,
+    center: Annotated[float, Field(description="Neutral midpoint for diverging mode (e.g. 0). Ignored when diverging is False.")] = 0.0,
 ) -> GraduatedStyleResult:
     """Apply graduated (value-based color ramp) symbology — the choropleth primitive.
 
@@ -606,6 +696,8 @@ def qgis_style_graduated(
         "classes": n_classes,
         "mode": mode,
         "color_ramp": palette,
+        "diverging": diverging,
+        "center": center,
     }
 
     try:
@@ -626,6 +718,9 @@ def qgis_style_graduated(
         ],
         breaks=result.get("breaks", []),
         mode=result.get("mode", mode),
+        diverging=result.get("diverging", diverging),
+        center=result.get("center", center),
+        diverging_one_sided=result.get("diverging_one_sided", False),
     )
 
 
@@ -700,9 +795,14 @@ def qgis_render_choropleth(
     n_classes: Annotated[int, Field(description="Number of choropleth bins.", ge=2, le=15)] = 5,
     mode: Annotated[Literal["quantile", "equal_interval", "natural_breaks", "pretty"], Field(description="Binning strategy.")] = "quantile",
     palette: Annotated[str, Field(description='Sequential colorbrewer palette, e.g. "YlOrRd", "Blues", "Viridis".')] = "YlOrRd",
+    diverging: Annotated[bool, Field(description="Diverging color scheme pinned at a neutral midpoint, for signed data (net flux = arrivals minus departures). Symmetric class breaks around center; pair with a diverging palette (vik/RdBu/balance).")] = False,
+    center: Annotated[float, Field(description="Neutral midpoint for diverging mode (e.g. 0). Ignored when diverging is False.")] = 0.0,
+    label_field: Annotated[str | None, Field(description="Optional zones attribute to label each polygon with (e.g. a ward/prefecture name), drawn with a white halo for legibility.")] = None,
     title: Annotated[str | None, Field(description="Optional title rendered at the top of the figure.")] = None,
     legend: Annotated[bool, Field(description="Render a legend with class breaks.")] = True,
-    basemap_paths: Annotated[list[str] | None, Field(description="Optional basemap layers drawn under the choropleth (e.g., coastline, rivers, prefecture borders).")] = None,
+    basemap_paths: Annotated[list[str] | None, Field(description="Optional vector basemap layers drawn under the choropleth (e.g., coastline, rivers, prefecture borders).")] = None,
+    basemap: Annotated[BasemapName, Field(description='Tile basemap drawn under the data for real-world context. "positron"/"voyager" = neutral grey (best for choropleths), "dark_matter" = dark, "osm" = streets, "esri_imagery" = satellite. "none" keeps the legacy white background. No API key needed.')] = "none",
+    basemap_opacity: Annotated[float, Field(description="Opacity of the tile basemap, 0.0–1.0. Use 0.5–0.8 to mute it so the choropleth colors read on top.", ge=0.0, le=1.0)] = 1.0,
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
@@ -768,7 +868,11 @@ def qgis_render_choropleth(
         "n_classes": n_classes,
         "mode": mode,
         "palette": palette,
+        "diverging": diverging,
+        "center": center,
+        "label_field": label_field,
         "basemap_paths": abs_basemaps,
+        "basemap_spec": _resolve_basemap(basemap, basemap_opacity),
         "width": width,
         "height": height,
         "dpi": dpi,
@@ -805,6 +909,11 @@ def qgis_render_choropleth(
         max_value=result["max_value"],
         n_features=result["n_features"],
         join=join_block,
+        diverging=result.get("diverging", diverging),
+        center=result.get("center", center),
+        diverging_one_sided=result.get("diverging_one_sided", False),
+        basemap_attribution=result.get("basemap_attribution"),
+        basemap_source=result.get("basemap_source"),
     )
 
 
@@ -1123,7 +1232,10 @@ def qgis_render_od_flows(
     value_col: Annotated[str, Field(description="Flow magnitude column. Arc widths scale linearly with this.")] = "trip_count",
     zone_id_field: Annotated[str, Field(description="Zone identifier field on zones_layer_path. Must match origin_col / dest_col values.")] = "zone_id",
     top_n: Annotated[int | None, Field(description="Render only the top-N flows by value. None renders all matched flows.")] = None,
-    basemap_paths: Annotated[list[str] | None, Field(description="Optional basemap layers drawn under arcs.")] = None,
+    arc_style: Annotated[Literal["line", "arrow", "curved"], Field(description='Arc rendering: "line" (straight, default), "arrow" (directional), or "curved" (directional bezier). Arrows/curves scale width + head with flow.')] = "line",
+    basemap_paths: Annotated[list[str] | None, Field(description="Optional vector basemap layers drawn under arcs.")] = None,
+    basemap: Annotated[BasemapName, Field(description='Tile basemap drawn under the arcs ("positron"/"voyager"/"dark_matter"/"osm"/"esri_imagery"). "none" keeps the legacy white background. No API key needed.')] = "none",
+    basemap_opacity: Annotated[float, Field(description="Opacity of the tile basemap, 0.0-1.0.", ge=0.0, le=1.0)] = 1.0,
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
@@ -1154,6 +1266,7 @@ def qgis_render_od_flows(
     abs_zones = os.path.abspath(zones_layer_path)
     abs_output = os.path.abspath(output_png)
     abs_basemaps = [os.path.abspath(p) for p in (basemap_paths or [])]
+    basemap_spec = _resolve_basemap(basemap, basemap_opacity)
 
     with open(abs_od, encoding="utf-8", newline="") as f:
         reader = _csv.DictReader(f)
@@ -1186,7 +1299,9 @@ def qgis_render_od_flows(
         "output_png": abs_output,
         "flows": flows,
         "zone_id_field": zone_id_field,
+        "arc_style": arc_style,
         "basemap_paths": abs_basemaps,
+        "basemap_spec": basemap_spec,
         "width": width,
         "height": height,
         "dpi": dpi,
@@ -1203,6 +1318,8 @@ def qgis_render_od_flows(
         min_flow_rendered=result["min_flow_rendered"],
         n_unmatched_origins=result["n_unmatched_origins"],
         n_unmatched_destinations=result["n_unmatched_destinations"],
+        basemap_attribution=result.get("basemap_attribution"),
+        basemap_source=result.get("basemap_source"),
     )
 
 
@@ -1224,7 +1341,9 @@ def qgis_render_link_density(
     min_density: Annotated[float, Field(description="Drop links with density below this. Use to denoise rare-traffic links.", ge=0.0)] = 1.0,
     top_n: Annotated[int | None, Field(description="Render only the top-N densest links. None = all matched links.")] = None,
     extent: Annotated[list[float] | None, Field(description="Render extent [xmin, ymin, xmax, ymax] in EPSG:4326. If omitted, uses DRM layer extent.")] = None,
-    basemap_paths: Annotated[list[str] | None, Field(description="Optional basemap layers drawn under links.")] = None,
+    basemap_paths: Annotated[list[str] | None, Field(description="Optional vector basemap layers drawn under links.")] = None,
+    basemap: Annotated[BasemapName, Field(description='Tile basemap drawn under the links ("positron"/"voyager"/"dark_matter"/"osm"/"esri_imagery"). "none" keeps the legacy white background. No API key needed.')] = "none",
+    basemap_opacity: Annotated[float, Field(description="Opacity of the tile basemap, 0.0-1.0.", ge=0.0, le=1.0)] = 1.0,
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
@@ -1259,6 +1378,7 @@ def qgis_render_link_density(
     abs_output = os.path.abspath(output_png)
     abs_basemaps = [os.path.abspath(p) for p in (basemap_paths or [])]
     abs_csvs = [os.path.abspath(p) for p in trajectory_csvs]
+    basemap_spec = _resolve_basemap(basemap, basemap_opacity)
 
     if not os.path.exists(abs_drm):
         raise DRMNetworkNotFoundError(abs_drm)
@@ -1297,6 +1417,7 @@ def qgis_render_link_density(
         "palette": palette,
         "extent": list(extent) if extent is not None else None,
         "basemap_paths": abs_basemaps,
+        "basemap_spec": basemap_spec,
         "width": width,
         "height": height,
         "dpi": dpi,
@@ -1318,6 +1439,121 @@ def qgis_render_link_density(
         min_density=result["min_density"],
         max_density=result["max_density"],
         aggregation=aggregation,
+        basemap_attribution=result.get("basemap_attribution"),
+        basemap_source=result.get("basemap_source"),
+    )
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_render_diagram_map(
+    layer_path: Annotated[str, Field(description="Absolute path to a vector layer (polygons or points).")],
+    value_fields: Annotated[list[str], Field(description="Numeric fields to chart per feature (>=1). Each becomes a pie slice / bar.")],
+    output_png: Annotated[str, Field(description="Absolute path for the output PNG.")],
+    diagram_type: Annotated[Literal["pie", "bar"], Field(description="Chart drawn on each feature.")] = "pie",
+    size: Annotated[float, Field(description="Diagram size in mm.", gt=0.0, le=80.0)] = 10.0,
+    palette: Annotated[str, Field(description='Palette for the series colors (e.g. "Set2", "Dark2", "viridis").')] = "Set2",
+    extent: Annotated[list[float] | None, Field(description="Render extent [xmin, ymin, xmax, ymax] in the layer's CRS. Omit for full extent + 5%.")] = None,
+    basemap: Annotated[BasemapName, Field(description='Tile basemap under the diagrams. "none" = white background.')] = "none",
+    basemap_opacity: Annotated[float, Field(description="Tile basemap opacity 0.0-1.0.", ge=0.0, le=1.0)] = 1.0,
+    width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
+    height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
+    dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
+) -> DiagramMapResult:
+    """Render pie/bar charts on each map feature — "chart in map". v2 workflow tool.
+
+    When to use: show a small multivariate breakdown (e.g., arrivals vs departures,
+    mode split) per zone/station directly on the map, instead of a single
+    choropleth color. Each value_field becomes a pie slice or bar.
+
+    Returns: ``DiagramMapResult`` with the diagram type, charted fields, and
+    feature count.
+
+    Chains into: ``qgis_compose_layout``, ``qgis_figures_to_pptx``.
+    """
+    from qgis_mcp_workflows.executors import get_executor
+
+    abs_layer = os.path.abspath(layer_path)
+    abs_output = os.path.abspath(output_png)
+    params = {
+        "layer_path": abs_layer,
+        "value_fields": list(value_fields),
+        "output_png": abs_output,
+        "diagram_type": diagram_type,
+        "size": size,
+        "palette": palette,
+        "extent": list(extent) if extent is not None else None,
+        "basemap_spec": _resolve_basemap(basemap, basemap_opacity),
+        "width": width,
+        "height": height,
+        "dpi": dpi,
+    }
+    result = get_executor().dispatch("render_diagram_map", params, timeout=120)
+    return DiagramMapResult(
+        output_path=result["output_path"],
+        width=result["width"], height=result["height"], dpi=result["dpi"],
+        extent=result["extent"], crs=result["crs"], n_layers=result["n_layers"],
+        diagram_type=result["diagram_type"],
+        value_fields=result["value_fields"],
+        n_features=result["n_features"],
+        basemap_attribution=result.get("basemap_attribution"),
+        basemap_source=result.get("basemap_source"),
+    )
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_render_catchment(
+    points_path: Annotated[str, Field(description="Absolute path to a point layer (e.g. stations).")],
+    output_png: Annotated[str, Field(description="Absolute path for the output PNG.")],
+    method: Annotated[Literal["voronoi"], Field(description="Catchment method. 'voronoi' = Thiessen service areas (one cell per point, nearest-point tessellation). Buffer rings / network isochrones are future methods.")] = "voronoi",
+    extent: Annotated[list[float] | None, Field(description="Render extent [xmin, ymin, xmax, ymax] in the layer's CRS. Omit for full extent + 5%.")] = None,
+    basemap: Annotated[BasemapName, Field(description='Tile basemap under the catchments. "none" = white background.')] = "none",
+    basemap_opacity: Annotated[float, Field(description="Tile basemap opacity 0.0-1.0.", ge=0.0, le=1.0)] = 1.0,
+    width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
+    height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
+    dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
+) -> CatchmentResult:
+    """Render Voronoi service-area catchments around points. v2 workflow tool.
+
+    When to use: approximate each station/facility's service area as its Thiessen
+    cell (nearest-point tessellation) — the catchment method from the TransInfor
+    fig05. Uses a pure QgsGeometry Voronoi op (no Processing framework).
+
+    Returns: ``CatchmentResult`` with the method, point count, and catchment count.
+
+    Chains into: ``qgis_compose_layout``, ``qgis_figures_to_pptx``.
+    """
+    from qgis_mcp_workflows.executors import get_executor
+
+    abs_points = os.path.abspath(points_path)
+    abs_output = os.path.abspath(output_png)
+    params = {
+        "points_path": abs_points,
+        "output_png": abs_output,
+        "method": method,
+        "extent": list(extent) if extent is not None else None,
+        "basemap_spec": _resolve_basemap(basemap, basemap_opacity),
+        "width": width,
+        "height": height,
+        "dpi": dpi,
+    }
+    result = get_executor().dispatch("render_catchment", params, timeout=180)
+    return CatchmentResult(
+        output_path=result["output_path"],
+        width=result["width"], height=result["height"], dpi=result["dpi"],
+        extent=result["extent"], crs=result["crs"], n_layers=result["n_layers"],
+        method=result["method"],
+        n_points=result["n_points"],
+        n_catchments=result["n_catchments"],
+        basemap_attribution=result.get("basemap_attribution"),
+        basemap_source=result.get("basemap_source"),
     )
 
 
@@ -1382,6 +1618,59 @@ def qgis_export_layout(
         format=result["format"],
         n_pages=result["n_pages"],
         layout_name=result["layout_name"],
+    )
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_compose_layout(
+    layer_paths: Annotated[list[str], Field(description="Absolute paths to layers in bottom->top draw order (vector or raster). Styling comes from each layer's own saved style; default symbology otherwise.")],
+    output_path: Annotated[str, Field(description="Absolute output path; format inferred from extension (.png / .pdf / .svg).")],
+    title: Annotated[str | None, Field(description="Optional title across the top of the page.")] = None,
+    extent: Annotated[list[float] | None, Field(description="Map extent [xmin, ymin, xmax, ymax] in the layers' CRS. If omitted, uses the union of layer extents + 5% padding.")] = None,
+    page: Annotated[Literal["a4_landscape", "a4_portrait", "a3_landscape", "square"], Field(description="Page size preset.")] = "a4_landscape",
+    legend: Annotated[bool, Field(description="Add a legend linked to the map.")] = True,
+    scale_bar: Annotated[bool, Field(description="Add a scale bar linked to the map.")] = True,
+    north_arrow: Annotated[bool, Field(description="Add a north arrow from QGIS's bundled SVGs.")] = True,
+    dpi: Annotated[int, Field(description="Export DPI.", ge=72, le=600)] = 300,
+) -> ComposeLayoutResult:
+    """Compose a deck-ready print layout from layers and export it. v2 workflow tool.
+
+    When to use: turn one or more data/rendered layers into a publication figure
+    with a titled map panel plus a linked legend, scale bar and north arrow — the
+    gap that ``qgis_export_layout`` (which only exports pre-authored .qgz layouts)
+    leaves open. Single panel for now; multi-panel / inset is a future extension.
+
+    Returns: ``ComposeLayoutResult`` with output path, format, layer count, the
+    furniture items added, and page size in mm.
+
+    Chains into: ``qgis_figures_to_pptx``.
+    """
+    from qgis_mcp_workflows.executors import get_executor
+
+    abs_layers = [os.path.abspath(p) for p in layer_paths]
+    abs_output = os.path.abspath(output_path)
+    params = {
+        "layer_paths": abs_layers,
+        "output_path": abs_output,
+        "title": title,
+        "extent": list(extent) if extent is not None else None,
+        "page": page,
+        "legend": legend,
+        "scale_bar": scale_bar,
+        "north_arrow": north_arrow,
+        "dpi": dpi,
+    }
+    result = get_executor().dispatch("compose_layout", params, timeout=120)
+    return ComposeLayoutResult(
+        output_path=result["output_path"],
+        format=result["format"],
+        n_layers=result["n_layers"],
+        items=result["items"],
+        page_size_mm=result["page_size_mm"],
     )
 
 
