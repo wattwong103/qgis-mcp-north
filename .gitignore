@@ -12,6 +12,12 @@ wheels/
 .ruff_cache/
 .benchmarks/
 
+# Other agents' local config. CLAUDE.md is tracked because it is the shared
+# project brief; these are per-tool scratch that shouldn't diverge in git.
+.agents/
+.codex/
+AGENTS.md
+
 # Virtual environments
 .venv
 data/
