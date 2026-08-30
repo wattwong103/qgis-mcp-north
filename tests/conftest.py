@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import os
+import functools
 import socket
+import subprocess
 from collections.abc import Callable
 from typing import Any
 
@@ -20,17 +21,39 @@ def _plugin_reachable(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> boo
         return False
 
 
+@functools.cache
 def _headless_available() -> bool:
-    """Headless transport requires an explicit launcher path env var, OR PyQGIS on PATH."""
-    if os.environ.get("QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER"):
-        return True
-    # Best-effort: check if `qgis` or `qgis-bin` is on PATH (Linux/macOS unverified).
-    import shutil
+    """Can PyQGIS actually be imported through the resolved launcher?
 
-    for candidate in ("python-qgis-ltr.bat", "python-qgis.bat", "qgis", "qgis-bin"):
-        if shutil.which(candidate):
-            return True
-    return False
+    Note this asks a different question from "did a launcher path resolve".
+    ``HeadlessExecutor._resolve_launcher()`` falls back to ``sys.executable`` on
+    Linux and macOS, which always exists — so a path-only check answers True on
+    a machine with no QGIS at all, and the live tests run and fail instead of
+    skipping. CI caught exactly that.
+
+    The previous heuristic had the opposite flaw: it looked for ``qgis`` on PATH,
+    which a macOS ``QGIS.app`` install does not put there, so headless tests
+    skipped on a machine where headless works.
+
+    Spawning the interpreter is the only honest answer. Cached — it costs one
+    subprocess per session, at collection time.
+    """
+    from qgis_mcp_workflows.errors import HeadlessUnavailableError
+    from qgis_mcp_workflows.executors.headless import HeadlessExecutor
+
+    try:
+        launcher = HeadlessExecutor._resolve_launcher()
+    except HeadlessUnavailableError:
+        return False
+    try:
+        probe = subprocess.run(
+            [launcher, "-c", "import qgis.core"],
+            capture_output=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
 
 
 PLUGIN_AVAILABLE = _plugin_reachable()
@@ -42,7 +65,10 @@ requires_plugin = pytest.mark.skipif(
 )
 requires_headless = pytest.mark.skipif(
     not HEADLESS_AVAILABLE,
-    reason="Set QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER to a python-qgis(-ltr).bat (Windows) to run headless tests",
+    reason=(
+        "no PyQGIS importable from the resolved launcher — install QGIS, or set "
+        "QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER to its python-qgis(-ltr).bat / bundled python3"
+    ),
 )
 
 
