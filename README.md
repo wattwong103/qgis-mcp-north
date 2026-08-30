@@ -46,7 +46,7 @@ The headless runner injects a stub `iface` that no-ops UI calls. Every command
 handler that doesn't touch the canvas / layer-tree-view works in both transports
 for free — a v0.4 architectural promise that v0.5+ tools inherit.
 
-## Tools (13 standalone, 5 in compound mode)
+## Tools (17 standalone — 16 workflow + `qgis_eval`; 5 grouped in compound mode)
 
 | Tool | Purpose |
 |---|---|

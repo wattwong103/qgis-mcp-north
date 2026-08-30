@@ -12,7 +12,7 @@ This document is the spec. Implementation follows. If a tool's signature, respon
 
 Three problems with upstream that the fork solves:
 
-**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **12 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
+**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **16 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
 
 **No headless mode.** Upstream requires QGIS Desktop running with the plugin enabled. That's incompatible with scheduled overnight runs, CI, or any automation. We add a **PyQGIS-subprocess transport** alongside the existing plugin transport. Same tools, two backends, selected by config or CLI flag.
 
@@ -94,7 +94,7 @@ Upstream's plugin and server stay untouched. If the user installs both, Claude D
 
 ---
 
-## 4. Tool surface (15 workflow + 1 escape hatch)
+## 4. Tool surface (16 workflow + 1 escape hatch)
 
 For each tool: signature, what it does, response shape, and the typical chain.
 

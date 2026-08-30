@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `qgis-mcp-workflows` (v1.1.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
 
 Key differences from upstream:
-- 12 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
+- 16 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
 - Two transports: `plugin` (TCP socket → running QGIS) and `headless` (PyQGIS subprocess), selected via `--transport=auto|plugin|headless`.
 - Plugin folder: `qgis_mcp_workflows_plugin/`. Python package: `qgis-mcp-workflows` (importable as `qgis_mcp_workflows`). Default socket port: **9877** (vs upstream 9876). Both servers can run side-by-side.
 
