@@ -292,6 +292,7 @@ class QgisMCPServer(QObject):
                 "render_map_base64": self.render_map_base64,
                 "render_layers_to_path": self.render_layers_to_path,
                 "render_choropleth": self.render_choropleth,
+                "list_basemaps": self.list_basemaps,
                 "render_diagram_map": self.render_diagram_map,
                 "render_catchment": self.render_catchment,
                 "render_trajectory": self.render_trajectory,
@@ -1102,6 +1103,9 @@ class QgisMCPServer(QObject):
             "n_layers": len(layers),
         }
 
+    # Named for discovery only — the MCP server owns the preset URLs.
+    _BUILTIN_PRESET_NAMES: ClassVar[tuple] = ("light", "dark", "streets", "imagery")
+
     _CLASSIFICATION_METHODS: ClassVar[dict] = {
         "quantile": QgsClassificationQuantile,
         "equal_interval": QgsClassificationEqualInterval,
@@ -1109,16 +1113,88 @@ class QgisMCPServer(QObject):
         "pretty": QgsClassificationPrettyBreaks,
     }
 
+    def list_basemaps(self, group=None, keyless_only=False, **kwargs):
+        """Catalog of basemaps available to render tools, for discovery.
+
+        Without this, a ``qms:<id>`` argument is unguessable — the ids live in
+        INI directory names inside the QGIS profile, not in any tool schema.
+
+        Returns the built-in presets plus every usable QuickMapServices source,
+        and — when QMS is installed — the entries that were filtered out with
+        the reason, so an absence is explainable rather than mysterious.
+        """
+        out = {"presets": list(self._BUILTIN_PRESET_NAMES), "qms": [], "qms_rejected": []}
+        try:
+            from qgis_mcp_workflows_plugin.quickmapservices import (
+                QmsUnavailableError,
+                catalog,
+                is_keyed,
+            )
+        except ImportError as exc:  # pragma: no cover — packaging error, not user error
+            out["qms_error"] = "quickmapservices module unavailable: %r" % (exc,)
+            return out
+
+        try:
+            entries, rejected = catalog(include_rejected=True)
+        except QmsUnavailableError as exc:
+            out["qms_error"] = str(exc)
+            return out
+
+        for e in entries:
+            if group and e["group"].lower() != group.lower():
+                continue
+            # "keyless" is a heuristic on known key-walled hosts, not a promise:
+            # a provider can start requiring a key without changing its URL, which
+            # is exactly how the CARTO presets broke.
+            if keyless_only and is_keyed(e["url"]):
+                continue
+            out["qms"].append({
+                "id": e["id"], "alias": e["alias"], "group": e["group"],
+                "zmin": e["zmin"], "zmax": e["zmax"],
+                "attribution": e["attribution"], "licence": e["licence"],
+            })
+        out["qms_rejected"] = [
+            {"id": i, "reason": k, "detail": d} for i, k, d in rejected
+        ]
+        out["n_qms"] = len(out["qms"])
+        return out
+
     def _load_basemap_layer(self, basemap_spec, project, transient_ids):
         """Load an XYZ tile basemap from a basemap_spec, or return (None, ...).
 
-        Returns ``(layer_or_None, source_label_or_None)``. On success the raster
+        Returns ``(layer_or_None, source_label_or_None, resolved_spec_or_None)``.
+        The third element matters for ``kind="qms"`` specs, where the URL,
+        zoom range and attribution are only known after resolution — callers
+        rebind their ``basemap_spec`` to it so the response reports the credit
+        that belongs to what was actually drawn. On success the raster
         layer is added to ``project`` and its id appended to ``transient_ids`` so
         the existing ``finally`` teardown removes it. The user's project keeps no
-        surviving state. source_label is for the response (e.g. "positron (live xyz)").
+        surviving state. source_label is for the response (e.g. "light (live xyz)").
+
+        ``isValid()`` is the only check available here, and it is weaker than it
+        looks: it says the *provider* was constructed, not that a single tile
+        ever arrived. A tile server that has moved behind an API key is
+        indistinguishable at this layer — CARTO's key-walled CDN answers
+        HTTP 200 with a well-formed PNG that happens to read "API KEY REQUIRED"
+        in every tile. No status code, content type, or QGIS API call
+        distinguishes that from a real basemap; only looking at the pixels does.
+        Do not add a runtime "is the basemap alive" probe here — it would cost a
+        network round trip per render and still not answer the question.
+        Preset liveness is covered instead by ``tests/test_basemap_liveness.py``
+        (``pytest -m network``), which inspects tile colour complexity.
         """
         if not basemap_spec:
-            return None, None
+            return None, None, None
+        # A {"kind": "qms", "id": ...} spec is resolved against the local
+        # QuickMapServices catalog here rather than MCP-side: the catalog lives in
+        # the QGIS profile, which exists wherever QGIS does and not necessarily on
+        # the machine running the MCP server.
+        if basemap_spec.get("kind") == "qms":
+            from qgis_mcp_workflows_plugin.quickmapservices import resolve as _qms_resolve
+
+            basemap_spec = _qms_resolve(
+                basemap_spec["id"], opacity=basemap_spec.get("opacity", 1.0)
+            )
         name = basemap_spec.get("name", "basemap")
         url = basemap_spec["url"]
         zmin = basemap_spec.get("zmin", 0)
@@ -1129,7 +1205,7 @@ class QgisMCPServer(QObject):
             QgsMessageLog.logMessage(
                 f"Basemap {name!r} failed to load: {uri}", self.LOG_TAG, MSG_WARNING
             )
-            return None, f"{name} (failed)"
+            return None, f"{name} (failed)", basemap_spec
         opacity = float(basemap_spec.get("opacity", 1.0))
         if opacity < 1.0:
             try:
@@ -1138,7 +1214,7 @@ class QgisMCPServer(QObject):
                 pass
         project.addMapLayer(bm)
         transient_ids.append(bm.id())
-        return bm, f"{name} (live xyz)"
+        return bm, f"{name} (live xyz)", basemap_spec
 
     def _reproject_extent_to_3857(self, rect, src_crs):
         """Reproject a QgsRectangle from src_crs to EPSG:3857 (Web Mercator).
@@ -1398,7 +1474,7 @@ class QgisMCPServer(QObject):
                         f"Basemap skipped (invalid): {bm_path}", self.LOG_TAG, MSG_WARNING
                     )
 
-            tile_bm, basemap_source = self._load_basemap_layer(
+            tile_bm, basemap_source, basemap_spec = self._load_basemap_layer(
                 basemap_spec, project, transient_ids
             )
             # top→bottom for setLayers: data, vector basemaps, then tile basemap at the very bottom
@@ -1903,7 +1979,7 @@ class QgisMCPServer(QObject):
                     transient_ids.append(bm.id())
                     basemap_layers.append(bm)
 
-            tile_bm, basemap_source = self._load_basemap_layer(
+            tile_bm, basemap_source, basemap_spec = self._load_basemap_layer(
                 basemap_spec, project, transient_ids
             )
             ordered_layers = [mem, zones, *basemap_layers]
@@ -2032,7 +2108,7 @@ class QgisMCPServer(QObject):
             })
             pts.setRenderer(QgsSingleSymbolRenderer(psym))
 
-            tile_bm, basemap_source = self._load_basemap_layer(
+            tile_bm, basemap_source, basemap_spec = self._load_basemap_layer(
                 basemap_spec, project, transient_ids
             )
             ordered_layers = [pts, voro]
@@ -2169,7 +2245,7 @@ class QgisMCPServer(QObject):
                     pass
             layer.setDiagramLayerSettings(dls)
 
-            tile_bm, basemap_source = self._load_basemap_layer(
+            tile_bm, basemap_source, basemap_spec = self._load_basemap_layer(
                 basemap_spec, project, transient_ids
             )
             ordered_layers = [layer]
@@ -2348,7 +2424,7 @@ class QgisMCPServer(QObject):
                         f"Basemap skipped (invalid): {bm_path}", self.LOG_TAG, MSG_WARNING
                     )
 
-            tile_bm, basemap_source = self._load_basemap_layer(
+            tile_bm, basemap_source, basemap_spec = self._load_basemap_layer(
                 basemap_spec, project, transient_ids
             )
             # basemaps below, DRM links on top

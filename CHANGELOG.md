@@ -3,6 +3,74 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.5.0 — 2026-08-31 — QuickMapServices basemaps + preset repair
+
+### Fixed: three basemap presets silently rendered watermarked tiles
+
+`positron`, `dark_matter` and `voyager` pointed at `basemaps.cartocdn.com`, which
+CARTO has since put behind an API key. Nothing detected it — the CDN answers HTTP
+200 with a well-formed PNG reading "API KEY REQUIRED" in every tile, so
+`isValid()` passes and the response reports a live basemap. Figures looked
+plausible and encoded a watermark.
+
+Presets are now named for **role** rather than vendor — `light`, `dark`,
+`streets`, `imagery` — because the vendor changing under us is exactly the
+failure mode. Old names remain accepted as aliases, and the response reports the
+canonical name so it says what was actually drawn.
+
+- `light` → Esri World_Light_Gray_Base, `dark` → Esri World_Dark_Gray_Base
+- `streets` → OpenStreetMap (where `voyager` and `osm` now resolve)
+- `imagery` → Esri World_Imagery
+
+`voyager` had no keyless like-for-like replacement, so it resolves to the nearest
+honest equivalent rather than an Esri service pretending to be it. Attribution
+strings are copied verbatim from each provider's own metadata (the ArcGIS REST
+`copyrightText` field), which also corrects the imagery credit — it named Maxar
+after Esri had switched the source to Vantor.
+
+### Added: QuickMapServices as a basemap source
+
+`basemap="qms:<id>"` draws any usable source from the QuickMapServices catalog
+installed in the QGIS profile — 55 of ~100 on a stock install, against the 4
+built-in presets. QMS need not be loaded or even enabled; only present on disk,
+so it works in headless mode.
+
+- `qgis_mcp_workflows_plugin/quickmapservices.py` — the single implementation.
+  Nothing else parses QMS INIs.
+- `qgis_list_basemaps` (new tool, 18 total) — presets plus the catalog, filterable
+  by `group` and `keyless_only`, with `qms_rejected` explaining every exclusion.
+
+Resolution happens **plugin-side**, not in the MCP server: the catalog lives in
+the QGIS user profile, which exists wherever QGIS runs and not necessarily on the
+machine running the server — under `--transport=plugin` against another host,
+MCP-side resolution would read the wrong profile or none.
+
+Sources are filtered to what a bare `type=xyz` provider URI can honestly draw,
+and each rejection is reported with a reason rather than silently omitted:
+non-EPSG:3857 sources (they would draw misregistered — plausible and wrong),
+MVT/WMS entries that need a different provider, and providers whose terms
+restrict tile access to their own apps. Resolution mirrors QMS's own loader:
+zoom defaults, the `{y}`→`{-y}` rewrite for bottom-origin schemes, and the
+`=`/`&` percent-escaping without which any URL carrying a query string is
+corrupted.
+
+Unknown ids suggest near matches. `BasemapNotFoundError` is new.
+
+### On detecting a dead basemap at runtime: not possible
+
+Documented at `_load_basemap_layer` rather than left to be re-derived. A
+key-walled tile is a valid 200 PNG; no status code or QGIS call separates it from
+a real one. Only the pixels do. `tests/test_basemap_liveness.py` (`pytest -m
+network`, deselected by default) fetches a real tile per preset and asserts
+colour complexity — 21-24 distinct colours for the watermarked CARTO tile against
+179-724 for working services. Mutation-verified. Sample dense urban tiles only: a
+uniform tile reads as broken on every provider, working or not.
+
+Also clears the two long-standing RUF001 lint errors, so `ruff check src/ tests/`
+is clean.
+
+202 passed, 3 skipped; 8 network tests pass live.
+
 ## v1.4.1 — 2026-08-31 — macOS support
 
 The server and both transports now run on macOS. Previously the headless
