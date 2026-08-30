@@ -36,6 +36,14 @@ ignore = [
     "E501",    # line too long — handled by formatter
 ]
 
+# The plugin package runs under QGIS's bundled interpreter — Python 3.9 on
+# QGIS-LTR for macOS — not the server's 3.12. Without this, ruff's UP rules
+# offer a one-keystroke auto-fix rewriting `timezone.utc` to `datetime.UTC`,
+# which is 3.11+ and raises ImportError at plugin load. That exact rewrite is
+# the bug fixed in v1.4.1; this stops it being suggested again.
+[tool.ruff.per-file-target-version]
+"qgis_mcp_workflows_plugin/**" = "py39"
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
 "_archive/*" = ["ALL"]

@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A second push to a PR cancels the first run rather than queueing behind it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned deliberately. `uv tool run ruff` floats to latest, and a new ruff
+  # release adds rules that turn CI red with no code change.
+  RUFF_VERSION: "0.16.5"
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Scope matches the invocation documented in CLAUDE.md. install.py,
+      # scripts/ and qgis_mcp_workflows_plugin/ are deliberately excluded:
+      # they carry ~29 pre-existing findings, and pulling them in here would
+      # make CI red on day one. Widening the scope is its own piece of work.
+      - name: ruff check
+        run: uv tool run ruff@${{ env.RUFF_VERSION }} check src/ tests/
+
+  test:
+    name: pytest (py3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # --all-extras so the collected set matches a developer's local run.
+      # Without the drm extra, tests/test_build_drm_network_gpkg.py skips
+      # itself via importorskip and CI reads greener than it is.
+      - name: Install
+        run: uv sync --all-extras
+
+      # No QGIS on the runner. Tests needing one are guarded by skipif in
+      # tests/conftest.py and skip cleanly; the `network` and `bench` markers
+      # are deselected by addopts in pyproject.toml, so CI never depends on a
+      # third-party tile server being up.
+      - name: pytest
+        run: uv run --no-sync pytest tests/ -v --tb=short
+
+  plugin-py39:
+    name: plugin compiles on py3.9
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      # qgis_mcp_workflows_plugin/ runs under QGIS's bundled interpreter —
+      # Python 3.9 on QGIS-LTR for macOS, not the server's 3.12. A 3.10+
+      # construct here is a load-time failure on a machine that is usually not
+      # the one that wrote it, so it is worth catching before merge.
+      #
+      # Scope note: this catches SYNTAX only. It would not have caught the bug
+      # actually hit in v1.4.1 (`from datetime import UTC`), which parses fine
+      # on 3.9 and fails at import. Two other things cover that: ruff's
+      # per-file-target-version in pyproject.toml stops it being suggested as
+      # an auto-fix, and tests/test_macos_support.py asserts against it
+      # directly. A genuine import needs PyQGIS, which isn't installable here.
+      - name: compileall under 3.9
+        run: python -m compileall -q qgis_mcp_workflows_plugin/
