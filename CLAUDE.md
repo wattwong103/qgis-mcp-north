@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `qgis-mcp-workflows` (v1.1.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
 
 Key differences from upstream:
-- 17 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
+- 18 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
 - Two transports: `plugin` (TCP socket → running QGIS) and `headless` (PyQGIS subprocess), selected via `--transport=auto|plugin|headless`.
 - Plugin folder: `qgis_mcp_workflows_plugin/`. Python package: `qgis-mcp-workflows` (importable as `qgis_mcp_workflows`). Default socket port: **9877** (vs upstream 9876). Both servers can run side-by-side.
 
@@ -79,7 +79,7 @@ uv tool run ruff check src/ tests/
 | `QGIS_MCP_WORKFLOWS_LOG_FILE` | `~/.local/share/qgis-mcp-workflows/server.log` | Rotating log file (5MB × 3) — empty disables file logging |
 | `QGIS_MCP_WORKFLOWS_LOG_LEVEL` | `INFO` | File log level. Console (stderr) is always WARNING+ |
 
-## MCP Tools (18 total as of v1.4; 5 grouped tools in compound mode. See `docs/DESIGN.md` §4 for full signatures.)
+## MCP Tools (19 total as of v1.5; 5 grouped tools in compound mode. See `docs/DESIGN.md` §4 for full signatures.)
 
 | Tool | Status | Notes |
 |---|---|---|
@@ -100,6 +100,7 @@ uv tool run ruff check src/ tests/
 | `qgis_batch_render` | ✅ v0.5 | Fan-out per attribute value; active-layer convention (saved-active → first vector fallback); manifest + per-value errors; `subset_string` reset in `finally` |
 | `qgis_figures_to_pptx` | ✅ v0.3 | Pure python-pptx; `two_column` + `title_image_caption` degrade to `title_only` |
 | `qgis_list_basemaps` | ✅ v1.5 | Discovery for `basemap=`: built-in presets + every usable QuickMapServices source in the QGIS profile, plus `qms_rejected` explaining what was filtered (non-3857 CRS, licence-restricted providers) and why. |
+| `qgis_render_from_duckdb` | ✅ v1.6 | Query a DuckDB file and render the result — no CSV intermediate. Geometry via `geometry_column` (WKT text) or `lon_column`/`lat_column`. Connection is READ-ONLY and the query is LIMIT-wrapped, so a mistaken `SELECT *` against `viz/pflow.duckdb` (~8.8 GB) can neither mutate nor OOM. Plugin handler: `render_wkt_features`. |
 | `qgis_eval` | ✅ v1.0 | Arbitrary PyQGIS escape hatch with `return_vars` capture. Plugin's `execute_code` augmented with `_json_safe()` fallback (non-serializable values → `repr()`). |
 
 ## Key Details

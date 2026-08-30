@@ -96,6 +96,7 @@ from .compat import (
     AGG_STDEV,
     AGG_SUM,
     GEOM_LINE,
+    GEOM_POINT,
     GEOM_POLYGON,
     IODEVICE_WRITEONLY,
     LAYER_RASTER,
@@ -293,6 +294,7 @@ class QgisMCPServer(QObject):
                 "render_layers_to_path": self.render_layers_to_path,
                 "render_choropleth": self.render_choropleth,
                 "list_basemaps": self.list_basemaps,
+                "render_wkt_features": self.render_wkt_features,
                 "render_diagram_map": self.render_diagram_map,
                 "render_catchment": self.render_catchment,
                 "render_trajectory": self.render_trajectory,
@@ -497,7 +499,7 @@ class QgisMCPServer(QObject):
         if qvariant.isNull():
             return None
         value = qvariant.value()
-        if isinstance(value, int | float | str | bool | type(None)):
+        if isinstance(value, (int, float, str, bool, type(None))):
             return value
         elif hasattr(value, "toPyDate"):
             return value.toPyDate().isoformat()
@@ -513,7 +515,7 @@ class QgisMCPServer(QObject):
         """Convert a feature attribute value to a JSON-serializable type."""
         if isinstance(value, QVariant):
             return self._convert_to_python_type(value)
-        if isinstance(value, int | float | str | bool | type(None)):
+        if isinstance(value, (int, float, str, bool, type(None))):
             return value
         try:
             return str(value)
@@ -675,8 +677,40 @@ class QgisMCPServer(QObject):
             raise Exception(f"Layer not found: {layer_id}")
 
     def get_layer_features(
-        self, layer_id, limit=10, offset=0, expression=None, include_geometry=False, **kwargs
+        self,
+        layer_id,
+        limit=10,
+        offset=0,
+        expression=None,
+        include_geometry=False,
+        geometry_format="summary",
+        geometry_precision=6,
+        simplify_tolerance=0.0,
+        **kwargs,
     ):
+        """Read features, optionally with geometry.
+
+        ``geometry_format`` controls what polygons and lines return:
+
+        - ``"summary"`` (default) — type, wkb_type, a point count and a bbox.
+          Points have always returned real WKT; only polygons and lines were
+          summarised, because a single prefecture boundary can run to megabytes
+          of WKT and this travels over a length-prefixed socket.
+        - ``"wkt"`` — real WKT for every geometry type. Opt-in precisely because
+          of that size: pair it with a small ``limit``, a modest
+          ``geometry_precision``, and ``simplify_tolerance`` when the consumer
+          only needs shape rather than survey-grade vertices.
+
+        ``simplify_tolerance`` is in layer CRS units and applies only to the WKT
+        path; 0.0 disables it. The summary path keeps its historical fixed 0.001
+        simplification, which exists only to make the point count cheap.
+        """
+        if geometry_format not in ("summary", "wkt"):
+            raise Exception(
+                "Unknown geometry_format %r. Use 'summary' (default) or 'wkt'."
+                % (geometry_format,)
+            )
+
         project = QgsProject.instance()
 
         if layer_id not in project.mapLayers():
@@ -713,7 +747,25 @@ class QgisMCPServer(QObject):
 
                 wkb_type_name = QgsWkbTypes.displayString(geom.wkbType())
 
-                if geom_type in [GEOM_POLYGON, GEOM_LINE]:
+                if geometry_format == "wkt":
+                    out_geom = geom
+                    if simplify_tolerance and simplify_tolerance > 0:
+                        simplified = geom.simplify(float(simplify_tolerance))
+                        # simplify() can return an empty geometry on degenerate
+                        # input; keep the original rather than emit nothing.
+                        if not simplified.isEmpty():
+                            out_geom = simplified
+                    bbox = geom.boundingBox()
+                    geom_obj = {
+                        "type": geom_type,
+                        "wkb_type": wkb_type_name,
+                        "wkt": out_geom.asWkt(precision=int(geometry_precision)),
+                        "bbox": [
+                            bbox.xMinimum(), bbox.yMinimum(),
+                            bbox.xMaximum(), bbox.yMaximum(),
+                        ],
+                    }
+                elif geom_type in [GEOM_POLYGON, GEOM_LINE]:
                     simplified_geom = geom.simplify(0.001)
                     points_count = len(simplified_geom.asWkt().split(","))
                     geom_obj = {
@@ -1158,6 +1210,184 @@ class QgisMCPServer(QObject):
         ]
         out["n_qms"] = len(out["qms"])
         return out
+
+    def render_wkt_features(
+        self,
+        features,
+        output_png,
+        crs="EPSG:4326",
+        value_field=None,
+        n_classes=5,
+        mode="quantile",
+        palette="YlOrRd",
+        diverging=False,
+        center=0.0,
+        line_width=0.6,
+        point_size=2.5,
+        basemap_spec=None,
+        width=1600,
+        height=1200,
+        dpi=150,
+        background="white",
+        **kwargs,
+    ):
+        """Render a list of WKT features. Transport-agnostic rendering primitive.
+
+        ``features`` is ``[{"wkt": "...", **attributes}]``. Geometry type is taken
+        from the first feature that parses; mixed-type inputs are rendered on one
+        layer, which QGIS allows but styles with a single symbol.
+
+        Exists so callers holding geometry from somewhere other than a file — a
+        DuckDB query, a database cursor — can render without first writing a
+        shapefile. Loads nothing into the user's project permanently.
+        """
+        if not features:
+            raise Exception("render_wkt_features: features list is empty")
+
+        project = QgsProject.instance()
+        transient_ids = []
+
+        try:
+            # Geometry type from the first parseable WKT; QGIS memory layers are
+            # single-type, so this decides the layer.
+            first_geom = None
+            for f in features:
+                g = QgsGeometry.fromWkt(f.get("wkt") or "")
+                if g and not g.isNull():
+                    first_geom = g
+                    break
+            if first_geom is None:
+                raise Exception(
+                    "render_wkt_features: no feature carried parseable WKT. "
+                    "Check the geometry column actually holds WKT text."
+                )
+            type_name = {
+                GEOM_POINT: "Point", GEOM_LINE: "LineString", GEOM_POLYGON: "Polygon",
+            }.get(first_geom.type())
+            if type_name is None:
+                raise Exception(
+                    "render_wkt_features: unsupported geometry type %s" % first_geom.type()
+                )
+
+            # Attribute schema from the union of keys, typed by first non-null value.
+            attr_names = []
+            for f in features:
+                for k in f:
+                    if k != "wkt" and k not in attr_names:
+                        attr_names.append(k)
+            field_types = {}
+            for name in attr_names:
+                field_types[name] = "string"
+                for f in features:
+                    v = f.get(name)
+                    if v is None:
+                        continue
+                    if isinstance(v, bool):
+                        field_types[name] = "string"
+                    elif isinstance(v, (int, float)):
+                        field_types[name] = "double"
+                    break
+
+            uri = "%s?crs=%s" % (type_name, crs)
+            for name in attr_names:
+                uri += "&field=%s:%s" % (name, field_types[name])
+            mem = QgsVectorLayer(uri, "_duckdb_features", "memory")
+            if not mem.isValid():
+                raise Exception("Failed to create memory layer: %s" % uri)
+            project.addMapLayer(mem)
+            transient_ids.append(mem.id())
+
+            n_skipped = 0
+            new_features = []
+            for f in features:
+                geom = QgsGeometry.fromWkt(f.get("wkt") or "")
+                if not geom or geom.isNull():
+                    n_skipped += 1
+                    continue
+                feat = QgsFeature(mem.fields())
+                feat.setGeometry(geom)
+                feat.setAttributes([f.get(name) for name in attr_names])
+                new_features.append(feat)
+            mem.dataProvider().addFeatures(new_features)
+            mem.updateExtents()
+
+            breaks = None
+            if value_field:
+                if value_field not in attr_names:
+                    raise Exception(
+                        "Field %r not found on the query result; available: %s"
+                        % (value_field, attr_names)
+                    )
+                renderer, breaks, _one_sided = self._build_graduated_renderer(
+                    mem, value_field, n_classes=n_classes, mode=mode,
+                    palette=palette, diverging=diverging, center=center,
+                )
+                mem.setRenderer(renderer)
+            elif type_name == "LineString":
+                mem.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple(
+                    {"line_color": "#1f78b4", "line_width": str(line_width)})))
+            elif type_name == "Point":
+                mem.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple(
+                    {"color": "#1f78b4", "size": str(point_size), "outline_style": "no"})))
+
+            tile_bm, basemap_source, basemap_spec = self._load_basemap_layer(
+                basemap_spec, project, transient_ids
+            )
+            ordered_layers = [mem] + ([tile_bm] if tile_bm is not None else [])
+
+            extent_rect = QgsRectangle(mem.extent())
+            dx = extent_rect.width() * 0.05 or 0.001
+            dy = extent_rect.height() * 0.05 or 0.001
+            extent_rect = QgsRectangle(
+                extent_rect.xMinimum() - dx, extent_rect.yMinimum() - dy,
+                extent_rect.xMaximum() + dx, extent_rect.yMaximum() + dy,
+            )
+
+            ms = QgsMapSettings()
+            ms.setLayers(ordered_layers)
+            ms.setOutputSize(QSize(int(width), int(height)))
+            ms.setOutputDpi(int(dpi))
+            if tile_bm is not None:
+                out_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+                extent_rect = self._reproject_extent_to_3857(extent_rect, mem.crs())
+                ms.setDestinationCrs(out_crs)
+            else:
+                out_crs = mem.crs()
+                ms.setDestinationCrs(out_crs)
+            ms.setExtent(extent_rect)
+            color = QColor(background)
+            if not color.isValid():
+                color = QColor(255, 255, 255)
+            ms.setBackgroundColor(color)
+
+            job = QgsMapRendererParallelJob(ms)
+            job.start()
+            job.waitForFinished()
+            if not job.renderedImage().save(output_png):
+                raise Exception("Failed to save render to %s" % output_png)
+
+            return {
+                "output_path": output_png,
+                "width": int(width), "height": int(height), "dpi": int(dpi),
+                "extent": [
+                    extent_rect.xMinimum(), extent_rect.yMinimum(),
+                    extent_rect.xMaximum(), extent_rect.yMaximum(),
+                ],
+                "crs": out_crs.authid() or crs,
+                "n_layers": len(ordered_layers),
+                "geometry_type": type_name,
+                "n_features": len(new_features),
+                "n_skipped": n_skipped,
+                "fields": attr_names,
+                "field": value_field,
+                "breaks": breaks,
+                "basemap_attribution": basemap_spec.get("attribution") if basemap_spec else None,
+                "basemap_source": basemap_source,
+            }
+        finally:
+            for layer_id in transient_ids:
+                with contextlib.suppress(Exception):
+                    project.removeMapLayer(layer_id)
 
     def _load_basemap_layer(self, basemap_spec, project, transient_ids):
         """Load an XYZ tile basemap from a basemap_spec, or return (None, ...).

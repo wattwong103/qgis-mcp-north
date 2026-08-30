@@ -57,6 +57,11 @@ try:
 except AttributeError:
     GEOM_LINE = QgsWkbTypes.LineGeometry
 
+try:
+    GEOM_POINT = Qgis.GeometryType.Point
+except AttributeError:
+    GEOM_POINT = QgsWkbTypes.PointGeometry
+
 # ── Raster stats ─────────────────────────────────────────────────────
 try:
     RASTER_STATS_ALL = Qgis.RasterBandStatistic.All

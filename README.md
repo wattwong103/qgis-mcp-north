@@ -46,10 +46,11 @@ The headless runner injects a stub `iface` that no-ops UI calls. Every command
 handler that doesn't touch the canvas / layer-tree-view works in both transports
 for free — a v0.4 architectural promise that v0.5+ tools inherit.
 
-## Tools (18 standalone — 17 workflow + `qgis_eval`; 5 grouped in compound mode)
+## Tools (19 standalone — 18 workflow + `qgis_eval`; 5 grouped in compound mode)
 
 | Tool | Purpose |
 |---|---|
+| `qgis_render_from_duckdb` | Render a DuckDB query result directly, skipping the CSV intermediate |
 | `qgis_list_basemaps` | List every basemap `basemap=` accepts here: presets + QuickMapServices catalog |
 | `qgis_layer_inspect` | Metadata-only inspect (no project mutation) |
 | `qgis_load_layer` | Register layer + return layer_id; optional CRS override |

@@ -3,6 +3,55 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.6.0 — 2026-08-31 — v0.3 roadmap salvage
+
+Closes the two items the v0.3 roadmap flagged and v1.x never shipped. With these
+done the roadmap doc holds nothing DESIGN.md doesn't already carry.
+
+### Fixed: the plugin was broken on Python 3.9 (i.e. on macOS)
+
+`_convert_to_python_type` and `_convert_attribute` used
+`isinstance(value, int | float | str | bool | type(None))`. Runtime type unions
+are 3.10+, so under the Python 3.9 QGIS-LTR bundles on macOS this raised
+`TypeError: unsupported operand type(s) for |` on *every* call that converted an
+attribute — `get_layer_features` was simply unusable there. Pre-existing on main
+and found while testing the WKT work.
+
+Neither `compileall` nor ruff catches this: it is valid syntax that fails only
+when executed. `tests/test_macos_support.py` now walks the plugin's AST for
+runtime unions in `isinstance`/`issubclass`; mutation-verified.
+
+### Added: real WKT geometry
+
+`get_layer_features(geometry_format="wkt")` returns actual geometry for polygons
+and lines, not just the `wkt_summary` point count. `geometry_precision` and
+`simplify_tolerance` control size — measured on a 400-vertex ring: 401 vertices /
+8.7 KB at tolerance 0, 26 vertices at 0.001, 5 at 0.01. The default stays
+`"summary"`, so existing callers are unaffected.
+
+### Added: qgis_render_from_duckdb (19 tools total)
+
+Queries a DuckDB file and renders the result with no CSV intermediate. Geometry
+via `geometry_column` (WKT text) or `lon_column`/`lat_column`.
+
+The connection is opened **read-only** and the query is wrapped in a LIMIT, so a
+mistaken `SELECT *` against a multi-GB database can neither mutate it nor pull it
+into memory; `row_limit_hit` reports truncation rather than hiding it. New
+plugin primitive `render_wkt_features` does the rendering and is
+transport-agnostic — anything holding WKT can use it.
+
+New optional extra: `duckdb`.
+
+**Verification caveat, stated plainly:** the real target, PFLOW's
+`viz/pflow.duckdb` (~8.8 GB), lives on the author's Windows machine and was not
+reachable from here. Everything was verified against a synthetic DuckDB built to
+exercise the same code paths — WKT polygons, lon/lat points, graduated styling,
+the row cap, read-only enforcement and every error path — but not against the
+real schema. The first run against `pflow.duckdb` should be treated as the real
+test, and column names will need to match that schema.
+
+231 passed, 2 skipped.
+
 ## v1.5.0 — 2026-08-31 — QuickMapServices basemaps + preset repair
 
 ### Fixed: three basemap presets silently rendered watermarked tiles

@@ -871,6 +871,191 @@ def qgis_list_basemaps(
     )
 
 
+class DuckDbRenderResult(RenderResult):
+    """Render plus what the query actually produced."""
+
+    geometry_type: str
+    n_features: int
+    n_skipped: int = 0
+    fields: list[str] = []
+    field: str | None = None
+    breaks: list[float] | None = None
+    row_limit_hit: bool = False
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_render_from_duckdb(
+    db_path: Annotated[str, Field(description="Absolute path to a DuckDB database file, e.g. viz/pflow.duckdb.")],
+    query: Annotated[str, Field(description="SELECT returning one row per feature. Must include the geometry columns named below. The connection is opened READ-ONLY, so the query cannot modify the database.")],
+    output_png: Annotated[str, Field(description="Absolute path for the output PNG.")],
+    geometry_column: Annotated[str | None, Field(description='Column holding WKT geometry text, e.g. "geom". For a DuckDB spatial GEOMETRY column, wrap it in the query: SELECT ST_AsText(geom) AS geom. Mutually exclusive with lon_column/lat_column.')] = None,
+    lon_column: Annotated[str | None, Field(description="Longitude column, for point data with no geometry column. Use with lat_column.")] = None,
+    lat_column: Annotated[str | None, Field(description="Latitude column, for point data with no geometry column. Use with lon_column.")] = None,
+    value_field: Annotated[str | None, Field(description="Numeric column to style graduated. Omit for a single flat symbol.")] = None,
+    crs: Annotated[str, Field(description="CRS of the coordinates in the query result. PFLOW trajectories are EPSG:4326.")] = "EPSG:4326",
+    n_classes: Annotated[int, Field(description="Number of graduated bins, when value_field is set.", ge=2, le=15)] = 5,
+    mode: Annotated[Literal["quantile", "equal_interval", "natural_breaks", "pretty"], Field(description="Binning strategy.")] = "quantile",
+    palette: Annotated[str, Field(description='Color ramp, e.g. "YlOrRd", "Blues", "viridis".')] = "YlOrRd",
+    diverging: Annotated[bool, Field(description="Symmetric breaks around center, for signed data.")] = False,
+    center: Annotated[float, Field(description="Neutral midpoint when diverging.")] = 0.0,
+    max_features: Annotated[int, Field(description="Row ceiling. The query is wrapped in a LIMIT so a mistaken SELECT * against a multi-GB table cannot pull the whole thing into memory.", ge=1, le=500000)] = 50000,
+    basemap: Annotated[str, Field(description='Tile basemap drawn under the result. Presets "light"/"dark"/"streets"/"imagery", a "qms:<id>" QuickMapServices source, or "none".')] = "none",
+    basemap_opacity: Annotated[float, Field(description="Opacity of the tile basemap, 0.0-1.0.", ge=0.0, le=1.0)] = 1.0,
+    width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
+    height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
+    dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
+) -> DuckDbRenderResult:
+    """Render the result of a DuckDB query directly, with no CSV in between.
+
+    For PFLOW's `viz/pflow.duckdb` (~8.8 GB): querying it beats exporting a CSV
+    and loading that, both in time and in not materialising an intermediate file.
+
+    Geometry has to be named explicitly because a DuckDB table has no convention
+    for where it lives — either `geometry_column` (WKT text) or the
+    `lon_column`/`lat_column` pair for points.
+
+    The connection is opened read-only, so a query cannot alter the database, and
+    the query is wrapped in a LIMIT so a mistaken `SELECT *` against a multi-GB
+    table cannot pull it all into memory.
+    """
+    import os
+
+    from qgis_mcp_workflows.errors import QgisMcpWorkflowsError
+    from qgis_mcp_workflows.executors import get_executor
+
+    try:
+        import duckdb
+    except ImportError as exc:
+        raise QgisMcpWorkflowsError(
+            "The duckdb extra is not installed. "
+            "Next: run `uv sync --extra duckdb`, then retry."
+        ) from exc
+
+    abs_db = os.path.abspath(db_path)
+    if not os.path.exists(abs_db):
+        raise QgisMcpWorkflowsError(
+            f"DuckDB database not found: {abs_db}. Next: check the path and retry."
+        )
+
+    use_lonlat = bool(lon_column and lat_column)
+    if bool(geometry_column) == use_lonlat:
+        raise QgisMcpWorkflowsError(
+            "Specify exactly one geometry source: geometry_column (WKT text), or "
+            "lon_column plus lat_column. "
+            "Next: retry with geometry_column='geom', or lon_column='lon', lat_column='lat'."
+        )
+
+    # read_only protects the caller's database from anything the query does.
+    try:
+        conn = duckdb.connect(abs_db, read_only=True)
+    except Exception as exc:
+        raise QgisMcpWorkflowsError(
+            f"Could not open {abs_db} read-only: {exc}. "
+            "Next: check the file is a DuckDB database and not locked by another process."
+        ) from exc
+
+    try:
+        wrapped = f"SELECT * FROM ({query.rstrip().rstrip(';')}) AS _q LIMIT {int(max_features) + 1}"
+        try:
+            cursor = conn.execute(wrapped)
+            columns = [d[0] for d in cursor.description]
+            rows = cursor.fetchall()
+        except Exception as exc:
+            raise QgisMcpWorkflowsError(
+                f"DuckDB query failed: {exc}. "
+                "Next: check the query against the table schema — "
+                "`qgis_eval` can run `DESCRIBE <table>` if you need it."
+            ) from exc
+    finally:
+        conn.close()
+
+    row_limit_hit = len(rows) > max_features
+    rows = rows[:max_features]
+    if not rows:
+        raise QgisMcpWorkflowsError(
+            "The query returned no rows, so there is nothing to render. "
+            "Next: run the query with a wider filter and retry."
+        )
+
+    missing = [
+        c for c in ([geometry_column] if geometry_column else [lon_column, lat_column])
+        if c not in columns
+    ]
+    if missing:
+        raise QgisMcpWorkflowsError(
+            f"Column(s) {missing} not in the query result. Available: {columns}. "
+            "Next: add them to the SELECT list and retry."
+        )
+
+    idx = {c: i for i, c in enumerate(columns)}
+    geom_cols = {geometry_column} if geometry_column else {lon_column, lat_column}
+    attr_cols = [c for c in columns if c not in geom_cols]
+
+    features = []
+    n_bad_geom = 0
+    for row in rows:
+        if geometry_column:
+            wkt = row[idx[geometry_column]]
+            if not isinstance(wkt, str) or not wkt.strip():
+                n_bad_geom += 1
+                continue
+        else:
+            lon, lat = row[idx[lon_column]], row[idx[lat_column]]
+            if lon is None or lat is None:
+                n_bad_geom += 1
+                continue
+            wkt = f"POINT ({float(lon)} {float(lat)})"
+        feat = {"wkt": wkt}
+        for c in attr_cols:
+            feat[c] = row[idx[c]]
+        features.append(feat)
+
+    if not features:
+        raise QgisMcpWorkflowsError(
+            f"All {len(rows)} rows lacked usable geometry. "
+            + (f"Column {geometry_column!r} should hold WKT text — for a DuckDB "
+               "spatial GEOMETRY column use ST_AsText(...) in the SELECT. "
+               if geometry_column else
+               f"Columns {lon_column!r}/{lat_column!r} should hold numeric coordinates. ")
+            + "Next: adjust the query and retry."
+        )
+
+    result = get_executor().dispatch("render_wkt_features", {
+        "features": features,
+        "output_png": os.path.abspath(output_png),
+        "crs": crs,
+        "value_field": value_field,
+        "n_classes": n_classes,
+        "mode": mode,
+        "palette": palette,
+        "diverging": diverging,
+        "center": center,
+        "basemap_spec": _resolve_basemap(basemap, basemap_opacity),
+        "width": width,
+        "height": height,
+        "dpi": dpi,
+    })
+
+    return DuckDbRenderResult(
+        output_path=result["output_path"],
+        width=result["width"], height=result["height"], dpi=result["dpi"],
+        extent=result["extent"], crs=result["crs"], n_layers=result["n_layers"],
+        basemap_attribution=result.get("basemap_attribution"),
+        basemap_source=result.get("basemap_source"),
+        geometry_type=result["geometry_type"],
+        n_features=result["n_features"],
+        n_skipped=result.get("n_skipped", 0) + n_bad_geom,
+        fields=result.get("fields", []),
+        field=result.get("field"),
+        breaks=result.get("breaks"),
+        row_limit_hit=row_limit_hit,
+    )
+
+
 @_maybe_tool(
     annotations=ToolAnnotations(
         readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True

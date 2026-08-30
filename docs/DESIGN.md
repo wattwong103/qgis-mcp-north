@@ -12,7 +12,7 @@ This document is the spec. Implementation follows. If a tool's signature, respon
 
 Three problems with upstream that the fork solves:
 
-**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **17 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
+**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **18 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
 
 **No headless mode.** Upstream requires QGIS Desktop running with the plugin enabled. That's incompatible with scheduled overnight runs, CI, or any automation. We add a **PyQGIS-subprocess transport** alongside the existing plugin transport. Same tools, two backends, selected by config or CLI flag.
 
@@ -94,7 +94,7 @@ Upstream's plugin and server stay untouched. If the user installs both, Claude D
 
 ---
 
-## 4. Tool surface (17 workflow + 1 escape hatch)
+## 4. Tool surface (18 workflow + 1 escape hatch)
 
 For each tool: signature, what it does, response shape, and the typical chain.
 
@@ -404,6 +404,42 @@ liveness is therefore a test concern, not a runtime one: `tests/test_basemap_liv
 measured at 21-24 distinct colours for the watermarked CARTO tile against 179-724 for
 working services. Sample dense urban tiles only; a uniform tile reads as "broken" on every
 provider, working or not.
+
+---
+
+### Geometry out, and data in from elsewhere (v1.6)
+
+Two items the v0.3 roadmap flagged and v1.x never shipped. Both are now closed;
+the roadmap doc itself carries nothing else that isn't already in this file
+(§6 out-of-scope, §10 test data), so it is superseded.
+
+**Real WKT from `get_layer_features`.** Points always returned WKT; polygons and
+lines returned only `wkt_summary` — a type name and a point count. That asymmetry
+is defensible (one prefecture boundary is megabytes of WKT over a length-prefixed
+socket) but left no way to get the geometry at all, which the roadmap named as
+the blocker for DRM link-density work. `geometry_format="wkt"` is the opt-in,
+with `geometry_precision` and `simplify_tolerance` as the size controls; the
+default is unchanged.
+
+**`qgis_render_from_duckdb`.** Runs a query against a DuckDB file and renders the
+result directly, for PFLOW's `viz/pflow.duckdb` (~8.8 GB) where exporting a CSV
+first costs both time and an intermediate file. Two safety properties are
+load-bearing, not incidental:
+
+| Guard | Why |
+|---|---|
+| connection opened `read_only=True` | the target may be irreplaceable simulation output; a query must not be able to `DROP` or `DELETE` it |
+| query wrapped in `LIMIT max_features + 1` | a mistaken `SELECT *` against a multi-GB table must not pull it into memory; the extra row is how `row_limit_hit` is reported honestly rather than silently truncating |
+
+Geometry must be named explicitly — `geometry_column` (WKT text) or the
+`lon_column`/`lat_column` pair — because a DuckDB table has no convention for
+where geometry lives. For a spatial `GEOMETRY` column, wrap it: `SELECT
+ST_AsText(geom) AS geom`.
+
+Rendering is a separate plugin primitive, `render_wkt_features`, which takes
+`[{"wkt": ..., **attrs}]` and builds a memory layer. It is transport-agnostic on
+purpose: any future caller holding geometry from somewhere other than a file — a
+database cursor, an API — renders through the same path.
 
 ---
 
