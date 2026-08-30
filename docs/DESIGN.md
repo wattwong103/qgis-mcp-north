@@ -568,6 +568,20 @@ Still open after v0.4:
 
 ## 10. Test data inventory (PFLOW)
 
+**DuckDB (for `qgis_render_from_duckdb`).** The roadmap named `viz/pflow.duckdb`;
+no file by that name exists. The real equivalents, and where they are on macOS:
+
+| File | Size | Useful tables |
+|---|---|---|
+| `~/Dropbox/PFLOW/output/viz/kichijoji.duckdb` | 1.1 GB | `waypoints` (9.98M rows: `lon`, `lat`, `link_id`, `transport_mode`), `density_hourly` (111k: `grid_lon`, `grid_lat`, `weight`, `hour`), `trips` (75k: `start_lon`/`start_lat`, `end_lon`/`end_lat`) |
+| `~/Dropbox/PFLOW/trajectory-viz/demo/demo.duckdb` | 5.8 MB | same schema, demo-sized — the right one for a fast check |
+| `~/Dropbox/PFLOW/trajectory-viz/data/gufm/gufm.duckdb` | 19 MB | GUFM; often **locked** by another process, which surfaces as an IO Error even for a read-only connection |
+
+Every one of these stores geometry as **lon/lat DOUBLE columns**, never WKT. So
+`lon_column`/`lat_column` is the path PFLOW actually uses, and `geometry_column`
+is exercised only by synthetic fixtures until a table with WKT exists.
+
+
 Concrete files used for design and v0.3 integration tests. All under
 `H:\Dropbox\PFLOW\output (Selective Sync Conflict)\` unless noted.
 
