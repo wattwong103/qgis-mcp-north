@@ -46,7 +46,7 @@ The headless runner injects a stub `iface` that no-ops UI calls. Every command
 handler that doesn't touch the canvas / layer-tree-view works in both transports
 for free — a v0.4 architectural promise that v0.5+ tools inherit.
 
-## Tools (13 standalone, 5 in compound mode)
+## Tools (17 standalone — 16 workflow + `qgis_eval`; 5 grouped in compound mode)
 
 | Tool | Purpose |
 |---|---|
@@ -83,7 +83,7 @@ schema:
 ### 1. Prerequisites
 
 - **QGIS** 3.28 or newer ([download](https://qgis.org/download/)). On Windows, the
-  OSGeo4W LTR installer is recommended.
+  OSGeo4W LTR installer is recommended; on macOS, the QGIS-LTR `.app` from qgis.org.
 - **Python** 3.12+
 - **uv** package manager — [install uv](https://docs.astral.sh/uv/getting-started/installation/)
 
@@ -137,7 +137,7 @@ Concrete PFLOW recipes: [`docs/pflow-usage.md`](docs/pflow-usage.md).
 | `QGIS_MCP_WORKFLOWS_TOOL_MODE` | `full` | `full` (13 tools) / `compound` (5 grouped tools) |
 | `QGIS_MCP_WORKFLOWS_HOST` | `localhost` | Plugin socket host |
 | `QGIS_MCP_WORKFLOWS_PORT` | `9877` | Plugin socket port (upstream uses 9876) |
-| `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER` | (auto-detected on Windows) | Headless: full path to `python-qgis(-ltr).bat` |
+| `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER` | (auto-detected) | Headless: Windows `python-qgis(-ltr).bat`, or macOS `<QGIS.app>/Contents/MacOS/bin/python3` |
 | `QGIS_MCP_WORKFLOWS_LOG_FILE` | `~/.local/share/qgis-mcp-workflows/server.log` | Rotating log (5MB × 3); empty disables |
 | `QGIS_MCP_WORKFLOWS_LOG_LEVEL` | `INFO` | File log level (console always WARNING+) |
 
@@ -145,10 +145,19 @@ CLI flag `--transport=plugin|headless|auto` overrides the env var.
 
 ## Headless mode (cron / unattended renders)
 
+Windows:
+
 ```powershell
 $env:QGIS_MCP_WORKFLOWS_TRANSPORT='headless'
 $env:QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER='M:\QGIS LTR\bin\python-qgis-ltr.bat'
 uv run --no-sync qgis-mcp-workflows-server
+```
+
+macOS — the launcher is auto-detected from `/Applications/QGIS*.app`, so no path
+is needed:
+
+```bash
+QGIS_MCP_WORKFLOWS_TRANSPORT=headless uv run --no-sync qgis-mcp-workflows-server
 ```
 
 `HeadlessExecutor` lazy-spawns a PyQGIS subprocess on first dispatch and keeps it
@@ -157,10 +166,33 @@ restart per call.
 
 ## Platform support
 
-- **Windows** is the supported target for v1.0. Tested with OSGeo4W LTR.
-- **Linux/macOS** may work via PyQGIS-on-PATH (set `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER`
-  to a `python-qgis` wrapper or compatible Python). Unverified — refinement deferred
-  until a non-Windows user reports.
+- **Windows** — supported since v1.0. Tested with OSGeo4W LTR.
+- **macOS** — supported since v1.4.1. Headless transport verified end-to-end
+  against QGIS-LTR 3.40.5 on Apple Silicon (choropleth render, correct graduated
+  ramp, `EPSG:4326`/`EPSG:6677` resolving). Plugin transport uses the same profile
+  paths `install.py` already handled. The headless launcher is auto-detected from
+  `/Applications/QGIS-LTR.app` (then `QGIS.app`, then any `QGIS*.app`), and the
+  subprocess inherits `PROJ_LIB`, `GDAL_DATA` and `QGIS_PREFIX_PATH` derived from
+  that bundle. Homebrew's `python3` is deliberately *not* used — it has no PyQGIS.
+- **Linux** — should work via PyQGIS-on-PATH (apt/conda installs put it on
+  `sys.executable`); set `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER` if not. Unverified.
+
+### macOS notes
+
+Two things bite anyone running PyQGIS outside the `.app` bundle, and both are
+handled automatically — they matter only if you set the env vars yourself:
+
+- **`PROJ_LIB` / `GDAL_DATA`.** Without them PROJ can't open `proj.db` and *every*
+  CRS comes back invalid — `QgsCoordinateReferenceSystem("EPSG:4326").isValid()`
+  is `False`. Renders then reproject wrong instead of failing loudly.
+- **The user profile.** QGIS derives it from Qt's organization/application name.
+  Unset, it resolves to `~/Library/Application Support/profiles/default` rather
+  than `.../QGIS/QGIS3/profiles/default`, `QgsStyle.defaultStyle()` loads zero
+  color ramps, and every graduated render silently collapses to one flat colour
+  for all classes.
+
+QGIS-LTR bundles **Python 3.9**, so everything under `qgis_mcp_workflows_plugin/`
+(which runs in QGIS's interpreter, not the server's 3.12) must stay 3.9-compatible.
 
 ## Development
 

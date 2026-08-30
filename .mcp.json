@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "qgis-workflows": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/Users/north-mac/Dropbox/qgis-mcp-north",
+        "qgis-mcp-workflows-server"
+      ],
+      "cwd": "/Users/north-mac/Dropbox/qgis-mcp-north",
+      "env": {}
+    }
+  }
+}

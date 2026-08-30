@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `qgis-mcp-workflows` (v1.1.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
 
 Key differences from upstream:
-- 12 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
+- 16 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
 - Two transports: `plugin` (TCP socket → running QGIS) and `headless` (PyQGIS subprocess), selected via `--transport=auto|plugin|headless`.
 - Plugin folder: `qgis_mcp_workflows_plugin/`. Python package: `qgis-mcp-workflows` (importable as `qgis_mcp_workflows`). Default socket port: **9877** (vs upstream 9876). Both servers can run side-by-side.
 
@@ -74,7 +74,7 @@ uv tool run ruff check src/ tests/
 | `QGIS_MCP_WORKFLOWS_HOST` | `localhost` | Plugin transport: host of the QGIS plugin socket |
 | `QGIS_MCP_WORKFLOWS_PORT` | `9877` | Plugin transport: port of the QGIS plugin socket |
 | `QGIS_MCP_WORKFLOWS_TRANSPORT` | `auto` | `auto` / `plugin` / `headless`. CLI `--transport` overrides |
-| `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER` | (auto-detected) | Headless transport: full path to `python-qgis(-ltr).bat` (Windows) or PyQGIS Python (Linux/macOS) |
+| `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER` | (auto-detected) | Headless transport: full path to `python-qgis(-ltr).bat` (Windows), `<QGIS.app>/Contents/MacOS/bin/python3` (macOS, auto-detected from `/Applications`), or PyQGIS Python (Linux) |
 | `QGIS_MCP_WORKFLOWS_REPO_ROOT` | (auto-derived) | Headless transport: repo root the runner adds to `sys.path` so it can import `qgis_mcp_workflows_plugin` |
 | `QGIS_MCP_WORKFLOWS_LOG_FILE` | `~/.local/share/qgis-mcp-workflows/server.log` | Rotating log file (5MB × 3) — empty disables file logging |
 | `QGIS_MCP_WORKFLOWS_LOG_LEVEL` | `INFO` | File log level. Console (stderr) is always WARNING+ |
@@ -109,6 +109,7 @@ uv tool run ruff check src/ tests/
 - **All response paths return `output_path` (absolute)**. No tool returns base64. No tool returns relative paths.
 - **Errors must be actionable.** Every typed exception in `src/qgis_mcp_workflows/errors.py` ends with `Next: <suggested tool call>`. Add new error classes when a recovery hint changes.
 - **Headless caveats**: handlers that genuinely need `iface` (canvas extent/refresh, layer-tree-view manipulation, message bar) raise loudly from the stub; switch to plugin transport for those. The v0.3 + v0.5 workflow tools shouldn't hit any of them.
+- **macOS**: `HeadlessExecutor` auto-detects `/Applications/QGIS-LTR.app` (then `QGIS.app`, then any `QGIS*.app`) and injects `PROJ_LIB`, `GDAL_DATA`, `QGIS_PREFIX_PATH` from the bundle via `_bundle_env()`. Two silent-corruption traps this avoids: without PROJ/GDAL paths every CRS is invalid; without Qt's org/app name set (`headless_runner.py`) the profile resolves wrong, `QgsStyle.defaultStyle()` has zero color ramps, and graduated renders collapse to one flat colour. **`qgis_mcp_workflows_plugin/` must stay Python 3.9-compatible** — QGIS-LTR on macOS bundles 3.9, while the MCP server runs 3.12.
 - **Subprocess lifecycle**: `HeadlessExecutor` lazy-spawns on first dispatch, holds the process open across the MCP session, sends `{"type": "shutdown"}` on `__del__`. `initQgis` costs ~1-2s per spawn — never restart it per call.
 
 ## Version Management

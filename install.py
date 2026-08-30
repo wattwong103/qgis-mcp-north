@@ -135,8 +135,17 @@ def setup_venv() -> None:
 def _local_entry() -> dict:
     if shutil.which("uv"):
         return {
+            # --directory, not a bare `uv run` plus "cwd": clients differ on whether
+            # they honor cwd, and without it uv resolves the project from wherever
+            # the client happened to launch — "Failed to spawn:
+            # qgis-mcp-workflows-server". cwd is kept as belt-and-braces.
+            #
+            # No --no-sync either. setup_venv() runs first so deps normally exist,
+            # but a wiped .venv then yields "ModuleNotFoundError: No module named
+            # 'mcp'" at import, which the client reports only as a closed
+            # connection. Syncing costs nothing when it's already in sync.
             "command": "uv",
-            "args": ["run", "--no-sync", "qgis-mcp-workflows-server"],
+            "args": ["run", "--directory", str(REPO_DIR), "qgis-mcp-workflows-server"],
             "cwd": str(REPO_DIR),
         }
     # Fallback: run directly from the venv Python
