@@ -1923,6 +1923,20 @@ def _build_executor(transport: str):
 # ---------------------------------------------------------------------------
 
 
+def _version() -> str:
+    """Package version, read from installed metadata.
+
+    Previously hardcoded, which silently drifted (server logged 1.3.0 while
+    pyproject.toml said 1.4.0). Reading it keeps the banner honest.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("qgis-mcp-workflows")
+    except PackageNotFoundError:  # running from a source tree without an install
+        return "unknown"
+
+
 def main() -> None:
     """Run the MCP server. CLI flag ``--transport`` overrides the env default."""
     import argparse
@@ -1942,7 +1956,7 @@ def main() -> None:
 
     executor, chosen = _build_executor(args.transport)
     set_executor(executor)
-    logger.info("qgis-mcp-workflows server starting (v1.3.0, transport=%s)", chosen)
+    logger.info("qgis-mcp-workflows server starting (v%s, transport=%s)", _version(), chosen)
     mcp.run()
 
 

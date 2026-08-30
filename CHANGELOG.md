@@ -3,6 +3,52 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.4.1 — 2026-08-31 — macOS support
+
+The server and both transports now run on macOS. Previously the headless
+transport resolved its launcher to `sys.executable` (the uv venv's Python 3.12,
+which has no PyQGIS), so headless mode could not start at all on a Mac.
+
+Added:
+- macOS launcher auto-detection in `HeadlessExecutor`: `/Applications/QGIS-LTR.app`,
+  then `QGIS.app`, then any `/Applications/QGIS*.app`, resolving to
+  `Contents/MacOS/bin/python3`. Homebrew's `python3` is deliberately skipped — no PyQGIS.
+- `HeadlessExecutor._bundle_env()` — derives `PROJ_LIB`, `GDAL_DATA` and
+  `QGIS_PREFIX_PATH` from the launcher's `.app` bundle and injects them into the
+  subprocess. Values already set in the environment are left alone.
+- `tests/test_macos_support.py` (10 tests) — launcher precedence, env derivation,
+  user-override precedence, non-bundle launchers, and a guard against Python
+  3.11+ constructs in the plugin package.
+
+Fixed:
+- **Graduated renders silently produced one flat colour for every class.** QGIS
+  derives the user profile from Qt's organization/application name; unset, it
+  resolved to `~/Library/Application Support/profiles/default` instead of
+  `.../QGIS/QGIS3/profiles/default`, so `QgsStyle.defaultStyle()` loaded zero
+  color ramps and the palette lookup fell through. `headless_runner.py` now sets
+  the same org/app names QGIS Desktop uses, before constructing `QgsApplication`.
+- **Every CRS came back invalid under headless on macOS.** Without `PROJ_LIB`,
+  PROJ cannot open `proj.db` — `QgsCoordinateReferenceSystem("EPSG:4326").isValid()`
+  returned `False`, so renders reprojected wrong rather than failing loudly.
+- `qgis_mcp_workflows_plugin/plugin.py` used `datetime.UTC` (Python 3.11+), which
+  raised `ImportError` under the Python 3.9 that QGIS-LTR bundles on macOS. Now
+  `timezone.utc`. The plugin package runs in QGIS's interpreter, so it is pinned
+  to the oldest Python any supported QGIS ships.
+- `.mcp.json` invoked `uv run --no-sync src/qgis_mcp_workflows/server.py` — a bare
+  venv plus `--no-sync` plus a script path meant `ModuleNotFoundError: No module
+  named 'mcp'` and the client saw the connection close. Now uses the
+  `qgis-mcp-workflows-server` console entrypoint and syncs.
+- Server startup banner logged a hardcoded `v1.3.0` while `pyproject.toml` said
+  `1.4.0`. Now read from installed package metadata.
+- `.gitattributes` added (`* text=auto eol=lf`) so a Windows checkout cannot flip
+  the repo to CRLF. `main` is clean, but the unmerged
+  `feat/choropleth-diverging-colormaps` branch shows the failure mode: 72 tracked
+  files rewritten, a small feature commit turned into a 20k-line diff, and
+  `.python-version` — which uv reads to pick an interpreter — among the casualties.
+
+Verified on QGIS-LTR 3.40.5 (Apple Silicon): headless choropleth render with a
+correct YlOrRd graduated ramp, `EPSG:4326` and `EPSG:6677` both resolving.
+
 ## v1.3.0 — 2026-05-22 — Vault integration (v0.6 milestone)
 
 Closes the v0.6 milestone from DESIGN.md §7. This codebase now feeds the obsidian-vault knowledge system end-to-end.

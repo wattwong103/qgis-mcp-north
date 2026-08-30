@@ -9,7 +9,7 @@ import struct
 import sys
 import traceback
 from collections import deque
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import ClassVar
 
 from qgis.core import (
@@ -3223,7 +3223,7 @@ class QgisMCPServer(QObject):
                 "tag": tag,
                 "message": message,
                 "level": self._LEVEL_MAP.get(level, str(level)),
-                "timestamp": datetime.now(tz=UTC).isoformat(),
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
             }
         )
 

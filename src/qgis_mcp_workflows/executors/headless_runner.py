@@ -136,6 +136,20 @@ def main() -> int:
     # Lazy imports — must happen after sys.path is set up and after
     # QT_QPA_PLATFORM is forced to offscreen.
     from qgis.core import QgsApplication
+    from qgis.PyQt.QtCore import QCoreApplication
+
+    # Must precede the QgsApplication constructor: QGIS derives the user
+    # profile directory from Qt's organization/application name, and the
+    # profile is where symbology-style.db lives. Left unset, the profile
+    # resolves to a path that doesn't exist (on macOS, ~/Library/Application
+    # Support/profiles/default instead of .../QGIS/QGIS3/profiles/default),
+    # QgsStyle.defaultStyle() comes back with ZERO color ramps, and every
+    # graduated render silently falls back to one flat colour for all classes
+    # — a choropleth that looks plausible but encodes nothing. These are the
+    # same values QGIS Desktop sets.
+    QCoreApplication.setOrganizationName("QGIS")
+    QCoreApplication.setOrganizationDomain("qgis.org")
+    QCoreApplication.setApplicationName("QGIS3")
 
     qgs = QgsApplication([], False)
     # Use the prefix path the launcher exported; fall back to QGIS_PREFIX_PATH

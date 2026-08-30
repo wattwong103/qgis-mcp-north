@@ -12,9 +12,22 @@ per ``dispatch`` call.
 
 Launcher detection (in priority order):
     1. ``QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER`` env var (full path).
-    2. Common Windows locations: ``M:\\QGIS LTR\\bin\\python-qgis-ltr.bat``,
+    2. Windows: ``M:\\QGIS LTR\\bin\\python-qgis-ltr.bat``,
        ``C:\\OSGeo4W\\bin\\python-qgis-ltr.bat``, ``C:\\Program Files\\QGIS *\\bin\\python-qgis*.bat``.
-    3. Linux/macOS: assume ``python3`` already has PyQGIS on its path.
+    3. macOS: the Python bundled inside QGIS.app —
+       ``/Applications/QGIS-LTR.app/Contents/MacOS/bin/python3`` (LTR preferred),
+       then ``QGIS.app``, then any ``/Applications/QGIS*.app``. Homebrew's
+       ``/opt/homebrew/bin/python3`` is *not* used: it has no PyQGIS.
+    4. Linux: assume ``sys.executable`` already has PyQGIS importable
+       (apt/conda installs usually do).
+
+macOS also needs ``PROJ_LIB`` and ``GDAL_DATA`` pointed into the app bundle's
+``Contents/Resources``. QGIS.app sets these itself when launched normally, but a
+subprocess spawned from outside the bundle inherits nothing — and without them
+PROJ cannot open ``proj.db``, so *every* CRS silently comes back invalid
+(``QgsCoordinateReferenceSystem("EPSG:4326").isValid()`` is ``False``) and
+renders reproject wrong rather than failing loudly. ``_bundle_env`` derives
+both paths from the launcher and injects them.
 
 Raises ``HeadlessUnavailableError`` when no launcher is reachable; the user
 should either install OSGeo4W, set the env var, or use ``--transport=plugin``.
@@ -55,6 +68,13 @@ class HeadlessExecutor:
         r"C:\Program Files\QGIS *\bin\python-qgis-ltr.bat",
         r"C:\Program Files\QGIS *\bin\python-qgis.bat",
     )
+    # macOS: QGIS ships its own Python inside the .app bundle. Order matters —
+    # LTR first (the version this project targets), then current, then any.
+    _MACOS_LAUNCHER_GLOBS: ClassVar[tuple[str, ...]] = (
+        "/Applications/QGIS-LTR.app/Contents/MacOS/bin/python3",
+        "/Applications/QGIS.app/Contents/MacOS/bin/python3",
+        "/Applications/QGIS*.app/Contents/MacOS/bin/python3",
+    )
 
     def __init__(self, launcher: str | None = None) -> None:
         self._launcher = launcher or self._resolve_launcher()
@@ -87,7 +107,21 @@ class HeadlessExecutor:
                 "no python-qgis(-ltr).bat found in M:\\QGIS LTR, C:\\OSGeo4W, "
                 "or C:\\Program Files\\QGIS *"
             )
-        # Non-Windows: assume sys.executable already has PyQGIS importable.
+        if platform.system() == "Darwin":
+            for pattern in cls._MACOS_LAUNCHER_GLOBS:
+                # Exact paths hit the first two patterns; the third globs.
+                matches = sorted(glob.glob(pattern))
+                if matches:
+                    return matches[-1]  # newest version wins (lex sort)
+            raise HeadlessUnavailableError(
+                "no QGIS.app found under /Applications. Install QGIS from "
+                "qgis.org, or set QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER to the "
+                "python3 inside its bundle "
+                "(<QGIS.app>/Contents/MacOS/bin/python3). "
+                "Next: qgis_render_map(..., transport='plugin') if QGIS Desktop is already running."
+            )
+
+        # Linux: assume sys.executable already has PyQGIS importable.
         # Users who installed via apt/conda usually do, but if not they'll get
         # a clear ImportError from the runner.
         return sys.executable
@@ -115,6 +149,7 @@ class HeadlessExecutor:
         env = os.environ.copy()
         env["QGIS_MCP_WORKFLOWS_REPO_ROOT"] = self._repo_root()
         env.setdefault("QT_QPA_PLATFORM", "offscreen")
+        env.update(self._bundle_env(self._launcher))
 
         try:
             proc = subprocess.Popen(
@@ -141,6 +176,41 @@ class HeadlessExecutor:
 
         self._proc = proc
         return proc
+
+    @staticmethod
+    def _bundle_env(launcher: str) -> dict[str, str]:
+        """PROJ/GDAL data paths for a launcher living inside a macOS QGIS.app.
+
+        Returns ``{}`` on every other platform and for any launcher that isn't
+        inside an app bundle — Windows OSGeo4W and Linux packages set these up
+        themselves. Existing values in the environment are respected: a user who
+        has deliberately pointed PROJ_LIB at a custom grid directory keeps it.
+        """
+        if platform.system() != "Darwin":
+            return {}
+        # <bundle>/Contents/MacOS/bin/python3 → <bundle>/Contents/Resources
+        macos_bin = os.path.dirname(os.path.abspath(launcher))
+        contents = os.path.dirname(os.path.dirname(macos_bin))
+        resources = os.path.join(contents, "Resources")
+        if not os.path.isdir(resources):
+            return {}
+
+        out: dict[str, str] = {}
+        for var, subdir, marker in (
+            ("PROJ_LIB", "proj", "proj.db"),
+            ("GDAL_DATA", "gdal", "gdalvrt.xsd"),
+        ):
+            if os.environ.get(var):
+                continue  # caller knows better than we do
+            candidate = os.path.join(resources, subdir)
+            if os.path.exists(os.path.join(candidate, marker)):
+                out[var] = candidate
+
+        # QGIS_PREFIX_PATH is <bundle>/Contents/MacOS; QGIS resolves
+        # pkgDataPath as <prefix>/../Resources from there.
+        if not os.environ.get("QGIS_PREFIX_PATH") and os.path.isdir(macos_bin):
+            out["QGIS_PREFIX_PATH"] = os.path.dirname(macos_bin)
+        return out
 
     def _repo_root(self) -> str:
         # src/qgis_mcp_workflows/executors/headless.py → repo root is 4 levels up
