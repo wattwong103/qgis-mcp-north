@@ -28,7 +28,10 @@
       "Bash(grep *)",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "mcp__qgis-workflows__qgis_eval",
+      "Bash(claude --version)",
+      "Bash(claude mcp *)"
     ]
   }
 }
