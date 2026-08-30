@@ -1106,15 +1106,6 @@ class QgisMCPServer(QObject):
     # Named for discovery only — the MCP server owns the preset URLs.
     _BUILTIN_PRESET_NAMES: ClassVar[tuple] = ("light", "dark", "streets", "imagery")
 
-    # Hosts known to require an API key. Used to annotate the catalog, never to
-    # assert a source is live: CARTO began requiring a key without changing its
-    # URLs, and its tiles still return HTTP 200 with an "API KEY REQUIRED"
-    # watermark. See tests/test_basemap_liveness.py.
-    _KEYED_TILE_HOSTS: ClassVar[tuple] = (
-        "basemaps.cartocdn.com", "cartocdn.com", "tiles.stadiamaps.com",
-        "api.mapbox.com", "stamen-tiles",
-    )
-
     _CLASSIFICATION_METHODS: ClassVar[dict] = {
         "quantile": QgsClassificationQuantile,
         "equal_interval": QgsClassificationEqualInterval,
@@ -1137,6 +1128,7 @@ class QgisMCPServer(QObject):
             from qgis_mcp_workflows_plugin.quickmapservices import (
                 QmsUnavailableError,
                 catalog,
+                is_keyed,
             )
         except ImportError as exc:  # pragma: no cover — packaging error, not user error
             out["qms_error"] = "quickmapservices module unavailable: %r" % (exc,)
@@ -1154,7 +1146,7 @@ class QgisMCPServer(QObject):
             # "keyless" is a heuristic on known key-walled hosts, not a promise:
             # a provider can start requiring a key without changing its URL, which
             # is exactly how the CARTO presets broke.
-            if keyless_only and any(h in e["url"] for h in self._KEYED_TILE_HOSTS):
+            if keyless_only and is_keyed(e["url"]):
                 continue
             out["qms"].append({
                 "id": e["id"], "alias": e["alias"], "group": e["group"],

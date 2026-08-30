@@ -13,6 +13,7 @@ from qgis_mcp_workflows_plugin.quickmapservices import (
     QmsSourceError,
     QmsUnavailableError,
     catalog,
+    is_keyed,
     resolve,
 )
 
@@ -164,3 +165,26 @@ def test_catalog_explains_non_tms_sources_instead_of_hiding_them(profile):
     _, rejected = catalog(profile=str(profile), include_rejected=True)
     hit = [r for r in rejected if r[0] == "some_wms"]
     assert hit and hit[0][1] == "unsupported" and "WMS" in hit[0][2]
+
+
+# ── keyed-host heuristic ───────────────────────────────────────────────────
+
+
+def test_is_keyed_matches_cdn_prefixes():
+    """A bare domain must catch its CDN prefixes: QMS ships a.basemaps.cartocdn.com."""
+    assert is_keyed("https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png")
+    assert is_keyed("https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png")
+
+
+def test_is_keyed_covers_both_stamen_hosts():
+    """Stamen serves from two hosts; listing one let 11 key-walled sources pass."""
+    assert is_keyed("https://stamen-tiles.a.ssl.fastly.net/toner/{z}/{x}/{y}.png")
+    assert is_keyed("https://tile.stamen.com/terrain/{z}/{x}/{y}.jpg")
+
+
+def test_is_keyed_passes_open_providers():
+    assert not is_keyed("https://tile.openstreetmap.org/{z}/{x}/{y}.png")
+    assert not is_keyed(
+        "https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/"
+        "World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+    )

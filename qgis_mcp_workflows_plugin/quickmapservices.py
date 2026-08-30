@@ -49,6 +49,30 @@ _RESTRICTED_GROUPS = {
 }
 
 
+# Hosts observed to require an API key. Substring match on the URL, so a bare
+# domain covers its CDN prefixes ("basemaps.cartocdn.com" catches
+# "a.basemaps.cartocdn.com"). Verified against the shipped catalog rather than
+# assumed: Stamen serves from BOTH stamen-tiles.a.ssl.fastly.net and
+# tile.stamen.com, and listing only the first let 11 key-walled sources through.
+#
+# This annotates the catalog; it never asserts a source is live. CARTO began
+# requiring a key without changing its URLs, and its tiles still return HTTP 200
+# with an "API KEY REQUIRED" watermark — see tests/test_basemap_liveness.py.
+KEYED_TILE_HOSTS = (
+    "basemaps.cartocdn.com",
+    "cartodb-basemaps",
+    "tiles.stadiamaps.com",
+    "stamen-tiles",
+    "tile.stamen.com",
+    "api.mapbox.com",
+)
+
+
+def is_keyed(url):
+    """True when ``url`` is served from a host known to require an API key."""
+    return any(host in url for host in KEYED_TILE_HOSTS)
+
+
 class QmsUnavailableError(Exception):
     """QuickMapServices is not installed in the active QGIS profile."""
 
