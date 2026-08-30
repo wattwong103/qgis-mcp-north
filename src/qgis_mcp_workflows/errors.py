@@ -61,6 +61,20 @@ class FieldNotFoundError(QgisMcpWorkflowsError):
         self.available = available
 
 
+class BasemapNotFoundError(QgisMcpWorkflowsError):
+    """An unknown basemap name that is neither a preset nor a ``qms:`` reference."""
+
+    def __init__(self, basemap: str, available: list[str]) -> None:
+        avail = ", ".join(available) if available else "(none)"
+        super().__init__(
+            f"Unknown basemap {basemap!r}. Built-in presets: {avail}, or 'none'. "
+            f"For a QuickMapServices source use the 'qms:<id>' form. "
+            f"Next: call qgis_list_basemaps to see every id available in this QGIS profile."
+        )
+        self.basemap = basemap
+        self.available = available
+
+
 class JoinError(QgisMcpWorkflowsError):
     """A CSV → polygon join produced zero matches (clearly wrong join key).
 

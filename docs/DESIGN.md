@@ -12,7 +12,7 @@ This document is the spec. Implementation follows. If a tool's signature, respon
 
 Three problems with upstream that the fork solves:
 
-**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **16 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
+**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **17 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
 
 **No headless mode.** Upstream requires QGIS Desktop running with the plugin enabled. That's incompatible with scheduled overnight runs, CI, or any automation. We add a **PyQGIS-subprocess transport** alongside the existing plugin transport. Same tools, two backends, selected by config or CLI flag.
 
@@ -94,7 +94,7 @@ Upstream's plugin and server stay untouched. If the user installs both, Claude D
 
 ---
 
-## 4. Tool surface (16 workflow + 1 escape hatch)
+## 4. Tool surface (17 workflow + 1 escape hatch)
 
 For each tool: signature, what it does, response shape, and the typical chain.
 
@@ -354,6 +354,58 @@ transit-figure pipeline. Each a separate commit, unit-tested + live-verified.
 - `qgis_render_od_flows` / `qgis_render_link_density`: tile `basemap=` + `basemap_opacity` (same live-XYZ presets as choropleth); link-density color routes through the scientific-colormap helper.
 
 **Deferred to a follow-up PR:** `qgis_assign_section_load` (network all-or-nothing assignment; adds a `[network]` extra with networkx + scipy). Minor: trajectory tile basemap, OD/link halo labels.
+
+### Basemaps — presets and QuickMapServices (v1.5)
+
+`basemap=` on the render tools accepts three forms:
+
+| Form | Resolved | Example |
+|---|---|---|
+| `"none"` | nothing drawn; plain background (unchanged legacy behaviour) | `"none"` |
+| a preset | MCP-side, from `_BASEMAP_PRESETS` | `"light"` |
+| `"qms:<id>"` | **plugin-side**, from the QuickMapServices catalog | `"qms:opentopomap"` |
+
+**Presets are named for role, not vendor** — `light`, `dark`, `streets`, `imagery`. The
+CARTO-era names (`positron`, `dark_matter`, `voyager`, `osm`) remain accepted as aliases.
+This is a scar: those presets pointed at `basemaps.cartocdn.com`, CARTO put it behind an
+API key, and the names went on describing a product they no longer served. A role name
+survives a provider swap; a product name becomes a lie. Attribution strings are copied
+verbatim from each provider's own metadata — never composed by hand.
+
+**Why QMS resolution happens plugin-side.** The catalog lives in the QGIS *user profile*
+(`<profile>/python/plugins/quick_map_services/…`, plus user-added entries under
+`<profile>/QuickMapServices/User`). That directory is guaranteed present wherever QGIS is
+running and **not** guaranteed on the machine running the MCP server — with
+`--transport=plugin` pointed at another host, MCP-side resolution would read the wrong
+profile or none at all. So the server passes `{"kind": "qms", "id": …}` through untouched
+and `_load_basemap_layer` resolves it. `qgis_mcp_workflows_plugin/quickmapservices.py` is
+the single implementation; nothing else parses QMS INIs.
+
+**Not every catalog entry is usable.** `_load_basemap_layer` builds a bare `type=xyz`
+provider URI, which — unlike QMS's own loader — performs no CRS assignment. Entries are
+filtered, and `qgis_list_basemaps` reports each rejection with its reason:
+
+| Rejection | Why |
+|---|---|
+| declares an `epsg_crs_id` other than 3857 | our URI assumes 3857; the tiles would draw misregistered — plausible-looking and geographically wrong |
+| provider terms restrict tile access to their own apps (Google, Bing, Yandex, HERE, 2GIS, AutoNavi, Waze, Mapbox) | QMS shipping a definition is not permission to use it |
+| not a `TMS` entry | WMS/WFS/GDAL sources need a different provider URI |
+
+Resolution mirrors QMS's own loader: zoom defaults of 0/18, the `{y}` → `{-y}` rewrite for
+bottom-origin schemes, and the `=`/`&` percent-escaping QMS applies before embedding a URL
+in a provider URI. Skipping that last step corrupts any URL carrying a query string.
+
+**A dead basemap is not detectable at runtime.** A key-walled tile server answers HTTP 200
+with a well-formed PNG; CARTO's simply reads "API KEY REQUIRED" in every tile.
+`QgsRasterLayer.isValid()` reports that the *provider* was constructed, not that a tile
+arrived, and no status code or QGIS call separates the two. Only the pixels do. Preset
+liveness is therefore a test concern, not a runtime one: `tests/test_basemap_liveness.py`
+(`pytest -m network`) fetches a real tile per preset and asserts colour complexity —
+measured at 21-24 distinct colours for the watermarked CARTO tile against 179-724 for
+working services. Sample dense urban tiles only; a uniform tile reads as "broken" on every
+provider, working or not.
+
+---
 
 ## 5. Cross-cutting
 

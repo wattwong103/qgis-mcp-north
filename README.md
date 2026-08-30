@@ -46,10 +46,11 @@ The headless runner injects a stub `iface` that no-ops UI calls. Every command
 handler that doesn't touch the canvas / layer-tree-view works in both transports
 for free — a v0.4 architectural promise that v0.5+ tools inherit.
 
-## Tools (17 standalone — 16 workflow + `qgis_eval`; 5 grouped in compound mode)
+## Tools (18 standalone — 17 workflow + `qgis_eval`; 5 grouped in compound mode)
 
 | Tool | Purpose |
 |---|---|
+| `qgis_list_basemaps` | List every basemap `basemap=` accepts here: presets + QuickMapServices catalog |
 | `qgis_layer_inspect` | Metadata-only inspect (no project mutation) |
 | `qgis_load_layer` | Register layer + return layer_id; optional CRS override |
 | `qgis_project_load` | Load `.qgz`/`.qgs` → layers + layouts |

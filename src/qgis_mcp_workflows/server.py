@@ -274,18 +274,38 @@ _BASEMAP_ALIASES: dict[str, str] = {
 }
 
 
+QMS_PREFIX = "qms:"
+
+
 def _resolve_basemap(basemap: str, opacity: float) -> dict | None:
-    """Resolve a basemap preset name into the ``basemap_spec`` sent to the plugin.
+    """Resolve a basemap argument into the ``basemap_spec`` sent to the plugin.
 
     ``"none"`` returns ``None`` (legacy white-background behavior, unchanged).
     A known preset returns a live-XYZ spec the plugin loads via
     ``QgsRasterLayer(type=xyz, provider="wms")``. Deprecated aliases resolve to
     their canonical role and report the canonical name in ``name``, so the
     response says what was actually drawn.
+
+    ``"qms:<id>"`` is passed through unresolved, as ``{"kind": "qms", ...}``. The
+    QuickMapServices catalog lives in the QGIS user profile, which exists
+    wherever QGIS runs and not necessarily on this machine — with
+    ``--transport=plugin`` against another host, resolving here would read the
+    wrong profile. The plugin resolves it and reports back what it drew.
     """
+    from qgis_mcp_workflows.errors import BasemapNotFoundError
+
     if basemap == "none":
         return None
+
+    if basemap.startswith(QMS_PREFIX):
+        source_id = basemap[len(QMS_PREFIX):].strip()
+        if not source_id:
+            raise BasemapNotFoundError(basemap, sorted(_BASEMAP_PRESETS))
+        return {"kind": "qms", "id": source_id, "opacity": float(opacity)}
+
     canonical = _BASEMAP_ALIASES.get(basemap, basemap)
+    if canonical not in _BASEMAP_PRESETS:
+        raise BasemapNotFoundError(basemap, sorted(_BASEMAP_PRESETS))
     url, attribution, zmax = _BASEMAP_PRESETS[canonical]
     return {
         "kind": "xyz",
@@ -807,6 +827,50 @@ def qgis_render_map(
     )
 
 
+class BasemapCatalogResult(BaseModel):
+    """What `basemap=` will accept in this QGIS profile."""
+
+    presets: list[str]
+    qms: list[dict]
+    n_qms: int = 0
+    qms_rejected: list[dict] = []
+    qms_error: str | None = None
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True, idempotentHint=True, destructiveHint=False, openWorldHint=False
+    )
+)
+def qgis_list_basemaps(
+    group: Annotated[str | None, Field(description='Restrict to one QuickMapServices group, e.g. "esri", "openstreetmap", "versatiles".')] = None,
+    keyless_only: Annotated[bool, Field(description="Drop sources on hosts known to require an API key. A heuristic on the URL host, not a guarantee — a provider can start requiring a key without changing its URL.")] = False,
+) -> BasemapCatalogResult:
+    """List every basemap `basemap=` accepts here: built-in presets + QuickMapServices.
+
+    Call this before passing `basemap="qms:<id>"` — those ids come from directory
+    names inside the QGIS profile, so they cannot be guessed from a tool schema.
+
+    `qms_rejected` explains what was filtered and why: sources declaring a CRS
+    other than EPSG:3857 (our XYZ provider assumes 3857, so they would draw
+    misregistered) and providers whose terms restrict tile access to their own
+    apps. `qms_error` is set instead when QuickMapServices isn't installed —
+    the built-in presets still work in that case.
+    """
+    from qgis_mcp_workflows.executors import get_executor
+
+    result = get_executor().dispatch(
+        "list_basemaps", {"group": group, "keyless_only": bool(keyless_only)}
+    )
+    return BasemapCatalogResult(
+        presets=result.get("presets", []),
+        qms=result.get("qms", []),
+        n_qms=result.get("n_qms", 0),
+        qms_rejected=result.get("qms_rejected", []),
+        qms_error=result.get("qms_error"),
+    )
+
+
 @_maybe_tool(
     annotations=ToolAnnotations(
         readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
@@ -827,7 +891,7 @@ def qgis_render_choropleth(
     title: Annotated[str | None, Field(description="Optional title rendered at the top of the figure.")] = None,
     legend: Annotated[bool, Field(description="Render a legend with class breaks.")] = True,
     basemap_paths: Annotated[list[str] | None, Field(description="Optional vector basemap layers drawn under the choropleth (e.g., coastline, rivers, prefecture borders).")] = None,
-    basemap: Annotated[BasemapName, Field(description='Tile basemap drawn under the data for real-world context. "light" = neutral grey (best under choropleths), "dark" = dark canvas, "streets" = OpenStreetMap, "imagery" = satellite. "none" keeps the plain white background. No API key needed. The old CARTO names (positron / dark_matter / voyager) still work as aliases.')] = "none",
+    basemap: Annotated[str, Field(description='Tile basemap drawn under the data for real-world context. Presets: "light" (neutral grey, best under choropleths), "dark", "streets" (OpenStreetMap), "imagery" (satellite); "none" for a plain white background. Any QuickMapServices source installed in the QGIS profile can be used as "qms:<id>" (e.g. "qms:opentopomap") — call qgis_list_basemaps for the ids. The old CARTO names (positron/dark_matter/voyager) still work as aliases. No API key needed.')] = "none",
     basemap_opacity: Annotated[float, Field(description="Opacity of the tile basemap, 0.0-1.0. Use 0.5-0.8 to mute it so the choropleth colors read on top.", ge=0.0, le=1.0)] = 1.0,
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
@@ -1260,7 +1324,7 @@ def qgis_render_od_flows(
     top_n: Annotated[int | None, Field(description="Render only the top-N flows by value. None renders all matched flows.")] = None,
     arc_style: Annotated[Literal["line", "arrow", "curved"], Field(description='Arc rendering: "line" (straight, default), "arrow" (directional), or "curved" (directional bezier). Arrows/curves scale width + head with flow.')] = "line",
     basemap_paths: Annotated[list[str] | None, Field(description="Optional vector basemap layers drawn under arcs.")] = None,
-    basemap: Annotated[BasemapName, Field(description='Tile basemap drawn under the arcs for real-world context. "light" = neutral grey (best under choropleths), "dark" = dark canvas, "streets" = OpenStreetMap, "imagery" = satellite. "none" keeps the plain white background. No API key needed. The old CARTO names (positron / dark_matter / voyager) still work as aliases.')] = "none",
+    basemap: Annotated[str, Field(description='Tile basemap drawn under the arcs for real-world context. Presets: "light" (neutral grey, best under choropleths), "dark", "streets" (OpenStreetMap), "imagery" (satellite); "none" for a plain white background. Any QuickMapServices source installed in the QGIS profile can be used as "qms:<id>" (e.g. "qms:opentopomap") — call qgis_list_basemaps for the ids. The old CARTO names (positron/dark_matter/voyager) still work as aliases. No API key needed.')] = "none",
     basemap_opacity: Annotated[float, Field(description="Opacity of the tile basemap, 0.0-1.0.", ge=0.0, le=1.0)] = 1.0,
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
@@ -1368,7 +1432,7 @@ def qgis_render_link_density(
     top_n: Annotated[int | None, Field(description="Render only the top-N densest links. None = all matched links.")] = None,
     extent: Annotated[list[float] | None, Field(description="Render extent [xmin, ymin, xmax, ymax] in EPSG:4326. If omitted, uses DRM layer extent.")] = None,
     basemap_paths: Annotated[list[str] | None, Field(description="Optional vector basemap layers drawn under links.")] = None,
-    basemap: Annotated[BasemapName, Field(description='Tile basemap drawn under the links for real-world context. "light" = neutral grey (best under choropleths), "dark" = dark canvas, "streets" = OpenStreetMap, "imagery" = satellite. "none" keeps the plain white background. No API key needed. The old CARTO names (positron / dark_matter / voyager) still work as aliases.')] = "none",
+    basemap: Annotated[str, Field(description='Tile basemap drawn under the links for real-world context. Presets: "light" (neutral grey, best under choropleths), "dark", "streets" (OpenStreetMap), "imagery" (satellite); "none" for a plain white background. Any QuickMapServices source installed in the QGIS profile can be used as "qms:<id>" (e.g. "qms:opentopomap") — call qgis_list_basemaps for the ids. The old CARTO names (positron/dark_matter/voyager) still work as aliases. No API key needed.')] = "none",
     basemap_opacity: Annotated[float, Field(description="Opacity of the tile basemap, 0.0-1.0.", ge=0.0, le=1.0)] = 1.0,
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
