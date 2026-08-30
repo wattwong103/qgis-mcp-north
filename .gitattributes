@@ -1,0 +1,16 @@
+# Normalize line endings on commit. Checkouts stay LF on every platform.
+#
+# Prevents the whole-repo CRLF flip that happened on
+# feat/choropleth-diverging-colormaps (commit 2609d99, unmerged): a Windows
+# checkout without this file rewrote 72 tracked files, turning a small feature
+# commit into a 20k-line diff and making it unreviewable. `.python-version` was
+# among them — uv reads that file to pick an interpreter.
+* text=auto eol=lf
+
+# Binary — never touch these.
+*.png binary
+*.svg text eol=lf
+*.gpkg binary
+*.qgz binary
+*.pptx binary
+*.icns binary
