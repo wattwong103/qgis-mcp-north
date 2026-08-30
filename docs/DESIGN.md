@@ -52,6 +52,28 @@ Out of scope: replacing upstream as a general-purpose QGIS MCP. We intentionally
 
 **Headless runtime.** Standalone PyQGIS via `qgis_process` (CLI) for simple ops, with a long-lived Python subprocess holding `QgsApplication` for complex ops. Headless mode forces `QT_QPA_PLATFORM=offscreen` and disables any GUI calls. Render only — no project save, no plugin install, no UI mutation.
 
+**Launcher resolution (headless).** `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER` always wins. Otherwise, by platform:
+
+| Platform | Probed, in order |
+|---|---|
+| Windows | `M:\QGIS LTR\bin\python-qgis-ltr.bat`, `C:\OSGeo4W[64]\bin\python-qgis[-ltr].bat`, then glob `C:\Program Files\QGIS *\bin\python-qgis*.bat` |
+| macOS | `/Applications/QGIS-LTR.app`, then `QGIS.app`, then glob `QGIS*.app` — each resolving to `Contents/MacOS/bin/python3` |
+| Linux | `sys.executable` (apt/conda PyQGIS is usually importable there) |
+
+LTR is probed first on both Windows and macOS: it is the version this fork targets, so a machine with both installed must not silently fall through to the current release. Homebrew's `python3` is never used on macOS — it has no PyQGIS.
+
+**Bundle environment (macOS).** QGIS.app sets its own environment when launched normally; a subprocess spawned from outside the bundle inherits none of it. `HeadlessExecutor._bundle_env()` derives three variables from the resolved launcher and injects them, skipping any the caller already set:
+
+| Variable | Value | Without it |
+|---|---|---|
+| `PROJ_LIB` | `<bundle>/Contents/Resources/proj` | PROJ cannot open `proj.db`; **every** CRS is invalid (`QgsCoordinateReferenceSystem("EPSG:4326").isValid()` is `False`) and renders reproject wrong rather than failing |
+| `GDAL_DATA` | `<bundle>/Contents/Resources/gdal` | GDAL loses its data dictionary |
+| `QGIS_PREFIX_PATH` | `<bundle>/Contents/MacOS` | `pkgDataPath` misresolves |
+
+Separately, `headless_runner.py` must set Qt's organization/application name (`QGIS` / `qgis.org` / `QGIS3`) *before* constructing `QgsApplication`. QGIS derives the user profile directory from those names, and the profile holds `symbology-style.db`. Left unset the profile resolves to a path that does not exist, `QgsStyle.defaultStyle()` returns **zero** color ramps, and every graduated render collapses to one flat colour for all classes — a choropleth that looks plausible and encodes nothing.
+
+**Interpreter split.** Two Pythons are in play and they are not the same version. `src/qgis_mcp_workflows/` runs under the MCP server's interpreter (3.12+, per `requires-python`). `qgis_mcp_workflows_plugin/` and `executors/headless_runner.py` run under **QGIS's bundled interpreter** — Python 3.9 on QGIS-LTR for macOS. Anything in the plugin package must therefore stay 3.9-compatible; `tests/test_macos_support.py` guards the specific trap already hit (`datetime.UTC`, 3.11+).
+
 **Co-existence with upstream.** To run side-by-side with `nkarasiak/qgis-mcp`:
 - Plugin folder: `qgis_mcp_workflows_plugin/` (vs upstream `qgis_mcp_plugin/`)
 - Default socket port: **9877** (upstream uses 9876)
