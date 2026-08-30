@@ -14,11 +14,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The zip's top-level directory must match the plugin folder name for the
+      # QGIS plugin manager to install it.
       - name: Build plugin ZIP
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          ASSET_NAME="qgis_mcp_plugin_v${VERSION//./-}.zip"
-          zip -r "$ASSET_NAME" qgis_mcp_plugin/ -x "qgis_mcp_plugin/__pycache__/*"
+          PLUGIN_DIR="qgis_mcp_workflows_plugin"
+
+          # metadata.txt is what the QGIS plugin repository reads. If it
+          # disagrees with the tag, the upload is rejected or mislabelled —
+          # cheaper to fail here than after publishing.
+          META_VERSION="$(sed -n 's/^version=//p' "$PLUGIN_DIR/metadata.txt")"
+          if [ "$META_VERSION" != "$VERSION" ]; then
+            echo "::error::tag v$VERSION but $PLUGIN_DIR/metadata.txt says $META_VERSION"
+            exit 1
+          fi
+
+          ASSET_NAME="${PLUGIN_DIR}_v${VERSION//./-}.zip"
+          zip -r "$ASSET_NAME" "$PLUGIN_DIR/" -x "$PLUGIN_DIR/__pycache__/*"
           echo "ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
 
       - name: Upload to GitHub Release

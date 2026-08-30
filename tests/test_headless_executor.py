@@ -16,25 +16,14 @@ import tempfile
 
 import pytest
 
-from qgis_mcp_workflows.errors import HeadlessUnavailableError
 from qgis_mcp_workflows.executors.headless import HeadlessExecutor
+from tests.conftest import requires_headless
 
-
-def _launcher_resolvable() -> bool:
-    try:
-        HeadlessExecutor._resolve_launcher()
-    except HeadlessUnavailableError:
-        return False
-    return True
-
-
-requires_qgis_python = pytest.mark.skipif(
-    not _launcher_resolvable(),
-    reason=(
-        "QGIS Python launcher not found — set QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER, install OSGeo4W, "
-        "or skip these tests."
-    ),
-)
+# Use the shared probe rather than a local "did a path resolve" check. The old
+# one asked whether _resolve_launcher() returned without raising, which on Linux
+# and macOS is always true — it falls back to sys.executable. These tests then
+# ran on machines with no QGIS and failed instead of skipping.
+requires_qgis_python = requires_headless
 
 
 @pytest.fixture
