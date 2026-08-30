@@ -140,6 +140,47 @@ def test_bundle_env_empty_for_non_bundle_launcher(monkeypatch, on_macos, tmp_pat
 # ── plugin code must import under QGIS's bundled Python ────────────────────
 
 
+def test_plugin_has_no_runtime_type_unions():
+    """`isinstance(x, A | B)` is 3.10+; QGIS-LTR on macOS bundles 3.9.
+
+    This is a *runtime* union, not an annotation, so `from __future__ import
+    annotations` does not save it and it parses fine on 3.9 — it raises
+    "TypeError: unsupported operand type(s) for |" only when the line executes.
+    Two of these sat on the attribute-conversion path and broke
+    get_layer_features on macOS entirely. Neither compileall nor ruff catches
+    them, which is why this walks the AST.
+    """
+    import ast
+
+    root = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "qgis_mcp_workflows_plugin",
+    )
+    offenders = []
+    for dirpath, _, filenames in os.walk(root):
+        if "__pycache__" in dirpath:
+            continue
+        for fn in filenames:
+            if not fn.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, fn)
+            with open(path, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if getattr(node.func, "id", None) not in ("isinstance", "issubclass"):
+                    continue
+                for arg in node.args[1:]:
+                    if isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.BitOr):
+                        offenders.append(f"{fn}:{node.lineno}")
+    assert not offenders, (
+        "runtime type unions (3.10+) in the plugin package, which runs on "
+        f"Python 3.9 under QGIS-LTR: {offenders}. Use a tuple instead: "
+        "isinstance(x, (A, B))."
+    )
+
+
 def test_plugin_avoids_datetime_utc():
     """``datetime.UTC`` is 3.11+; QGIS-LTR on macOS bundles Python 3.9.
 

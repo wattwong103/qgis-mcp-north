@@ -147,13 +147,32 @@ class QgisMCPClient:
         return self.send_command("zoom_to_layer", {"layer_id": layer_id})
 
     def get_layer_features(
-        self, layer_id, limit=10, offset=0, expression=None, include_geometry=False
+        self,
+        layer_id,
+        limit=10,
+        offset=0,
+        expression=None,
+        include_geometry=False,
+        geometry_format="summary",
+        geometry_precision=6,
+        simplify_tolerance=0.0,
     ):
+        """Read features; pass ``geometry_format="wkt"`` for real WKT geometry.
+
+        The default summarises polygons and lines (type, point count, bbox)
+        because a single prefecture boundary is megabytes of WKT over the
+        socket. Ask for ``"wkt"`` when you need the geometry itself, and pair
+        it with a small ``limit`` and a ``simplify_tolerance`` if shape is
+        enough.
+        """
         params = {
             "layer_id": layer_id,
             "limit": limit,
             "offset": offset,
             "include_geometry": include_geometry,
+            "geometry_format": geometry_format,
+            "geometry_precision": geometry_precision,
+            "simplify_tolerance": simplify_tolerance,
         }
         if expression:
             params["expression"] = expression

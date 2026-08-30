@@ -7,7 +7,7 @@ packages = ["src/qgis_mcp_workflows"]
 
 [project]
 name = "qgis-mcp-workflows"
-version = "1.5.0"
+version = "1.6.0"
 description = "Focused QGIS MCP server with workflow tools for transportation research figure pipelines (PFLOW, GUFM). Forked from nkarasiak/qgis-mcp."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -22,6 +22,7 @@ pptx = ["python-pptx>=1.0"]
 trajectory = ["movingpandas>=0.20"]
 bench = ["pytest-benchmark>=4.0"]
 drm = ["pyogrio>=0.7", "geopandas>=0.14"]
+duckdb = ["duckdb>=1.0"]
 
 [project.scripts]
 qgis-mcp-workflows-server = "qgis_mcp_workflows.server:main"
