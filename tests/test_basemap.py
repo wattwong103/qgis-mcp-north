@@ -13,7 +13,15 @@ What these lock down:
 
 from __future__ import annotations
 
-from qgis_mcp_workflows.server import _resolve_basemap, qgis_render_choropleth
+from typing import get_args
+
+from qgis_mcp_workflows.server import (
+    _BASEMAP_ALIASES,
+    _BASEMAP_PRESETS,
+    BasemapName,
+    _resolve_basemap,
+    qgis_render_choropleth,
+)
 
 
 def _ok_response() -> dict:
@@ -36,20 +44,51 @@ def test_resolve_basemap_none_returns_none():
     assert _resolve_basemap("none", 1.0) is None
 
 
-def test_resolve_basemap_positron_returns_xyz_spec():
-    spec = _resolve_basemap("positron", 0.85)
+def test_resolve_basemap_returns_xyz_spec():
+    spec = _resolve_basemap("light", 0.85)
     assert spec["kind"] == "xyz"
-    assert "cartocdn" in spec["url"]
     assert spec["attribution"]  # non-empty provider credit
     assert spec["opacity"] == 0.85
     assert spec["zmin"] == 0
     assert spec["zmax"] >= 1
 
 
-def test_resolve_basemap_esri_imagery_present():
-    spec = _resolve_basemap("esri_imagery", 1.0)
+def test_resolve_basemap_imagery_present():
+    spec = _resolve_basemap("imagery", 1.0)
     assert "World_Imagery" in spec["url"]
     assert spec["attribution"]
+
+
+def test_no_preset_uses_the_carto_cdn():
+    """Regression: CARTO put basemaps.cartocdn.com behind an API key.
+
+    Tiles still return HTTP 200 and a valid PNG — every pixel just carries an
+    "API KEY REQUIRED" watermark — so nothing downstream can detect the failure.
+    Three presets pointed there and silently produced watermarked figures.
+    """
+    for name in _BASEMAP_PRESETS:
+        assert "cartocdn" not in _resolve_basemap(name, 1.0)["url"], name
+
+
+def test_every_preset_carries_attribution():
+    """A basemap licence generally requires the credit to travel with the image."""
+    for name in _BASEMAP_PRESETS:
+        assert _resolve_basemap(name, 1.0)["attribution"].strip(), name
+
+
+def test_deprecated_aliases_resolve_to_canonical_presets():
+    """Old CARTO-era names keep working; the response reports what was drawn."""
+    for alias, canonical in _BASEMAP_ALIASES.items():
+        spec = _resolve_basemap(alias, 1.0)
+        assert canonical in _BASEMAP_PRESETS, canonical
+        assert spec["name"] == canonical, alias
+        assert spec["url"] == _BASEMAP_PRESETS[canonical][0]
+
+
+def test_basemap_literal_matches_the_presets_and_aliases():
+    """The tool's enum must offer exactly what _resolve_basemap accepts."""
+    declared = set(get_args(BasemapName))
+    assert declared == {"none"} | set(_BASEMAP_PRESETS) | set(_BASEMAP_ALIASES)
 
 
 def test_choropleth_default_sends_no_basemap_spec(fake_executor):
@@ -70,7 +109,7 @@ def test_choropleth_basemap_threads_spec_into_params(fake_executor):
     spec = fake_executor.calls[0][1]["basemap_spec"]
     assert spec is not None and spec["kind"] == "xyz"
     assert spec["opacity"] == 0.85
-    assert "cartocdn" in spec["url"]
+    assert spec["name"] == "light"  # alias resolved before dispatch
 
 
 def test_choropleth_response_carries_attribution(fake_executor):

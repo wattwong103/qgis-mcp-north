@@ -1115,7 +1115,19 @@ class QgisMCPServer(QObject):
         Returns ``(layer_or_None, source_label_or_None)``. On success the raster
         layer is added to ``project`` and its id appended to ``transient_ids`` so
         the existing ``finally`` teardown removes it. The user's project keeps no
-        surviving state. source_label is for the response (e.g. "positron (live xyz)").
+        surviving state. source_label is for the response (e.g. "light (live xyz)").
+
+        ``isValid()`` is the only check available here, and it is weaker than it
+        looks: it says the *provider* was constructed, not that a single tile
+        ever arrived. A tile server that has moved behind an API key is
+        indistinguishable at this layer — CARTO's key-walled CDN answers
+        HTTP 200 with a well-formed PNG that happens to read "API KEY REQUIRED"
+        in every tile. No status code, content type, or QGIS API call
+        distinguishes that from a real basemap; only looking at the pixels does.
+        Do not add a runtime "is the basemap alive" probe here — it would cost a
+        network round trip per render and still not answer the question.
+        Preset liveness is covered instead by ``tests/test_basemap_liveness.py``
+        (``pytest -m network``), which inspects tile colour complexity.
         """
         if not basemap_spec:
             return None, None

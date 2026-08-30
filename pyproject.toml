@@ -47,5 +47,6 @@ pythonpath = ["."]
 markers = [
     "bench: long-running benchmarks (skipped by default; run with `pytest -m bench`)",
     "slow: integration tests that take >10s",
+    "network: hits live tile servers; deselected by default so CI/offline runs stay green",
 ]
-addopts = "-m 'not bench'"
+addopts = "-m 'not bench and not network'"
