@@ -42,13 +42,19 @@ transport-agnostic — anything holding WKT can use it.
 
 New optional extra: `duckdb`.
 
-**Verification caveat, stated plainly:** the real target, PFLOW's
-`viz/pflow.duckdb` (~8.8 GB), lives on the author's Windows machine and was not
-reachable from here. Everything was verified against a synthetic DuckDB built to
-exercise the same code paths — WKT polygons, lon/lat points, graduated styling,
-the row cap, read-only enforcement and every error path — but not against the
-real schema. The first run against `pflow.duckdb` should be treated as the real
-test, and column names will need to match that schema.
+**Verified against real PFLOW data** (corrected — the v1.6.0 PR claimed this
+was not possible on macOS; it was, the files were simply under a different
+path). `~/Dropbox/PFLOW/output/viz/kichijoji.duckdb` (1.1 GB) renders:
+`density_hourly` at hour 8 → 5,981 points, quantile-graduated by `weight` over a
+QuickMapServices basemap, showing Tokyo's rail corridors; and `waypoints`
+(9,975,290 rows) correctly capped at `max_features` with `row_limit_hit=True`,
+in ~1s — the LIMIT wrapper doing exactly its job on a table far too large to
+materialise.
+
+One path remains synthetic-only: **no PFLOW table carries a WKT geometry
+column** — every one is lon/lat pairs — so `geometry_column` is exercised only by
+`tests/test_render_from_duckdb.py`. That is a property of the data, not a gap in
+the testing, and it will stay that way until a table with WKT exists.
 
 231 passed, 2 skipped.
 

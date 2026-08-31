@@ -889,7 +889,7 @@ class DuckDbRenderResult(RenderResult):
     )
 )
 def qgis_render_from_duckdb(
-    db_path: Annotated[str, Field(description="Absolute path to a DuckDB database file, e.g. viz/pflow.duckdb.")],
+    db_path: Annotated[str, Field(description="Absolute path to a DuckDB database file, e.g. ~/Dropbox/PFLOW/output/viz/kichijoji.duckdb.")],
     query: Annotated[str, Field(description="SELECT returning one row per feature. Must include the geometry columns named below. The connection is opened READ-ONLY, so the query cannot modify the database.")],
     output_png: Annotated[str, Field(description="Absolute path for the output PNG.")],
     geometry_column: Annotated[str | None, Field(description='Column holding WKT geometry text, e.g. "geom". For a DuckDB spatial GEOMETRY column, wrap it in the query: SELECT ST_AsText(geom) AS geom. Mutually exclusive with lon_column/lat_column.')] = None,
@@ -911,8 +911,9 @@ def qgis_render_from_duckdb(
 ) -> DuckDbRenderResult:
     """Render the result of a DuckDB query directly, with no CSV in between.
 
-    For PFLOW's `viz/pflow.duckdb` (~8.8 GB): querying it beats exporting a CSV
-    and loading that, both in time and in not materialising an intermediate file.
+    For PFLOW's DuckDB stores — `output/viz/kichijoji.duckdb` is 1.1 GB with
+    ~10M waypoints — querying beats exporting a CSV and loading that, both in
+    time and in not materialising an intermediate file.
 
     Geometry has to be named explicitly because a DuckDB table has no convention
     for where it lives — either `geometry_column` (WKT text) or the

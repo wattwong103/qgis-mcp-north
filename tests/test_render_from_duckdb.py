@@ -1,9 +1,11 @@
 """qgis_render_from_duckdb — query a DuckDB file and render the result.
 
-The v0.3 roadmap flagged this for PFLOW's `viz/pflow.duckdb` (~8.8 GB), to skip
-the CSV intermediate. That database lives on the author's Windows machine, so
-these tests build a small synthetic one instead: the code paths are the same,
-only the row counts differ.
+The v0.3 roadmap flagged this for a PFLOW DuckDB store, to skip the CSV
+intermediate. These tests build a small synthetic database so they run anywhere
+— including CI, which has no PFLOW data. The real stores are listed in
+DESIGN.md §10 and the tool is verified against them separately; note they hold
+lon/lat columns and no WKT, so the `geometry_column` path is exercised only
+here.
 
 Query-side tests use a real DuckDB and a FakeExecutor, so they run anywhere the
 duckdb extra is installed. The render-side tests need QGIS and skip without it.
