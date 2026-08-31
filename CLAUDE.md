@@ -100,7 +100,7 @@ uv tool run ruff check src/ tests/
 | `qgis_batch_render` | ✅ v0.5 | Fan-out per attribute value; active-layer convention (saved-active → first vector fallback); manifest + per-value errors; `subset_string` reset in `finally` |
 | `qgis_figures_to_pptx` | ✅ v0.3 | Pure python-pptx; `two_column` + `title_image_caption` degrade to `title_only` |
 | `qgis_list_basemaps` | ✅ v1.5 | Discovery for `basemap=`: built-in presets + every usable QuickMapServices source in the QGIS profile, plus `qms_rejected` explaining what was filtered (non-3857 CRS, licence-restricted providers) and why. |
-| `qgis_render_from_duckdb` | ✅ v1.6 | Query a DuckDB file and render the result — no CSV intermediate. Geometry via `geometry_column` (WKT text) or `lon_column`/`lat_column`. Connection is READ-ONLY and the query is LIMIT-wrapped, so a mistaken `SELECT *` against `viz/pflow.duckdb` (~8.8 GB) can neither mutate nor OOM. Plugin handler: `render_wkt_features`. |
+| `qgis_render_from_duckdb` | ✅ v1.6 | Query a DuckDB file and render the result — no CSV intermediate. Geometry via `geometry_column` (WKT text) or `lon_column`/`lat_column`. Connection is READ-ONLY and the query is LIMIT-wrapped, so a mistaken `SELECT *` against a multi-GB store (e.g. `output/viz/kichijoji.duckdb`, ~10M waypoints) can neither mutate nor OOM. Plugin handler: `render_wkt_features`. |
 | `qgis_eval` | ✅ v1.0 | Arbitrary PyQGIS escape hatch with `return_vars` capture. Plugin's `execute_code` augmented with `_json_safe()` fallback (non-serializable values → `repr()`). |
 
 ## Key Details

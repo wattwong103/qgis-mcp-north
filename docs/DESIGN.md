@@ -422,8 +422,9 @@ with `geometry_precision` and `simplify_tolerance` as the size controls; the
 default is unchanged.
 
 **`qgis_render_from_duckdb`.** Runs a query against a DuckDB file and renders the
-result directly, for PFLOW's `viz/pflow.duckdb` (~8.8 GB) where exporting a CSV
-first costs both time and an intermediate file. Two safety properties are
+result directly, for PFLOW's DuckDB stores (see §10 — `kichijoji.duckdb` is
+1.1 GB with ~10M waypoints) where exporting a CSV first costs both time and an
+intermediate file. Two safety properties are
 load-bearing, not incidental:
 
 | Guard | Why |
@@ -523,7 +524,7 @@ Still open:
 
 6. **PPTX template.** Is there a Chulalongkorn / Sekimoto-lab / W17 deck template `figures_to_pptx` should default to? If so, drop the path in `assets/` and we'll wire it as the default `template_pptx`.
 
-7. **DuckDB integration.** `viz/pflow.duckdb` (8.8 GB) holds pre-built spatial data. Worth a v2 tool `qgis_render_from_duckdb(query, ...)` that runs a query and renders the result, bypassing CSV intermediates. **Not in v1 scope** but worth flagging.
+7. **DuckDB integration.** ✅ **Shipped in v1.6** as `qgis_render_from_duckdb`. Flagged here originally against a `viz/pflow.duckdb` that turned out not to exist; the real stores are inventoried in §10.
 
 8. ~~**DRM-link aggregation (v2 candidate).**~~ → Resolved in v1.2 (2026-05-22). Shipped `qgis_render_link_density` + `scripts/build_drm_network.py` (one-time prep, builds `assets/drm_network.gpkg` from 47 prefecture-sharded DRM TSVs). MCP-side streaming aggregation (no full-load), plugin-side graduated line rendering. New `[drm]` extra (pyogrio + geopandas) for the prep script only; tool runtime adds no deps. New error: `DRMNetworkNotFoundError`. See §4 for the tool signature.
 
@@ -621,5 +622,6 @@ Categories: water bodies, built-up, paddy, cropland, grassland, DBF, DNF, EBF, E
 `H:\Dropbox\PFLOW\data\network\drm_NN.tsv` (NN = 01..47 by prefecture)
 Schema (tab-separated, no header): `link_id, from_node, to_node, road_class_code, c5, c6, c7, c8, from_lon, from_lat, to_lon, to_lat, wkt_linestring`. The `link_id` joins to `trajectory_*.csv[link_id]` — this is the v2 link-density aggregation source. Not in v1.
 
-**Spatial database** (8.8 GB, v2 tool target)
-`viz/pflow.duckdb`
+**Spatial database** — see the DuckDB table at the top of this section. The
+`viz/pflow.duckdb` named here originally does not exist; `kichijoji.duckdb`
+(1.1 GB) is the real store, and `qgis_render_from_duckdb` shipped in v1.6.
