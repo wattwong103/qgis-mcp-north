@@ -46,6 +46,24 @@ def test_vector_shapefile_returns_layer_info(fake_executor):
     assert result.extent == [122.9, 24.0, 153.99, 45.55]
     assert [f.name for f in result.fields] == ["nam", "nam_ja"]
     assert result.fields[0].type == "String"
+    assert result.fields[0].n_unique is None
+
+
+def test_vector_unique_counts_passthrough(fake_executor):
+    fake_executor.responses["add_vector_layer"] = {"id": "L1", "name": "z"}
+    fake_executor.responses["get_layer_info"] = {
+        "type": "vector_2",
+        "crs": "EPSG:4326",
+        "extent": {"xmin": 0, "ymin": 0, "xmax": 1, "ymax": 1},
+        "feature_count": 4,
+        "fields": [
+            {"name": "zone_id", "type": "String", "n_unique": 4},
+            {"name": "name", "type": "String", "n_unique": 4},
+        ],
+    }
+    fake_executor.responses["remove_layer"] = {"ok": True}
+    result = qgis_layer_inspect("/tmp/z.geojson")
+    assert result.fields[0].n_unique == 4
 
     commands = [c[0] for c in fake_executor.calls]
     assert commands == ["add_vector_layer", "get_layer_info", "remove_layer"]

@@ -153,6 +153,18 @@ class LayoutNotFoundError(QgisMcpWorkflowsError):
         self.available = available
 
 
+class AtlasDisabledError(QgisMcpWorkflowsError):
+    """The named print layout has no atlas coverage layer."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            f"Layout {name!r} has no atlas coverage layer. "
+            f"Next: call qgis_export_layout for a single page, or qgis_batch_render "
+            f"to fan out per attribute."
+        )
+        self.name = name
+
+
 class DRMNetworkNotFoundError(QgisMcpWorkflowsError):
     """The DRM network GeoPackage is missing — qgis_render_link_density needs it."""
 
@@ -164,3 +176,39 @@ class DRMNetworkNotFoundError(QgisMcpWorkflowsError):
             f"Next: run the prep script, then retry qgis_render_link_density with the same path."
         )
         self.path = path
+
+
+class NetworkExtraMissingError(QgisMcpWorkflowsError):
+    """networkx (the [network] extra) is required for section-load assignment."""
+
+    def __init__(self, extra_hint: str | None = None) -> None:
+        extra = extra_hint or "Install with: uv sync --extra network"
+        super().__init__(
+            f"qgis_assign_section_load / qgis_route_on_network needs networkx. {extra} "
+            f"Next: uv sync --extra network, then retry."
+        )
+        self.extra_hint = extra_hint
+
+
+class SpatialJoinEmptyError(QgisMcpWorkflowsError):
+    """A spatial join matched zero target features."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"Likely CRS mismatch or the layers do not overlap. "
+            f"Next: call qgis_layer_inspect on both paths and compare crs + extent."
+        )
+        self.detail = detail
+
+
+class ZonalStatsError(QgisMcpWorkflowsError):
+    """Zonal statistics could not run (bad raster, non-polygon zones, write fail)."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"Next: call qgis_layer_inspect on the zones path and the raster path, "
+            f"then retry qgis_zonal_stats."
+        )
+        self.detail = detail

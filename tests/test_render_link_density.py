@@ -44,6 +44,27 @@ def _write_traj_csv(path: Path, rows: list[dict]) -> None:
             w.writerow(r)
 
 
+def test_load_csv_dispatches_volumes(fake_executor, tmp_path: Path):
+    from qgis_mcp_workflows.server import qgis_render_link_density
+
+    load = tmp_path / "loads.csv"
+    load.write_text("link_id,volume\n100001,12.5\n100002,3\n", encoding="utf-8")
+    drm = tmp_path / "drm.gpkg"
+    drm.write_bytes(b"")
+    fake_executor.responses["render_link_density"] = _ok_response()
+    result = qgis_render_link_density(
+        drm_network_path=str(drm),
+        output_png="/tmp/links.png",
+        load_csv=str(load),
+        label_field="density",
+    )
+    params = fake_executor.calls[0][1]
+    assert params["density"]["100001"] == 12.5
+    assert params["label_field"] == "density"
+    assert params["aggregation"] == "sum"
+    assert result.aggregation == "sum"
+
+
 def test_drm_path_missing_raises(fake_executor, tmp_path: Path):
     from qgis_mcp_workflows.errors import DRMNetworkNotFoundError
     from qgis_mcp_workflows.server import qgis_render_link_density

@@ -112,6 +112,17 @@ def test_unmatched_zones_surface_in_response(fake_executor):
     assert result.n_flows_rendered == 4
 
 
+def test_label_field_forwarded(fake_executor):
+    fake_executor.responses["render_od_flows"] = _ok_response()
+    qgis_render_od_flows(
+        od_csv=str(TINY_OD),
+        zones_layer_path=str(TINY_ZONES),
+        output_png="/tmp/od.png",
+        label_field="trip_count",
+    )
+    assert fake_executor.calls[0][1]["label_field"] == "trip_count"
+
+
 def test_missing_origin_col_raises_field_not_found(fake_executor, tmp_path: Path):
     bad = tmp_path / "bad.csv"
     _write_csv(bad, ["from_zone", "destination", "trip_count"], [["Z01", "Z02", "10"]])

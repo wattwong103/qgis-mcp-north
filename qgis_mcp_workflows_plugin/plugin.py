@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import contextlib
 import fnmatch
@@ -33,6 +35,7 @@ from qgis.core import (
     QgsFeature,
     QgsFeatureRequest,
     QgsField,
+    QgsFields,
     QgsGeometry,
     QgsGraduatedSymbolRenderer,
     QgsHeatmapRenderer,
@@ -55,6 +58,7 @@ from qgis.core import (
     QgsMapSettings,
     QgsMarkerSymbol,
     QgsMessageLog,
+    QgsPalettedRasterRenderer,
     QgsPointXY,
     QgsProject,
     QgsProperty,
@@ -64,9 +68,11 @@ from qgis.core import (
     QgsRendererRange,
     QgsSettings,
     QgsSingleSymbolRenderer,
+    QgsSpatialIndex,
     QgsStyle,
     QgsSymbol,
     QgsSymbolLayer,
+    QgsVectorFileWriter,
     QgsVectorLayer,
     QgsWkbTypes,
 )
@@ -114,6 +120,7 @@ from .compat import (
 
 _DEFAULT_HOST = "localhost"
 _DEFAULT_PORT = 9877  # qgis-mcp-workflows uses 9877 (vs upstream nkarasiak on 9876)
+_UNIQUE_SCAN_MAX = 10000  # skip n_unique on huge layers (trajectory CSVs)
 _RECV_CHUNK_SIZE = 65536
 _MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 _HEADER_STRUCT = struct.Struct(">I")
@@ -325,6 +332,9 @@ class QgisMCPServer(QObject):
                 "find_layer": self.find_layer,
                 "list_layouts": self.list_layouts,
                 "export_layout": self.export_layout,
+                "export_atlas": self.export_atlas,
+                "spatial_join": self.spatial_join,
+                "zonal_stats": self.zonal_stats,
                 "compose_layout": self.compose_layout,
                 # Phase 3 — Plugin development & system management
                 "get_message_log": self.get_message_log,
@@ -479,10 +489,11 @@ class QgisMCPServer(QObject):
                 "id": layer.id(),
                 "name": layer.name(),
                 "type": self._get_layer_type(layer),
-                "visible": (
-                    layer.isValid() and project.layerTreeRoot().findLayer(layer.id()).isVisible()
-                ),
+                "visible": False,
             }
+            node = project.layerTreeRoot().findLayer(layer.id())
+            if node is not None:
+                layer_info["visible"] = bool(layer.isValid() and node.isVisible())
             info["layers"].append(layer_info)
 
         return info
@@ -963,6 +974,29 @@ class QgisMCPServer(QObject):
                 {"name": f.name(), "type": f.typeName(), "length": f.length()}
                 for f in layer.fields()
             ]
+            n_feat = info["feature_count"]
+            if 0 <= n_feat <= _UNIQUE_SCAN_MAX and info["fields"]:
+                names = [f["name"] for f in info["fields"]]
+                buckets = {n: set() for n in names}
+                req = QgsFeatureRequest()
+                try:
+                    req.setFlags(QgsFeatureRequest.NoGeometry)
+                except Exception:
+                    try:
+                        req.setFlags(QgsFeatureRequest.Flag.NoGeometry)
+                    except Exception:
+                        req = QgsFeatureRequest()
+                for feat in layer.getFeatures(req):
+                    for n in names:
+                        val = feat[n]
+                        if val is None:
+                            continue
+                        try:
+                            buckets[n].add(val)
+                        except TypeError:
+                            buckets[n].add(str(val))
+                for field_info in info["fields"]:
+                    field_info["n_unique"] = len(buckets[field_info["name"]])
         elif layer.type() == LAYER_RASTER:
             info["width"] = layer.width()
             info["height"] = layer.height()
@@ -1142,8 +1176,7 @@ class QgisMCPServer(QObject):
         render.start()
         render.waitForFinished()
         img = render.renderedImage()
-        if not img.save(output_png):
-            raise Exception(f"Failed to save render to {output_png}")
+        self._save_map_image(img, output_png, ms, kwargs)
 
         return {
             "output_path": output_png,
@@ -1363,8 +1396,9 @@ class QgisMCPServer(QObject):
             job = QgsMapRendererParallelJob(ms)
             job.start()
             job.waitForFinished()
-            if not job.renderedImage().save(output_png):
-                raise Exception("Failed to save render to %s" % output_png)
+            img = job.renderedImage()
+            attr = basemap_spec.get("attribution") if basemap_spec else None
+            self._save_map_image(img, output_png, ms, kwargs, attr)
 
             return {
                 "output_path": output_png,
@@ -1445,6 +1479,89 @@ class QgisMCPServer(QObject):
         project.addMapLayer(bm)
         transient_ids.append(bm.id())
         return bm, f"{name} (live xyz)", basemap_spec
+
+    def _load_underlay_layers(self, basemap_paths, project, transient_ids):
+        """Load vector or raster files listed in basemap_paths (bottom layers).
+
+        Rasters named like JAXA HRLULC get the published 15-class palette when
+        GDAL does not already attach a colour table.
+        """
+        layers = []
+        for bm_path in basemap_paths or []:
+            bm = self._load_underlay_layer(bm_path, project, transient_ids)
+            if bm is not None:
+                layers.append(bm)
+        return layers
+
+    def _load_underlay_layer(self, bm_path, project, transient_ids):
+        ext = os.path.splitext(bm_path)[1].lower()
+        raster_exts = (".tif", ".tiff", ".geotiff", ".vrt", ".asc", ".img", ".jp2")
+        if ext in raster_exts:
+            bm = QgsRasterLayer(bm_path, os.path.basename(bm_path))
+            if not bm.isValid():
+                QgsMessageLog.logMessage(
+                    "Basemap skipped (invalid raster): %s" % bm_path, self.LOG_TAG, MSG_WARNING
+                )
+                return None
+            self._maybe_style_jaxa_lulc(bm_path, bm)
+        else:
+            bm = QgsVectorLayer(bm_path, os.path.basename(bm_path), "ogr")
+            if not bm.isValid():
+                QgsMessageLog.logMessage(
+                    "Basemap skipped (invalid): %s" % bm_path, self.LOG_TAG, MSG_WARNING
+                )
+                return None
+            self._style_underlay_vector(bm)
+        project.addMapLayer(bm)
+        transient_ids.append(bm.id())
+        return bm
+
+    def _style_underlay_vector(self, layer):
+        """Mute default QGIS brown fill so underlays don't hide the data."""
+        gtype = layer.geometryType()
+        if gtype == GEOM_POLYGON:
+            fill = QgsFillSymbol.createSimple({
+                "color": "247,249,251,220",
+                "outline_color": "212,219,227",
+                "outline_width": "0.3",
+            })
+            layer.setRenderer(QgsSingleSymbolRenderer(fill))
+        elif gtype == GEOM_LINE:
+            line = QgsLineSymbol.createSimple({
+                "line_color": "#C6CFD9",
+                "line_width": "0.45",
+            })
+            layer.setRenderer(QgsSingleSymbolRenderer(line))
+        elif gtype == GEOM_POINT:
+            mark = QgsMarkerSymbol.createSimple({
+                "name": "circle",
+                "color": "#7F8C8D",
+                "size": "1.2",
+                "outline_style": "no",
+            })
+            layer.setRenderer(QgsSingleSymbolRenderer(mark))
+
+    def _maybe_style_jaxa_lulc(self, path, layer):
+        """Apply JAXA HRLULC classes when the filename looks like that product."""
+        name = os.path.basename(path).lower()
+        if not any(token in name for token in ("lulc", "jaxa", "2024jpn", "jpn_v")):
+            return
+        try:
+            from .colormaps import JAXA_LULC_CLASSES
+        except Exception:
+            return
+        classes = []
+        for value, rgba, label in JAXA_LULC_CLASSES:
+            r, g, b, a = rgba
+            classes.append(
+                QgsPalettedRasterRenderer.Class(int(value), QColor(r, g, b, a), label)
+            )
+        try:
+            layer.setRenderer(QgsPalettedRasterRenderer(layer.dataProvider(), 1, classes))
+        except Exception:
+            QgsMessageLog.logMessage(
+                "JAXA LULC palette not applied: %s" % path, self.LOG_TAG, MSG_WARNING
+            )
 
     def _reproject_extent_to_3857(self, rect, src_crs):
         """Reproject a QgsRectangle from src_crs to EPSG:3857 (Web Mercator).
@@ -1528,7 +1645,7 @@ class QgisMCPServer(QObject):
         renderer = QgsGraduatedSymbolRenderer(field, ranges)
         return renderer, list(bc.breaks), bc.one_sided
 
-    def _apply_label_halo(self, layer, field, size=9.0, buffer_mm=1.0):
+    def _apply_label_halo(self, layer, field, size=9.0, buffer_mm=1.0, along_line=False):
         """Enable simple labeling on ``field`` with a white halo (text buffer)."""
         from qgis.core import (
             QgsPalLayerSettings,
@@ -1539,6 +1656,14 @@ class QgisMCPServer(QObject):
 
         settings = QgsPalLayerSettings()
         settings.fieldName = field
+        if along_line:
+            try:
+                settings.placement = QgsPalLayerSettings.Line
+            except Exception:
+                try:
+                    settings.placement = QgsPalLayerSettings.Placement.Line
+                except Exception:
+                    pass
         fmt = QgsTextFormat()
         try:
             fmt.setSize(float(size))
@@ -1553,6 +1678,182 @@ class QgisMCPServer(QObject):
         layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
         layer.setLabelsEnabled(True)
 
+    @staticmethod
+    @staticmethod
+    def _nice_map_length(meters):
+        """Round a metre length to 1/2/5 * 10^n for a readable scale bar."""
+        import math
+
+        if meters <= 0:
+            return 1.0
+        exp = int(math.floor(math.log10(meters)))
+        frac = meters / float(10 ** exp)
+        if frac < 1.5:
+            nice = 1
+        elif frac < 3.5:
+            nice = 2
+        elif frac < 7.5:
+            nice = 5
+        else:
+            nice = 10
+        return nice * float(10 ** exp)
+
+    def _fmt_legend_num(self, v):
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return str(v)
+        if abs(fv) >= 10:
+            return "{:,.0f}".format(fv)
+        return "{:g}".format(fv)
+
+    def _overlay_map_furniture(
+        self,
+        img,
+        ms,
+        scale_bar=False,
+        north_arrow=False,
+        attribution=None,
+        title=None,
+        legend_items=None,
+    ):
+        """Paint scale bar / north arrow / title / legend / attribution onto a PNG.
+
+        Canvas decorations (View > Decorations) need iface; this is the
+        headless-safe equivalent for workflow PNGs. No-op when every flag is off
+        and attribution is empty, so existing renders stay byte-identical.
+        """
+        if (
+            not scale_bar
+            and not north_arrow
+            and not attribution
+            and not title
+            and not legend_items
+        ):
+            return
+        from qgis.core import QgsDistanceArea, QgsPointXY
+        from qgis.PyQt.QtCore import QPoint, Qt
+        from qgis.PyQt.QtGui import QBrush, QFont, QPainter, QPen, QPolygon
+
+        painter = QPainter(img)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            margin = max(12, int(img.width() * 0.015))
+            if scale_bar:
+                extent = ms.extent()
+                da = QgsDistanceArea()
+                try:
+                    da.setSourceCrs(ms.destinationCrs(), QgsProject.instance().transformContext())
+                    ell = ms.destinationCrs().ellipsoidAcronym()
+                    da.setEllipsoid(ell if ell else "WGS84")
+                except Exception:
+                    pass
+                try:
+                    width_m = da.measureLine(
+                        QgsPointXY(extent.xMinimum(), extent.yMinimum()),
+                        QgsPointXY(extent.xMaximum(), extent.yMinimum()),
+                    )
+                except Exception:
+                    width_m = 0.0
+                if width_m and width_m > 0:
+                    target_m = width_m / 5.0
+                    nice_m = self._nice_map_length(target_m)
+                    bar_px = max(24, int(round(nice_m / width_m * img.width())))
+                    if nice_m >= 1000:
+                        label = "%g km" % (nice_m / 1000.0)
+                    else:
+                        label = "%g m" % nice_m
+                    x0 = margin
+                    y0 = img.height() - margin - 18
+                    painter.setPen(QPen(QColor(0, 0, 0), 2))
+                    painter.setBrush(QBrush(QColor(255, 255, 255)))
+                    painter.drawRect(x0, y0 - 6, bar_px, 8)
+                    painter.fillRect(x0, y0 - 6, bar_px // 2, 8, QColor(0, 0, 0))
+                    painter.setPen(QPen(QColor(0, 0, 0)))
+                    painter.setFont(QFont("sans-serif", 9))
+                    painter.drawText(x0, y0 - 10, label)
+            if title:
+                painter.setFont(QFont("sans-serif", 13, QFont.Bold))
+                painter.setPen(QPen(QColor(255, 255, 255), 3))
+                painter.drawText(
+                    0, 6, img.width(), 28, int(Qt.AlignHCenter | Qt.AlignTop), str(title)
+                )
+                painter.setPen(QPen(QColor(20, 20, 20)))
+                painter.drawText(
+                    0, 6, img.width(), 28, int(Qt.AlignHCenter | Qt.AlignTop), str(title)
+                )
+            if legend_items:
+                painter.setFont(QFont("sans-serif", 9))
+                fm = painter.fontMetrics()
+                swatch = 12
+                pad = 8
+                row_h = max(16, fm.height() + 2)
+                text_w = max(fm.width(str(lab)) for lab, _col in legend_items)
+                box_w = pad * 2 + swatch + 6 + text_w
+                box_h = pad * 2 + row_h * len(legend_items)
+                bx = img.width() - margin - box_w
+                by = img.height() - margin - 18 - box_h
+                painter.setPen(QPen(QColor(80, 80, 80), 1))
+                painter.setBrush(QBrush(QColor(255, 255, 255, 230)))
+                painter.drawRect(bx, by, box_w, box_h)
+                for i, (lab, col) in enumerate(legend_items):
+                    yy = by + pad + i * row_h
+                    color = col if (col is not None and col.isValid()) else QColor(180, 180, 180)
+                    painter.setBrush(QBrush(color))
+                    painter.setPen(QPen(QColor(60, 60, 60), 1))
+                    painter.drawRect(bx + pad, yy + 2, swatch, swatch)
+                    painter.setPen(QPen(QColor(20, 20, 20)))
+                    painter.drawText(
+                        bx + pad + swatch + 6,
+                        yy,
+                        text_w,
+                        row_h,
+                        int(Qt.AlignVCenter | Qt.AlignLeft),
+                        str(lab),
+                    )
+            if north_arrow:
+                size = max(16, int(img.width() * 0.03))
+                cx = img.width() - margin - size
+                cy = margin + size + (22 if title else 0)
+                painter.setPen(QPen(QColor(0, 0, 0), 1))
+                painter.setBrush(QBrush(QColor(0, 0, 0)))
+                painter.drawPolygon(QPolygon([
+                    QPoint(cx, cy - size),
+                    QPoint(cx - size // 3, cy + size // 3),
+                    QPoint(cx, cy - size // 6),
+                    QPoint(cx + size // 3, cy + size // 3),
+                ]))
+                painter.setFont(QFont("sans-serif", 9, QFont.Bold))
+                painter.drawText(cx - 4, cy - size - 2, "N")
+            if attribution:
+                painter.setPen(QPen(QColor(40, 40, 40)))
+                painter.setFont(QFont("sans-serif", 8))
+                painter.drawText(
+                    margin,
+                    img.height() - 6,
+                    img.width() - 2 * margin,
+                    14,
+                    int(Qt.AlignRight | Qt.AlignVCenter),
+                    str(attribution),
+                )
+        finally:
+            painter.end()
+
+    def _save_map_image(self, img, output_png, ms, kwargs=None, attribution=None):
+        """Overlay optional furniture then write PNG. kwargs from MCP scale_bar/north_arrow."""
+        kwargs = kwargs or {}
+        self._overlay_map_furniture(
+            img,
+            ms,
+            scale_bar=bool(kwargs.get("scale_bar")),
+            north_arrow=bool(kwargs.get("north_arrow")),
+            attribution=attribution,
+            title=kwargs.get("title"),
+            legend_items=kwargs.get("legend_items") or None,
+        )
+        if not img.save(output_png):
+            raise Exception("Failed to save render to %s" % output_png)
+
     def render_choropleth(
         self,
         zones_path,
@@ -1566,6 +1867,8 @@ class QgisMCPServer(QObject):
         diverging=False,
         center=0.0,
         label_field=None,
+        title=None,
+        legend=True,
         basemap_paths=None,
         basemap_spec=None,
         width=1600,
@@ -1692,17 +1995,9 @@ class QgisMCPServer(QObject):
             min_value = min(values_only) if values_only else 0.0
             max_value = max(values_only) if values_only else 0.0
 
-            basemap_layers = []
-            for bm_path in basemap_paths or []:
-                bm = QgsVectorLayer(bm_path, os.path.basename(bm_path), "ogr")
-                if bm.isValid():
-                    project.addMapLayer(bm)
-                    transient_ids.append(bm.id())
-                    basemap_layers.append(bm)
-                else:
-                    QgsMessageLog.logMessage(
-                        f"Basemap skipped (invalid): {bm_path}", self.LOG_TAG, MSG_WARNING
-                    )
+            basemap_layers = self._load_underlay_layers(
+                basemap_paths, project, transient_ids
+            )
 
             tile_bm, basemap_source, basemap_spec = self._load_basemap_layer(
                 basemap_spec, project, transient_ids
@@ -1746,8 +2041,23 @@ class QgisMCPServer(QObject):
             job.start()
             job.waitForFinished()
             img = job.renderedImage()
-            if not img.save(output_png):
-                raise Exception(f"Failed to save render to {output_png}")
+            attr = basemap_spec.get("attribution") if basemap_spec else None
+            legend_items = []
+            if legend:
+                for rng in ranges:
+                    lab = "%s - %s" % (
+                        self._fmt_legend_num(rng.lowerValue()),
+                        self._fmt_legend_num(rng.upperValue()),
+                    )
+                    try:
+                        col = rng.symbol().color()
+                    except Exception:
+                        col = QColor(180, 180, 180)
+                    legend_items.append((lab, col))
+            save_kwargs = dict(kwargs)
+            save_kwargs["title"] = title
+            save_kwargs["legend_items"] = legend_items
+            self._save_map_image(img, output_png, ms, save_kwargs, attr)
 
             return {
                 "output_path": output_png,
@@ -1793,6 +2103,7 @@ class QgisMCPServer(QObject):
         features=None,
         input_path=None,
         basemap_paths=None,
+        basemap_spec=None,
         extent=None,
         width=1600,
         height=1200,
@@ -1834,19 +2145,16 @@ class QgisMCPServer(QObject):
                 traj_layer, render_mode, mode_col, speed_field
             )
 
-            basemap_layers = []
-            for bm_path in basemap_paths or []:
-                bm = QgsVectorLayer(bm_path, os.path.basename(bm_path), "ogr")
-                if bm.isValid():
-                    project.addMapLayer(bm)
-                    transient_ids.append(bm.id())
-                    basemap_layers.append(bm)
-                else:
-                    QgsMessageLog.logMessage(
-                        f"Basemap skipped (invalid): {bm_path}", self.LOG_TAG, MSG_WARNING
-                    )
+            basemap_layers = self._load_underlay_layers(
+                basemap_paths, project, transient_ids
+            )
 
+            tile_bm, basemap_source, basemap_spec = self._load_basemap_layer(
+                basemap_spec, project, transient_ids
+            )
             ordered_layers = [traj_layer, *basemap_layers]
+            if tile_bm is not None:
+                ordered_layers.append(tile_bm)
 
             if extent is not None:
                 xmin, ymin, xmax, ymax = extent
@@ -1864,10 +2172,16 @@ class QgisMCPServer(QObject):
 
             ms = QgsMapSettings()
             ms.setLayers(ordered_layers)
-            ms.setExtent(extent_rect)
             ms.setOutputSize(QSize(int(width), int(height)))
             ms.setOutputDpi(int(dpi))
-            ms.setDestinationCrs(traj_layer.crs())
+            if tile_bm is not None:
+                out_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+                extent_rect = self._reproject_extent_to_3857(extent_rect, traj_layer.crs())
+                ms.setDestinationCrs(out_crs)
+            else:
+                out_crs = traj_layer.crs()
+                ms.setDestinationCrs(out_crs)
+            ms.setExtent(extent_rect)
             color = QColor(background)
             if not color.isValid():
                 color = QColor(255, 255, 255)
@@ -1877,8 +2191,8 @@ class QgisMCPServer(QObject):
             job.start()
             job.waitForFinished()
             img = job.renderedImage()
-            if not img.save(output_png):
-                raise Exception(f"Failed to save render to {output_png}")
+            attr = basemap_spec.get("attribution") if basemap_spec else None
+            self._save_map_image(img, output_png, ms, kwargs, attr)
 
             n_points_rendered = (
                 len(features) if features is not None
@@ -1895,7 +2209,7 @@ class QgisMCPServer(QObject):
                     extent_rect.xMinimum(), extent_rect.yMinimum(),
                     extent_rect.xMaximum(), extent_rect.yMaximum(),
                 ],
-                "crs": traj_layer.crs().authid() or "EPSG:4326",
+                "crs": out_crs.authid() or "EPSG:4326",
                 "n_layers": len(ordered_layers),
                 "n_trajectories": int(n_trajectories),
                 "n_points_total": int(n_points_rendered),
@@ -1904,6 +2218,8 @@ class QgisMCPServer(QObject):
                 "time_range": None,
                 "modes": modes,
                 "used_movingpandas": bool(used_movingpandas),
+                "basemap_attribution": basemap_spec.get("attribution") if basemap_spec else None,
+                "basemap_source": basemap_source,
             }
         finally:
             for tid in transient_ids:
@@ -1943,24 +2259,38 @@ class QgisMCPServer(QObject):
                 buckets[tid].append(f)
 
             new_features = []
+            max_gap = 0.08  # ~8 km; split unrouted teleport legs so they don't blow the extent
             for tid in order:
-                points = [QgsPointXY(float(p["lon"]), float(p["lat"])) for p in buckets[tid]]
-                if len(points) < 2:
-                    continue  # need at least 2 points for a line
-                feat = QgsFeature(mem.fields())
-                feat.setGeometry(QgsGeometry.fromPolylineXY(points))
-                attrs = [tid]
-                if speed_field:
-                    # Average speed across the trajectory's points; per-segment
-                    # rendering would need cutting into segments, which we defer.
-                    speeds = [float(p.get("speed_kmh", 0.0)) for p in buckets[tid]]
-                    attrs.append(sum(speeds) / max(1, len(speeds)))
-                if mode_col:
-                    # Most common mode in the trajectory
-                    modes = [p.get("mode", "") for p in buckets[tid]]
-                    attrs.append(max(set(modes), key=modes.count) if modes else "")
-                feat.setAttributes(attrs)
-                new_features.append(feat)
+                pts = buckets[tid]
+                chunks = []
+                current = []
+                prev = None
+                for p in pts:
+                    xy = QgsPointXY(float(p["lon"]), float(p["lat"]))
+                    if prev is not None:
+                        dx = xy.x() - prev.x()
+                        dy = xy.y() - prev.y()
+                        if (dx * dx + dy * dy) ** 0.5 > max_gap:
+                            if len(current) >= 2:
+                                chunks.append(current)
+                            current = []
+                    current.append((xy, p))
+                    prev = xy
+                if len(current) >= 2:
+                    chunks.append(current)
+                for chunk in chunks:
+                    points = [c[0] for c in chunk]
+                    feat = QgsFeature(mem.fields())
+                    feat.setGeometry(QgsGeometry.fromPolylineXY(points))
+                    attrs = [tid]
+                    if speed_field:
+                        speeds = [float(c[1].get("speed_kmh", 0.0)) for c in chunk]
+                        attrs.append(sum(speeds) / max(1, len(speeds)))
+                    if mode_col:
+                        modes = [c[1].get("mode", "") for c in chunk]
+                        attrs.append(max(set(modes), key=modes.count) if modes else "")
+                    feat.setAttributes(attrs)
+                    new_features.append(feat)
             provider.addFeatures(new_features)
             mem.updateExtents()
             return mem, len(order)
@@ -2111,6 +2441,7 @@ class QgisMCPServer(QObject):
         height=1200,
         dpi=150,
         background="white",
+        label_field=None,
         **kwargs,
     ):
         """Render origin-destination arcs over a polygon zones layer.
@@ -2200,14 +2531,17 @@ class QgisMCPServer(QObject):
                         self.LOG_TAG, MSG_WARNING,
                     )
             mem.setRenderer(QgsSingleSymbolRenderer(symbol))
+            if label_field:
+                names = [f.name() for f in mem.fields()]
+                if label_field not in names:
+                    raise Exception(
+                        f"label_field {label_field!r} not on OD layer; available: {names}"
+                    )
+                self._apply_label_halo(mem, label_field, size=8.0, along_line=True)
 
-            basemap_layers = []
-            for bm_path in basemap_paths or []:
-                bm = QgsVectorLayer(bm_path, os.path.basename(bm_path), "ogr")
-                if bm.isValid():
-                    project.addMapLayer(bm)
-                    transient_ids.append(bm.id())
-                    basemap_layers.append(bm)
+            basemap_layers = self._load_underlay_layers(
+                basemap_paths, project, transient_ids
+            )
 
             tile_bm, basemap_source, basemap_spec = self._load_basemap_layer(
                 basemap_spec, project, transient_ids
@@ -2245,8 +2579,8 @@ class QgisMCPServer(QObject):
             job.start()
             job.waitForFinished()
             img = job.renderedImage()
-            if not img.save(output_png):
-                raise Exception(f"Failed to save render to {output_png}")
+            attr = basemap_spec.get("attribution") if basemap_spec else None
+            self._save_map_image(img, output_png, ms, kwargs, attr)
 
             return {
                 "output_path": output_png,
@@ -2375,8 +2709,9 @@ class QgisMCPServer(QObject):
             job = QgsMapRendererParallelJob(ms)
             job.start()
             job.waitForFinished()
-            if not job.renderedImage().save(output_png):
-                raise Exception(f"Failed to save render to {output_png}")
+            img = job.renderedImage()
+            attr = basemap_spec.get("attribution") if basemap_spec else None
+            self._save_map_image(img, output_png, ms, kwargs, attr)
 
             return {
                 "output_path": output_png,
@@ -2512,8 +2847,9 @@ class QgisMCPServer(QObject):
             job = QgsMapRendererParallelJob(ms)
             job.start()
             job.waitForFinished()
-            if not job.renderedImage().save(output_png):
-                raise Exception(f"Failed to save render to {output_png}")
+            img = job.renderedImage()
+            attr = basemap_spec.get("attribution") if basemap_spec else None
+            self._save_map_image(img, output_png, ms, kwargs, attr)
 
             return {
                 "output_path": output_png,
@@ -2554,6 +2890,7 @@ class QgisMCPServer(QObject):
         width=1600,
         height=1200,
         dpi=150,
+        label_field=None,
         **kwargs,
     ):
         """Render a graduated link-density choropleth from a {link_id → density} dict.
@@ -2629,6 +2966,12 @@ class QgisMCPServer(QObject):
             renderer.setClassificationMethod(method_cls())
             renderer.updateClasses(drm_layer, int(n_classes))
             drm_layer.setRenderer(renderer)
+            if label_field:
+                halo_field = density_field if label_field in (True, "density", density_field) else label_field
+                names = [f.name() for f in drm_layer.fields()]
+                if halo_field not in names:
+                    halo_field = density_field
+                self._apply_label_halo(drm_layer, halo_field, size=7.0, along_line=True)
 
             ranges = list(renderer.ranges())
             breaks: list[float] = []
@@ -2642,17 +2985,9 @@ class QgisMCPServer(QObject):
             max_density = max(values_with_density) if values_with_density else 0.0
 
             # 5. Build basemap layers
-            basemap_layers = []
-            for bm_path in basemap_paths or []:
-                bm = QgsVectorLayer(bm_path, os.path.basename(bm_path), "ogr")
-                if bm.isValid():
-                    project.addMapLayer(bm)
-                    transient_ids.append(bm.id())
-                    basemap_layers.append(bm)
-                else:
-                    QgsMessageLog.logMessage(
-                        f"Basemap skipped (invalid): {bm_path}", self.LOG_TAG, MSG_WARNING
-                    )
+            basemap_layers = self._load_underlay_layers(
+                basemap_paths, project, transient_ids
+            )
 
             tile_bm, basemap_source, basemap_spec = self._load_basemap_layer(
                 basemap_spec, project, transient_ids
@@ -2692,8 +3027,8 @@ class QgisMCPServer(QObject):
             job.start()
             job.waitForFinished()
             img = job.renderedImage()
-            if not img.save(output_png):
-                raise Exception(f"Failed to save render to {output_png}")
+            attr = basemap_spec.get("attribution") if basemap_spec else None
+            self._save_map_image(img, output_png, ms, kwargs, attr)
 
             return {
                 "output_path": output_png,
@@ -2847,9 +3182,7 @@ class QgisMCPServer(QObject):
             unique_values = sorted(
                 layer.uniqueValues(idx), key=lambda x: str(x) if x is not None else ""
             )
-            ramp = QgsStyle.defaultStyle().colorRamp(color_ramp)
-            if not ramp:
-                ramp = QgsStyle.defaultStyle().colorRamp("Spectral")
+            ramp = self._resolve_color_ramp(color_ramp)
 
             # Count features per value in a single pass (cheap for typical N).
             counts: dict = {}
@@ -3074,10 +3407,21 @@ class QgisMCPServer(QObject):
         manager = QgsProject.instance().layoutManager()
         layouts = []
         for layout in manager.layouts():
+            atlas_on = False
+            atlas_count = 0
+            try:
+                atlas = layout.atlas()
+                atlas_on = bool(atlas.enabled())
+                if atlas_on:
+                    atlas_count = int(atlas.count())
+            except Exception:
+                pass
             layouts.append(
                 {
                     "name": layout.name(),
                     "page_count": layout.pageCollection().pageCount(),
+                    "atlas_enabled": atlas_on,
+                    "atlas_count": atlas_count,
                 }
             )
         return {"layouts": layouts, "count": len(layouts)}
@@ -3311,6 +3655,481 @@ class QgisMCPServer(QObject):
             "format": fmt,
             "n_pages": int(n_pages),
             "layout_name": layout_name,
+        }
+
+    def export_atlas(
+        self,
+        layout_name,
+        output_dir,
+        format="png",
+        dpi=300,
+        qgz_path=None,
+        **kwargs,
+    ):
+        """Export every atlas page from a print layout.
+
+        PNG/JPG: one image per coverage feature. PDF: one multi-page file
+        ``atlas.pdf`` in output_dir. Raises ATLAS_DISABLED when the layout
+        has no coverage layer (use export_layout / batch_render instead).
+        """
+        if qgz_path:
+            project = QgsProject.instance()
+            if project.fileName() != qgz_path:
+                project.clear()
+                if not project.read(qgz_path):
+                    raise Exception("Failed to load project from %s" % qgz_path)
+
+        if not output_dir:
+            raise Exception("export_atlas: output_dir required")
+        if not os.path.isdir(output_dir):
+            os.makedirs(output_dir)
+
+        manager = QgsProject.instance().layoutManager()
+        layout = manager.layoutByName(layout_name)
+        if not layout:
+            available = [lo.name() for lo in manager.layouts()]
+            raise Exception(
+                "LAYOUT_NOT_FOUND: %r. Available: %s" % (layout_name, available)
+            )
+
+        atlas = layout.atlas()
+        if atlas is None or not atlas.enabled():
+            raise Exception(
+                "ATLAS_DISABLED: layout %r has no atlas coverage layer. "
+                "Next: qgis_export_layout for a single page, or qgis_batch_render."
+                % layout_name
+            )
+
+        fmt = (format or "png").lower()
+        if fmt in ("jpg", "jpeg"):
+            fmt = "jpg"
+        exporter = QgsLayoutExporter(layout)
+        files = []
+
+        if fmt == "pdf":
+            out = os.path.join(output_dir, "atlas.pdf")
+            settings = QgsLayoutExporter.PdfExportSettings()
+            settings.dpi = dpi
+            result = None
+            try:
+                result = QgsLayoutExporter.exportToPdf(atlas, out, settings)
+            except TypeError:
+                result = exporter.exportToPdf(out, settings)
+            if result not in (LAYOUT_SUCCESS, None) and result != 0:
+                raise Exception("Atlas PDF export failed with code: %s" % result)
+            if os.path.exists(out):
+                files.append(out)
+        else:
+            settings = QgsLayoutExporter.ImageExportSettings()
+            settings.dpi = dpi
+            before = set(os.listdir(output_dir))
+            used_static = False
+            try:
+                result = QgsLayoutExporter.exportToImage(
+                    atlas, os.path.join(output_dir, "atlas"), fmt, settings
+                )
+                used_static = True
+                if result not in (LAYOUT_SUCCESS, None) and result != 0:
+                    raise Exception("Atlas image export failed with code: %s" % result)
+            except Exception:
+                used_static = False
+            if used_static:
+                after = set(os.listdir(output_dir))
+                files = sorted(
+                    os.path.join(output_dir, name) for name in sorted(after - before)
+                )
+            if not files:
+                if not atlas.beginRender():
+                    raise Exception("Atlas beginRender failed for layout %r" % layout_name)
+                try:
+                    idx = 0
+                    more = True
+                    while more:
+                        stem = atlas.currentFilename() or ("page_%04d" % idx)
+                        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in stem)
+                        path = os.path.join(output_dir, "%s.%s" % (safe, fmt))
+                        img_result = exporter.exportToImage(path, settings)
+                        if img_result != LAYOUT_SUCCESS and img_result != 0:
+                            raise Exception(
+                                "Atlas page %s export failed with code: %s" % (idx, img_result)
+                            )
+                        files.append(path)
+                        idx += 1
+                        more = bool(atlas.next())
+                finally:
+                    atlas.endRender()
+
+        return {
+            "ok": True,
+            "output_dir": output_dir,
+            "output_path": files[0] if files else output_dir,
+            "format": fmt,
+            "n_pages": len(files),
+            "layout_name": layout_name,
+            "files": files,
+            "atlas_enabled": True,
+        }
+
+    def _memory_copy(self, layer, name, dest_crs=None):
+        """Copy a vector layer into memory, optionally reprojecting geometries."""
+        crs = dest_crs if dest_crs is not None else layer.crs()
+        wkb = QgsWkbTypes.displayString(layer.wkbType()) or "Point"
+        mem = QgsVectorLayer("%s?crs=%s" % (wkb, crs.authid() or "EPSG:4326"), name, "memory")
+        dp = mem.dataProvider()
+        dp.addAttributes(layer.fields().toList())
+        mem.updateFields()
+        xform = None
+        if dest_crs is not None and dest_crs != layer.crs():
+            xform = QgsCoordinateTransform(layer.crs(), dest_crs, QgsProject.instance())
+        feats = []
+        for feat in layer.getFeatures():
+            nf = QgsFeature(mem.fields())
+            nf.setAttributes(feat.attributes())
+            geom = feat.geometry()
+            if geom is not None and not geom.isEmpty():
+                geom = QgsGeometry(geom)
+                if xform is not None:
+                    geom.transform(xform)
+                nf.setGeometry(geom)
+            feats.append(nf)
+        if feats:
+            dp.addFeatures(feats)
+        mem.updateExtents()
+        return mem
+
+    def _write_vector_layer(self, layer, output_path):
+        """Write a vector layer to gpkg / geojson / shp. Returns the path written."""
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        ext = os.path.splitext(output_path)[1].lower()
+        if ext in (".geojson", ".json"):
+            options.driverName = "GeoJSON"
+        elif ext == ".shp":
+            options.driverName = "ESRI Shapefile"
+        else:
+            options.driverName = "GPKG"
+            if ext != ".gpkg":
+                output_path = output_path + ".gpkg"
+        options.fileEncoding = "UTF-8"
+        parent = os.path.dirname(output_path)
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent)
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+        ctx = QgsProject.instance().transformContext()
+        err_code = None
+        err_msg = ""
+        if hasattr(QgsVectorFileWriter, "writeAsVectorFormatV3"):
+            result = QgsVectorFileWriter.writeAsVectorFormatV3(
+                layer, output_path, ctx, options
+            )
+            if isinstance(result, tuple):
+                err_code = result[0]
+                if len(result) > 1:
+                    err_msg = result[1] or ""
+            else:
+                err_code = result
+        else:
+            err_code = QgsVectorFileWriter.writeAsVectorFormat(
+                layer, output_path, "UTF-8", layer.crs(), options.driverName
+            )
+        no_error = QgsVectorFileWriter.NoError
+        if err_code != no_error:
+            raise Exception(
+                "WRITE_FAILED: could not write %s (%s %s)" % (output_path, err_code, err_msg)
+            )
+        return output_path
+
+    def _geom_matches(self, predicate, a, b):
+        if a is None or b is None or a.isEmpty() or b.isEmpty():
+            return False
+        if predicate == "intersects":
+            return a.intersects(b)
+        if predicate == "contains":
+            return a.contains(b)
+        if predicate == "within":
+            return a.within(b)
+        if predicate == "touches":
+            return a.touches(b)
+        if predicate == "overlaps":
+            return a.overlaps(b)
+        if predicate == "crosses":
+            return a.crosses(b)
+        if predicate == "equals":
+            return a.equals(b)
+        raise Exception(
+            "SPATIAL_JOIN: unknown predicate %r. "
+            "Use intersects, contains, within, touches, overlaps, crosses, equals."
+            % predicate
+        )
+
+    def spatial_join(
+        self,
+        target_path,
+        join_path,
+        output_path,
+        predicate="intersects",
+        method="one_to_one",
+        join_fields=None,
+        prefix="",
+        keep_unmatched=True,
+        **kwargs,
+    ):
+        """Join attributes by location. Atomic load + join + write; no Processing.
+
+        GitHub analogue: nkarasiak ``spatial_join`` (native:joinattributesbylocation).
+        This fork wraps it as one workflow that writes a GeoPackage/GeoJSON.
+        """
+        pred = (predicate or "intersects").lower()
+        meth = (method or "one_to_one").lower().replace("-", "_")
+        if meth in ("first", "first_match", "one_to_one"):
+            meth = "one_to_one"
+        elif meth in ("one_to_many", "many"):
+            meth = "one_to_many"
+        else:
+            raise Exception(
+                "SPATIAL_JOIN: unknown method %r. Use one_to_one or one_to_many." % method
+            )
+        prefix = prefix or ""
+
+        target = QgsVectorLayer(target_path, "_sj_target", "ogr")
+        if not target.isValid():
+            raise Exception("LAYER_NOT_FOUND: %s" % target_path)
+        join_lyr = QgsVectorLayer(join_path, "_sj_join", "ogr")
+        if not join_lyr.isValid():
+            raise Exception("LAYER_NOT_FOUND: %s" % join_path)
+        if hasattr(target, "isSpatial") and not target.isSpatial():
+            raise Exception("SPATIAL_JOIN: target layer has no geometry: %s" % target_path)
+        if hasattr(join_lyr, "isSpatial") and not join_lyr.isSpatial():
+            raise Exception("SPATIAL_JOIN: join layer has no geometry: %s" % join_path)
+
+        join_src = join_lyr
+        if join_lyr.crs() != target.crs():
+            join_src = self._memory_copy(join_lyr, "_sj_join_reproj", dest_crs=target.crs())
+
+        available = [f.name() for f in join_src.fields()]
+        if join_fields:
+            missing = [n for n in join_fields if n not in available]
+            if missing:
+                raise Exception(
+                    "FIELD_NOT_FOUND: %s. Available: %s" % (missing[0], available)
+                )
+            copy_names = list(join_fields)
+        else:
+            copy_names = list(available)
+
+        out_fields = QgsFields()
+        target_names = []
+        for f in target.fields():
+            out_fields.append(QgsField(f))
+            target_names.append(f.name())
+        joined_names = []
+        for name in copy_names:
+            src_field = join_src.fields().field(name)
+            out_name = prefix + name
+            if out_fields.lookupField(out_name) >= 0:
+                out_name = out_name + "_j"
+            nf = QgsField(src_field)
+            nf.setName(out_name)
+            out_fields.append(nf)
+            joined_names.append(out_name)
+
+        wkb = QgsWkbTypes.displayString(target.wkbType()) or "Point"
+        out = QgsVectorLayer(
+            "%s?crs=%s" % (wkb, target.crs().authid() or "EPSG:4326"),
+            "joined",
+            "memory",
+        )
+        dp = out.dataProvider()
+        dp.addAttributes(out_fields.toList())
+        out.updateFields()
+
+        index = QgsSpatialIndex(join_src.getFeatures())
+        join_by_id = {}
+        for feat in join_src.getFeatures():
+            join_by_id[feat.id()] = feat
+
+        n_target = 0
+        n_matched = 0
+        out_feats = []
+        for tfeat in target.getFeatures():
+            n_target += 1
+            tgeom = tfeat.geometry()
+            matches = []
+            if tgeom is not None and not tgeom.isEmpty():
+                for fid in index.intersects(tgeom.boundingBox()):
+                    jfeat = join_by_id.get(fid)
+                    if jfeat is None:
+                        continue
+                    if self._geom_matches(pred, tgeom, jfeat.geometry()):
+                        matches.append(jfeat)
+                        if meth == "one_to_one":
+                            break
+            if matches:
+                n_matched += 1
+                to_emit = matches if meth == "one_to_many" else matches[:1]
+            elif keep_unmatched:
+                to_emit = [None]
+            else:
+                to_emit = []
+            for jfeat in to_emit:
+                nf = QgsFeature(out.fields())
+                attrs = list(tfeat.attributes())
+                if jfeat is None:
+                    attrs.extend([None] * len(copy_names))
+                else:
+                    for name in copy_names:
+                        attrs.append(jfeat[name])
+                nf.setAttributes(attrs)
+                nf.setGeometry(tgeom)
+                out_feats.append(nf)
+
+        if out_feats:
+            dp.addFeatures(out_feats)
+        out.updateExtents()
+
+        if n_matched == 0:
+            raise Exception(
+                "SPATIAL_JOIN_EMPTY: predicate %r matched 0 of %s target features "
+                "against %s join features."
+                % (pred, n_target, join_src.featureCount())
+            )
+
+        written = self._write_vector_layer(out, output_path)
+        return {
+            "output_path": os.path.abspath(written),
+            "n_target": n_target,
+            "n_join": int(join_lyr.featureCount()),
+            "n_matched": n_matched,
+            "n_unmatched": n_target - n_matched,
+            "n_output_features": out.featureCount(),
+            "predicate": pred,
+            "method": meth,
+            "joined_fields": joined_names,
+        }
+
+    def _zonal_stat_flags(self, stat_names):
+        from qgis.analysis import QgsZonalStatistics
+
+        inner = getattr(QgsZonalStatistics, "Statistic", QgsZonalStatistics)
+        mapping = {
+            "count": inner.Count,
+            "sum": inner.Sum,
+            "mean": inner.Mean,
+            "median": inner.Median,
+            "stdev": inner.StDev,
+            "min": inner.Min,
+            "max": inner.Max,
+        }
+        flags = 0
+        for name in stat_names:
+            key = str(name).lower()
+            if key not in mapping:
+                raise Exception(
+                    "ZONAL_FAILED: unknown stat %r. Available: %s"
+                    % (name, ", ".join(sorted(mapping)))
+                )
+            flags |= mapping[key]
+        return flags
+
+    def zonal_stats(
+        self,
+        zones_path,
+        raster_path,
+        output_path,
+        stats=None,
+        prefix="",
+        raster_band=1,
+        **kwargs,
+    ):
+        """Raster statistics per polygon. Atomic load + stats + write; no Processing.
+
+        GitHub analogue: nkarasiak ``zonal_statistics``. Uses ``QgsZonalStatistics``
+        from qgis.analysis (core), so it works headless. Typical PFLOW use: JAXA
+        LULC raster summarized onto MFS / prefecture polygons.
+        """
+        from qgis.analysis import QgsZonalStatistics
+
+        if not stats:
+            stats = ["count", "sum", "mean"]
+        prefix = prefix or ""
+        band = int(raster_band or 1)
+
+        zones = QgsVectorLayer(zones_path, "_zs_zones", "ogr")
+        if not zones.isValid():
+            raise Exception("LAYER_NOT_FOUND: %s" % zones_path)
+        if zones.geometryType() != GEOM_POLYGON:
+            raise Exception(
+                "ZONAL_FAILED: zones layer must be polygon, got geometryType=%s"
+                % zones.geometryType()
+            )
+        raster = QgsRasterLayer(raster_path, "_zs_raster")
+        if not raster.isValid():
+            raise Exception("LAYER_NOT_FOUND: %s" % raster_path)
+
+        dest_crs = raster.crs() if raster.crs().isValid() else zones.crs()
+        zones_mem = self._memory_copy(zones, "_zs_zones_mem", dest_crs=dest_crs)
+        before = [f.name() for f in zones_mem.fields()]
+
+        project = QgsProject.instance()
+        transient_ids = []
+        try:
+            project.addMapLayer(zones_mem, False)
+            transient_ids.append(zones_mem.id())
+            project.addMapLayer(raster, False)
+            transient_ids.append(raster.id())
+            flags = self._zonal_stat_flags(stats)
+            zs = QgsZonalStatistics(zones_mem, raster, prefix, band, flags)
+            result = zs.calculateStatistics(None)
+            success = getattr(QgsZonalStatistics, "Success", 0)
+            if result not in (success, 0, None):
+                raise Exception("ZONAL_FAILED: QgsZonalStatistics returned %s" % result)
+        finally:
+            for tid in transient_ids:
+                try:
+                    project.removeMapLayer(tid)
+                except Exception:
+                    pass
+
+        after = [f.name() for f in zones_mem.fields()]
+        fields_added = [n for n in after if n not in before]
+        written = os.path.abspath(output_path)
+        ext = os.path.splitext(written)[1].lower()
+        if ext == ".csv":
+            parent = os.path.dirname(written)
+            if parent and not os.path.isdir(parent):
+                os.makedirs(parent)
+            import csv as csv_mod
+
+            with open(written, "w", newline="") as fh:
+                writer = csv_mod.writer(fh)
+                writer.writerow(after)
+                for feat in zones_mem.getFeatures():
+                    row = []
+                    for name in after:
+                        val = feat[name]
+                        row.append("" if val is None else val)
+                    writer.writerow(row)
+        else:
+            written = os.path.abspath(self._write_vector_layer(zones_mem, written))
+
+        n_with_value = 0
+        if fields_added:
+            probe = fields_added[0]
+            for feat in zones_mem.getFeatures():
+                if feat[probe] is not None:
+                    n_with_value += 1
+
+        return {
+            "output_path": written,
+            "n_zones": int(zones.featureCount()),
+            "n_with_value": n_with_value,
+            "stats": [str(s).lower() for s in stats],
+            "fields_added": fields_added,
+            "raster_band": band,
+            "prefix": prefix,
         }
 
     def project_load(self, qgz_path, **kwargs):

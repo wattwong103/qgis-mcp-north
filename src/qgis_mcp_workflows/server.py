@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """qgis-mcp-workflows — focused QGIS MCP server for transportation research figures.
 
-Forked from nkarasiak/qgis-mcp v0.2.1. Cut hard to 12 workflow tools + 1 escape
-hatch (`qgis_eval`). See ``docs/DESIGN.md`` for tool-surface design, response
-shapes, error taxonomy, and roadmap.
-
-This module is the **v0.2 scaffold**: every tool is registered with FastMCP and
-its full input/output schema, but every body raises ``NotImplementedError``.
-Implementation lands tool-by-tool from v0.3 onward (see DESIGN.md §7).
+Forked from nkarasiak/qgis-mcp. Workflow tools plus ``qgis_eval`` (not a
+PyQGIS-primitive dump). See ``docs/DESIGN.md`` for the tool surface, response
+shapes, error taxonomy, and roadmap. The tool count is guarded by
+``tests/test_docs_consistency.py`` — do not restate it here.
 
 Default socket port: 9877 (vs upstream nkarasiak/qgis-mcp on 9876). Both servers
 can run side-by-side; the LLM picks per request based on tool descriptions.
@@ -21,9 +18,30 @@ import sys
 from logging.handlers import RotatingFileHandler
 from typing import Annotated, Literal
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ModuleNotFoundError:  # mcp >= 2.0 renamed fastmcp -> mcpserver
+    try:
+        from mcp.server.mcpserver import MCPServer as FastMCP
+    except Exception as _mcp_exc:
+        sys.stderr.write(
+            "qgis-mcp-workflows: cannot import the MCP SDK "
+            f"({type(_mcp_exc).__name__}: {_mcp_exc}). "
+            "If this repo lives in Dropbox, .venv is often incomplete — run: uv sync\n"
+        )
+        raise
+except Exception as _mcp_exc:
+    sys.stderr.write(
+        "qgis-mcp-workflows: cannot import the MCP SDK "
+        f"({type(_mcp_exc).__name__}: {_mcp_exc}). "
+        "If this repo lives in Dropbox, .venv is often incomplete — run: uv sync\n"
+    )
+    raise
+
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
+
+from qgis_mcp_workflows.helpers import with_png_preview
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -83,24 +101,162 @@ except Exception:  # ImportError or any movingpandas init failure
 
 SERVER_INSTRUCTIONS = """\
 qgis-mcp-workflows — opinionated QGIS MCP for transportation research figure
-pipelines (PFLOW, GUFM). Reach for these tools when you need to:
-- Inspect or load a vector/raster layer.
-- Render a choropleth from a zone polygon + value CSV.
-- Render trajectories from CSV (PFLOW schema: lon, lat, datetime, trip_id).
-- Render origin-destination flow arcs from an OD CSV + zones layer.
-- Drop a batch of figures into a PowerPoint deck for a weekly report.
-- Run arbitrary PyQGIS as an escape hatch (`qgis_eval`).
+pipelines (PFLOW, GUFM). First call qgis_ping / qgis_diagnose. Then:
 
-If you need general QGIS-API features (feature editing, processing
-algorithms, layer-tree management, plugin tooling), use the upstream
-nkarasiak/qgis-mcp server side-by-side. Both run together; pick per task.
+- qgis_layer_inspect before any join/render so field names are real.
+- qgis_spatial_join to copy attributes by location (points in zones);
+  qgis_zonal_stats for raster-per-polygon (JAXA LULC onto zones).
+- qgis_render_choropleth for zone polygons + value CSV (pass scale_bar=True
+  and north_arrow=True for a publication PNG). GUFM 23-ward polygons:
+  assets/zones_tokyo23.gpkg, join_field=zone_id (JIS N03_007).
+- qgis_render_trajectory for GUFM routed CSV (trip_id, seq, lon, lat, mode,
+  datetime) or PFLOW CSV; use sample_rate on large files; basemap="light".
+- qgis_route_on_network to snap GUFM stops onto DRM/rail (Tokyo TSV cache),
+  then qgis_render_trajectory on the routed CSV.
+- qgis_render_od_flows for OD CSV + zones; qgis_assign_section_load then
+  qgis_render_link_density(load_csv=...) for network section loads.
+- qgis_compose_layout when you need a legend/scale bar as a print layout;
+  qgis_figures_to_pptx to drop PNGs into a weekly deck.
+- qgis_eval only as an escape hatch.
+
+If you need feature editing, Processing algorithms, or layer-tree groups,
+use upstream nkarasiak/qgis-mcp side-by-side (port 9876).
 """
 
 mcp = FastMCP("qgis-mcp-workflows", instructions=SERVER_INSTRUCTIONS)
 
 
+@mcp.prompt(title="Choropleth from CSV", description="Zone polygons + value CSV → publication PNG.")
+def prompt_choropleth() -> str:
+    return (
+        "Call qgis_layer_inspect on the polygon layer first. Then "
+        "qgis_render_choropleth(zones_path, value_field, output_png, value_csv=..., "
+        "join_field=..., palette='YlOrRd', scale_bar=True, north_arrow=True). "
+        "If n_matched is 0, the join field is wrong — inspect both sides and retry."
+    )
+
+
+@mcp.prompt(title="W17 weekly figures", description="Choropleth + trajectory + OD → pptx.")
+def prompt_w17() -> str:
+    return (
+        "Produce a 3-slide deck: (1) qgis_render_choropleth of zone totals, "
+        "(2) qgis_render_trajectory heatmap with sample_rate if the CSV is large, "
+        "(3) qgis_render_od_flows of the strongest flows (top_n=100). "
+        "Pass scale_bar=True, north_arrow=True on each render. "
+        "Finish with qgis_figures_to_pptx(layout='title_image_caption')."
+    )
+
+
+@mcp.prompt(title="Section load map", description="OD matrix → network volumes → graduated links.")
+def prompt_section_load() -> str:
+    return (
+        "qgis_assign_section_load(od_csv, network_path, output_csv, zones_path=...) "
+        "then qgis_render_link_density(drm_network_path=network_path, load_csv=output_csv, "
+        "output_png=..., scale_bar=True, north_arrow=True). "
+        "Needs `uv sync --extra network` once."
+    )
+
+
+@mcp.prompt(title="Atlas export", description="Export every atlas page from a print layout.")
+def prompt_atlas() -> str:
+    return (
+        "qgis_project_load(qgz_path) lists layouts. If a layout has atlas_enabled, "
+        "call qgis_export_atlas(qgz_path, layout_name, output_dir, format='png'). "
+        "If atlas is off, use qgis_export_layout or qgis_batch_render instead."
+    )
+
+
+@mcp.prompt(title="Spatial join", description="Copy attributes by location into a GeoPackage.")
+def prompt_spatial_join() -> str:
+    return (
+        "qgis_layer_inspect both layers first (crs + extent must overlap). Then "
+        "qgis_spatial_join(target_path, join_path, output_path, predicate='intersects', "
+        "method='one_to_one'). Use method='one_to_many' when one target should keep "
+        "every matching join feature. Then qgis_render_choropleth or qgis_style_categorized "
+        "on the written GeoPackage."
+    )
+
+
+@mcp.prompt(title="GUFM ward choropleth", description="Tokyo 23-ward polygons + home_zone counts.")
+def prompt_gufm_wards() -> str:
+    return (
+        "qgis_layer_inspect assets/zones_tokyo23.gpkg (join_field is zone_id = JIS N03_007). "
+        "Then qgis_render_choropleth(zones_path=..., value_csv=..., value_field='n_persons', "
+        "join_field='zone_id', palette='gufm', scale_bar=True, north_arrow=True). "
+        "Trajectory CSVs from dump_trajectories_for_qgis.py use mode_col='mode'."
+    )
+
+
+@mcp.prompt(title="GUFM DRM routing", description="Snap stop sequences onto Tokyo DRM / rail.")
+def prompt_gufm_route() -> str:
+    return (
+        "qgis_route_on_network(input_csv=hero_stops.csv, "
+        "network_path=~/Dropbox/gufm/10_data/network_cache/drm_inner_tokyo.tsv, "
+        "output_csv=/tmp/routed.csv, lon_col='lon', lat_col='lat', seq_col='seq', "
+        "rail_network_path=~/Dropbox/gufm/10_data/network_cache/rail_inner_tokyo.tsv). "
+        "Then qgis_render_trajectory(input_path=output_csv, mode_col='mode', "
+        "scale_bar=True, north_arrow=True). Needs `uv sync --extra network`."
+    )
+
+
+@mcp.prompt(title="Zonal stats", description="Raster statistics per polygon (JAXA LULC, DEM).")
+def prompt_zonal_stats() -> str:
+    return (
+        "qgis_zonal_stats(zones_path, raster_path, output_path, "
+        "stats=['count','mean','sum'], prefix=''). output_path may be .gpkg or .csv. "
+        "Then qgis_render_choropleth(zones_path=output_path, value_field=<prefix>mean)."
+    )
+
+
+@mcp.resource(
+    "qgis://status",
+    title="QGIS stack status",
+    description="Plugin/server health, versions, project layer count.",
+    mime_type="application/json",
+)
+def resource_status() -> str:
+    import json
+
+    try:
+        return qgis_diagnose().model_dump_json()
+    except Exception as err:
+        return json.dumps({"status": "error", "error": str(err)})
+
+
+@mcp.resource(
+    "qgis://project",
+    title="Loaded QGIS project",
+    description="Filename, CRS, and a short layer list from the active project.",
+    mime_type="application/json",
+)
+def resource_project() -> str:
+    import json
+
+    from qgis_mcp_workflows.executors import get_executor
+
+    try:
+        return json.dumps(get_executor().dispatch("get_project_info", {}))
+    except Exception as err:
+        return json.dumps({"status": "error", "error": str(err)})
+
+
+@mcp.resource(
+    "qgis://basemaps",
+    title="Available tile basemaps",
+    description="Presets and QuickMapServices ids for basemap=.",
+    mime_type="application/json",
+)
+def resource_basemaps() -> str:
+    import json
+
+    try:
+        return qgis_list_basemaps().model_dump_json()
+    except Exception as err:
+        return json.dumps({"status": "error", "error": str(err)})
+
+
 # ---------------------------------------------------------------------------
-# Tool registration mode — full (13 tools) vs compound (5 grouped tools).
+# Tool registration mode — full vs compound (5 grouped tools).
 #
 # Read at module load. Tests patch this attribute to verify both surfaces.
 # Compound mode collapses the surface to qgis_inspect / qgis_style / qgis_render /
@@ -114,22 +270,29 @@ if TOOL_MODE not in ("full", "compound"):
 
 
 def _maybe_tool(*args, **kwargs):
-    """Conditional @mcp.tool decorator — registers when TOOL_MODE == 'full', else no-op.
+    """Register with FastMCP in full mode; keep the original callable on the module.
 
-    Functions decorated with this are still callable in Python; the only effect of
-    no-op'ing is that FastMCP doesn't expose them over MCP. Direct imports (e.g.
-    from tests) work the same in both modes.
+    PNG preview is applied only to the registered copy so Python callers
+    (tests, ``scripts/demo_w17.py``) still get the Pydantic model.
     """
-    if TOOL_MODE == "full":
-        return mcp.tool(*args, **kwargs)
-    return lambda f: f
+
+    def deco(f):
+        if TOOL_MODE == "full":
+            mcp.tool(*args, **kwargs)(with_png_preview(f))
+        return f
+
+    return deco
 
 
 def _maybe_compound_tool(*args, **kwargs):
-    """Conditional decorator for compound-only tools — registers when TOOL_MODE == 'compound'."""
-    if TOOL_MODE == "compound":
-        return mcp.tool(*args, **kwargs)
-    return lambda f: f
+    """Register compound tools with FastMCP; keep the original callable on the module."""
+
+    def deco(f):
+        if TOOL_MODE == "compound":
+            mcp.tool(*args, **kwargs)(with_png_preview(f))
+        return f
+
+    return deco
 
 
 def _register_compound_tools_if_enabled() -> None:
@@ -141,6 +304,18 @@ def _register_compound_tools_if_enabled() -> None:
     """
     if TOOL_MODE == "compound":
         from qgis_mcp_workflows import compound  # noqa: F401  — import for side effects
+
+
+def _executor_transport_name() -> str:
+    """plugin / headless / fake — derived from the active executor class."""
+    from qgis_mcp_workflows.executors import get_executor
+
+    name = type(get_executor()).__name__
+    mapping = {"PluginExecutor": "plugin", "HeadlessExecutor": "headless"}
+    if name in mapping:
+        return mapping[name]
+    stem = name[:-8] if name.endswith("Executor") else name
+    return stem.lower() or "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -452,8 +627,7 @@ class EvalResult(BaseModel):
 def _stub(tool_name: str, design_section: str) -> None:
     """Raise a clear NotImplementedError pointing at the design doc."""
     raise NotImplementedError(
-        f"{tool_name} is a v0.2 scaffold stub. Implementation lands in a future "
-        f"version — see docs/DESIGN.md §{design_section} for the spec."
+        f"{tool_name} is not implemented — see docs/DESIGN.md §{design_section}."
     )
 
 
@@ -503,7 +677,7 @@ def _layer_info_kwargs(abs_path: str, info: dict, is_raster: bool) -> dict:
     """Translate plugin's get_layer_info response into LayerInfo constructor kwargs."""
     extent_dict = info["extent"]
     fields = [
-        FieldInfo(name=f["name"], type=f["type"], n_unique=None)
+        FieldInfo(name=f["name"], type=f["type"], n_unique=f.get("n_unique"))
         for f in info.get("fields", [])
     ]
     return {
@@ -517,6 +691,63 @@ def _layer_info_kwargs(abs_path: str, info: dict, is_raster: bool) -> dict:
         ],
         "fields": fields,
     }
+
+
+# ---------------------------------------------------------------------------
+# Tools — Connectivity (always registered, both tool modes)
+# ---------------------------------------------------------------------------
+
+
+class PingResult(BaseModel):
+    pong: bool
+    transport: str
+
+
+class DiagnoseResult(BaseModel):
+    status: str
+    transport: str
+    checks: list[dict]
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_ping() -> PingResult:
+    """Check connectivity to the QGIS backend (plugin socket or headless subprocess).
+
+    When to use: first call after a client connects, or when a later tool fails
+    with a transport error. Returns ``pong=true`` and the active transport name.
+    """
+    from qgis_mcp_workflows.executors import get_executor
+
+    result = get_executor().dispatch("ping", {})
+    pong = bool(result.get("pong", False))
+    return PingResult(pong=pong, transport=_executor_transport_name())
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_diagnose() -> DiagnoseResult:
+    """Health-check the MCP ↔ QGIS stack: versions, project, processing providers.
+
+    When to use: after an update, or when a tool looks missing. Compares plugin
+    ``metadata.txt`` against the MCP server package version so drift is loud.
+    """
+    from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.helpers import enrich_diagnose
+
+    raw = get_executor().dispatch("diagnose", {})
+    enriched = enrich_diagnose(raw if isinstance(raw, dict) else {"status": "error", "checks": []})
+    return DiagnoseResult(
+        status=enriched.get("status", "error"),
+        transport=_executor_transport_name(),
+        checks=list(enriched.get("checks", [])),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +836,171 @@ def qgis_load_layer(
         kwargs["crs"] = crs_result.get("crs", crs)
 
     return LoadedLayer(layer_id=layer_id, **kwargs)
+
+
+class SpatialJoinResult(BaseModel):
+    output_path: str
+    n_target: int
+    n_join: int
+    n_matched: int
+    n_unmatched: int
+    n_output_features: int
+    predicate: str
+    method: str
+    joined_fields: list[str]
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_spatial_join(
+    target_path: Annotated[str, Field(description="Features that keep their geometry (points, lines, or polygons).")],
+    join_path: Annotated[str, Field(description="Layer whose attributes are copied onto matching target features.")],
+    output_path: Annotated[str, Field(description="Absolute output path. .gpkg / .geojson / .shp.")],
+    predicate: Annotated[
+        Literal["intersects", "contains", "within", "touches", "overlaps", "crosses", "equals"],
+        Field(description="Spatial predicate. Default intersects (point-in-polygon, overlapping polygons)."),
+    ] = "intersects",
+    method: Annotated[
+        Literal["one_to_one", "one_to_many"],
+        Field(description="one_to_one keeps the first match per target; one_to_many duplicates the target once per match."),
+    ] = "one_to_one",
+    join_fields: Annotated[
+        list[str] | None,
+        Field(description="Join-layer fields to copy. Default: all. Colliding names get a _j suffix."),
+    ] = None,
+    prefix: Annotated[str, Field(description="Optional prefix for copied field names.")] = "",
+    keep_unmatched: Annotated[bool, Field(description="Keep target features with no match (join fields NULL).")] = True,
+) -> SpatialJoinResult:
+    """Join attributes by location and write a new layer.
+
+    When to use: PFLOW pickups → zone polygons, stations → catchments, or any
+    two overlapping layers. Atomic (no leftover project layers). Does **not**
+    use the Processing toolbox — ``QgsSpatialIndex`` + geometry predicates.
+
+    Returns: ``SpatialJoinResult`` with match counts and the written path.
+
+    Chains into: ``qgis_render_choropleth``, ``qgis_style_categorized``,
+    ``qgis_layer_inspect`` on ``output_path``.
+    """
+    from qgis_mcp_workflows.errors import (
+        ExecutorError,
+        FieldNotFoundError,
+        LayerNotFoundError,
+        SpatialJoinEmptyError,
+    )
+    from qgis_mcp_workflows.executors import get_executor
+
+    abs_target = os.path.abspath(target_path)
+    abs_join = os.path.abspath(join_path)
+    abs_out = os.path.abspath(output_path)
+    params: dict = {
+        "target_path": abs_target,
+        "join_path": abs_join,
+        "output_path": abs_out,
+        "predicate": predicate,
+        "method": method,
+        "prefix": prefix,
+        "keep_unmatched": keep_unmatched,
+    }
+    if join_fields is not None:
+        params["join_fields"] = list(join_fields)
+    try:
+        result = get_executor().dispatch("spatial_join", params, timeout=300)
+    except ExecutorError as err:
+        if "SPATIAL_JOIN_EMPTY" in err.message:
+            raise SpatialJoinEmptyError(err.message) from err
+        if "LAYER_NOT_FOUND" in err.message:
+            path = abs_target if abs_target in err.message else abs_join
+            raise LayerNotFoundError(path) from err
+        if "FIELD_NOT_FOUND" in err.message:
+            raise FieldNotFoundError(join_fields[0] if join_fields else "?", []) from err
+        raise
+    return SpatialJoinResult(
+        output_path=os.path.abspath(result["output_path"]),
+        n_target=int(result.get("n_target") or 0),
+        n_join=int(result.get("n_join") or 0),
+        n_matched=int(result.get("n_matched") or 0),
+        n_unmatched=int(result.get("n_unmatched") or 0),
+        n_output_features=int(result.get("n_output_features") or 0),
+        predicate=result.get("predicate", predicate),
+        method=result.get("method", method),
+        joined_fields=list(result.get("joined_fields") or []),
+    )
+
+
+class ZonalStatsResult(BaseModel):
+    output_path: str
+    n_zones: int
+    n_with_value: int
+    stats: list[str]
+    fields_added: list[str]
+    raster_band: int
+    prefix: str
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_zonal_stats(
+    zones_path: Annotated[str, Field(description="Polygon layer (zones, prefectures, catchments).")],
+    raster_path: Annotated[str, Field(description="Raster to summarize (JAXA LULC, DEM, density).")],
+    output_path: Annotated[str, Field(description="Absolute output path. .gpkg keeps geometry; .csv is attributes only.")],
+    stats: Annotated[
+        list[Literal["count", "sum", "mean", "median", "stdev", "min", "max"]] | None,
+        Field(description="Statistics to compute. Default count+sum+mean."),
+    ] = None,
+    prefix: Annotated[str, Field(description="Prefix for new fields (e.g. 'lulc_' → lulc_mean).")] = "",
+    raster_band: Annotated[int, Field(description="Raster band (1-based).", ge=1)] = 1,
+) -> ZonalStatsResult:
+    """Raster statistics per polygon, written to GeoPackage or CSV.
+
+    When to use: JAXA 100m LULC (or any raster) summarized onto zone polygons
+    before a choropleth. Uses ``QgsZonalStatistics`` (qgis.analysis) — no
+    Processing toolbox, works headless.
+
+    Returns: ``ZonalStatsResult`` with ``fields_added`` (the new stat columns)
+    and ``n_with_value``.
+
+    Chains into: ``qgis_render_choropleth(zones_path=output_path, value_field=...)``.
+    """
+    from qgis_mcp_workflows.errors import ExecutorError, LayerNotFoundError, ZonalStatsError
+    from qgis_mcp_workflows.executors import get_executor
+
+    abs_zones = os.path.abspath(zones_path)
+    abs_raster = os.path.abspath(raster_path)
+    abs_out = os.path.abspath(output_path)
+    stat_list = list(stats) if stats else ["count", "sum", "mean"]
+    params = {
+        "zones_path": abs_zones,
+        "raster_path": abs_raster,
+        "output_path": abs_out,
+        "stats": stat_list,
+        "prefix": prefix,
+        "raster_band": raster_band,
+    }
+    try:
+        result = get_executor().dispatch("zonal_stats", params, timeout=300)
+    except ExecutorError as err:
+        if "LAYER_NOT_FOUND" in err.message:
+            path = abs_zones if abs_zones in err.message else abs_raster
+            raise LayerNotFoundError(path) from err
+        if "ZONAL_FAILED" in err.message or "WRITE_FAILED" in err.message:
+            raise ZonalStatsError(err.message) from err
+        raise
+    return ZonalStatsResult(
+        output_path=os.path.abspath(result["output_path"]),
+        n_zones=int(result.get("n_zones") or 0),
+        n_with_value=int(result.get("n_with_value") or 0),
+        stats=list(result.get("stats") or stat_list),
+        fields_added=list(result.get("fields_added") or []),
+        raster_band=int(result.get("raster_band") or raster_band),
+        prefix=result.get("prefix", prefix) or "",
+    )
 
 
 @_maybe_tool(
@@ -788,6 +1184,8 @@ def qgis_render_map(
     dpi: Annotated[int, Field(description="Image DPI (affects font size).", ge=72, le=600)] = 150,
     extent: Annotated[list[float] | None, Field(description="Render extent as [xmin, ymin, xmax, ymax]. If omitted, uses the union of layer extents with 5% padding.")] = None,
     background: Annotated[str, Field(description='Map background, named or hex (e.g. "white", "#fafafa", "transparent").')] = "white",
+    scale_bar: Annotated[bool, Field(description="Draw a metric scale bar in the lower-left of the PNG.")] = False,
+    north_arrow: Annotated[bool, Field(description="Draw a north arrow in the upper-right of the PNG.")] = False,
 ) -> RenderResult:
     """Render a list of already-loaded layers to PNG.
 
@@ -811,6 +1209,8 @@ def qgis_render_map(
         "height": height,
         "dpi": dpi,
         "background": background,
+        "scale_bar": scale_bar,
+        "north_arrow": north_arrow,
     }
     if extent is not None:
         params["extent"] = list(extent)
@@ -1082,6 +1482,8 @@ def qgis_render_choropleth(
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
+    scale_bar: Annotated[bool, Field(description="Draw a metric scale bar in the lower-left of the PNG.")] = False,
+    north_arrow: Annotated[bool, Field(description="Draw a north arrow in the upper-right of the PNG.")] = False,
 ) -> ChoroplethResult:
     """Render a zone-level choropleth in one call. PFLOW workflow tool.
 
@@ -1147,11 +1549,15 @@ def qgis_render_choropleth(
         "diverging": diverging,
         "center": center,
         "label_field": label_field,
+        "title": title,
+        "legend": legend,
         "basemap_paths": abs_basemaps,
         "basemap_spec": _resolve_basemap(basemap, basemap_opacity),
         "width": width,
         "height": height,
         "dpi": dpi,
+        "scale_bar": scale_bar,
+        "north_arrow": north_arrow,
     }
 
     try:
@@ -1209,11 +1615,15 @@ def qgis_render_trajectory(
     render_mode: Annotated[Literal["lines", "points", "heatmap"], Field(description="Visualization style.")] = "lines",
     sample_rate: Annotated[float, Field(description="Fraction of points to keep (1.0 = all, 0.01 = every 100th).", gt=0.0, le=1.0)] = 1.0,
     max_points: Annotated[int, Field(description="Hard cap on rendered points; exceeded → automatic downsample with response flag.", ge=1000)] = 500_000,
-    basemap_paths: Annotated[list[str] | None, Field(description="Optional basemap layers drawn under trajectories.")] = None,
+    basemap_paths: Annotated[list[str] | None, Field(description="Optional vector basemap layers drawn under trajectories.")] = None,
+    basemap: Annotated[str, Field(description='Tile basemap drawn under the trajectories. Presets: "light", "dark", "streets", "imagery"; "none" for a plain white background. QuickMapServices as "qms:<id>".')] = "none",
+    basemap_opacity: Annotated[float, Field(description="Opacity of the tile basemap, 0.0-1.0.", ge=0.0, le=1.0)] = 1.0,
     extent: Annotated[list[float] | None, Field(description="[lon_min, lat_min, lon_max, lat_max] in EPSG:4326. Clips before rendering.")] = None,
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
+    scale_bar: Annotated[bool, Field(description="Draw a metric scale bar in the lower-left of the PNG.")] = False,
+    north_arrow: Annotated[bool, Field(description="Draw a north arrow in the upper-right of the PNG.")] = False,
 ) -> TrajectoryResult:
     """Render trajectory data from CSV/GPX. PFLOW/GUFM workflow tool.
 
@@ -1248,6 +1658,7 @@ def qgis_render_trajectory(
             "output_png": abs_output,
             "render_mode": render_mode,
             "basemap_paths": abs_basemaps,
+            "basemap_spec": _resolve_basemap(basemap, basemap_opacity),
             "extent": list(extent) if extent is not None else None,
             "width": width,
             "height": height,
@@ -1256,6 +1667,8 @@ def qgis_render_trajectory(
             "mode_col": mode_col,
             "used_movingpandas": False,
             "speed_field": None,
+            "scale_bar": scale_bar,
+            "north_arrow": north_arrow,
         }
         result = get_executor().dispatch("render_trajectory", params, timeout=120)
         return TrajectoryResult(
@@ -1269,6 +1682,8 @@ def qgis_render_trajectory(
             time_range=result.get("time_range"),
             modes=result.get("modes"),
             used_movingpandas=result.get("used_movingpandas", False),
+            basemap_attribution=result.get("basemap_attribution"),
+            basemap_source=result.get("basemap_source"),
         )
 
     # CSV path: parse + validate columns MCP-side.
@@ -1372,6 +1787,7 @@ def qgis_render_trajectory(
         "output_png": abs_output,
         "render_mode": render_mode,
         "basemap_paths": abs_basemaps,
+        "basemap_spec": _resolve_basemap(basemap, basemap_opacity),
         "extent": list(extent) if extent is not None else None,
         "width": width,
         "height": height,
@@ -1380,6 +1796,8 @@ def qgis_render_trajectory(
         "mode_col": mode_col,
         "used_movingpandas": used_mp,
         "speed_field": speed_field,
+        "scale_bar": scale_bar,
+        "north_arrow": north_arrow,
     }
     result = get_executor().dispatch("render_trajectory", params, timeout=120)
     return TrajectoryResult(
@@ -1393,6 +1811,8 @@ def qgis_render_trajectory(
         time_range=result.get("time_range", time_range),
         modes=result.get("modes", modes_list),
         used_movingpandas=result.get("used_movingpandas", used_mp),
+        basemap_attribution=result.get("basemap_attribution"),
+        basemap_source=result.get("basemap_source"),
     )
 
 
@@ -1494,6 +1914,33 @@ def _aggregate_link_density(
     return density, n_rows
 
 
+def _read_load_csv(path: str, link_id_col: str, volume_col: str) -> tuple[dict[str, float], int]:
+    """Read a pre-aggregated link-volume CSV (from qgis_assign_section_load)."""
+    import csv as _csv
+
+    from qgis_mcp_workflows.errors import FieldNotFoundError
+
+    density: dict[str, float] = {}
+    with open(path, encoding="utf-8", newline="") as f:
+        reader = _csv.DictReader(f)
+        columns = reader.fieldnames or []
+        if link_id_col not in columns:
+            raise FieldNotFoundError(link_id_col, columns)
+        if volume_col not in columns:
+            raise FieldNotFoundError(volume_col, columns)
+        n_rows = 0
+        for row in reader:
+            n_rows += 1
+            key = row[link_id_col]
+            if not key:
+                continue
+            try:
+                density[str(key)] = density.get(str(key), 0.0) + float(row[volume_col])
+            except (TypeError, ValueError):
+                continue
+    return density, n_rows
+
+
 @_maybe_tool(
     annotations=ToolAnnotations(
         readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
@@ -1512,9 +1959,12 @@ def qgis_render_od_flows(
     basemap_paths: Annotated[list[str] | None, Field(description="Optional vector basemap layers drawn under arcs.")] = None,
     basemap: Annotated[str, Field(description='Tile basemap drawn under the arcs for real-world context. Presets: "light" (neutral grey, best under choropleths), "dark", "streets" (OpenStreetMap), "imagery" (satellite); "none" for a plain white background. Any QuickMapServices source installed in the QGIS profile can be used as "qms:<id>" (e.g. "qms:opentopomap") — call qgis_list_basemaps for the ids. The old CARTO names (positron/dark_matter/voyager) still work as aliases. No API key needed.')] = "none",
     basemap_opacity: Annotated[float, Field(description="Opacity of the tile basemap, 0.0-1.0.", ge=0.0, le=1.0)] = 1.0,
+    label_field: Annotated[str | None, Field(description='Haloed line label. OD memory-layer fields: "origin", "destination", "trip_count".')] = None,
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
+    scale_bar: Annotated[bool, Field(description="Draw a metric scale bar in the lower-left of the PNG.")] = False,
+    north_arrow: Annotated[bool, Field(description="Draw a north arrow in the upper-right of the PNG.")] = False,
 ) -> ODFlowResult:
     """Render origin-destination arcs over a zones layer. PFLOW workflow tool.
 
@@ -1578,9 +2028,12 @@ def qgis_render_od_flows(
         "arc_style": arc_style,
         "basemap_paths": abs_basemaps,
         "basemap_spec": basemap_spec,
+        "label_field": label_field,
         "width": width,
         "height": height,
         "dpi": dpi,
+        "scale_bar": scale_bar,
+        "north_arrow": north_arrow,
     }
     result = get_executor().dispatch("render_od_flows", params, timeout=60)
     return ODFlowResult(
@@ -1605,12 +2058,13 @@ def qgis_render_od_flows(
     )
 )
 def qgis_render_link_density(
-    trajectory_csvs: Annotated[list[str], Field(description="One or more PFLOW trajectory CSV paths. Each must contain link_id_col. Streamed (not loaded fully); safe for multi-GB inputs.")],
     drm_network_path: Annotated[str, Field(description="Absolute path to the pre-built DRM network GeoPackage. Build once via scripts/build_drm_network.py.")],
     output_png: Annotated[str, Field(description="Absolute path for the output PNG.")],
-    link_id_col: Annotated[str, Field(description="Trajectory CSV column joining to DRM link_id.")] = "link_id",
-    aggregation: Annotated[Literal["count", "sum"], Field(description="Per-link aggregation. 'count' = number of trajectory points; 'sum' requires value_col.")] = "count",
-    value_col: Annotated[str | None, Field(description="Numeric column to sum (only used when aggregation='sum'). Non-numeric / NaN values are skipped.")] = None,
+    trajectory_csvs: Annotated[list[str] | None, Field(description="One or more PFLOW trajectory CSV paths. Each must contain link_id_col. Streamed (not loaded fully); safe for multi-GB inputs. Mutually exclusive with load_csv.")] = None,
+    load_csv: Annotated[str | None, Field(description="Pre-aggregated link volumes from qgis_assign_section_load. Columns: link_id_col + volume_col. Mutually exclusive with trajectory_csvs.")] = None,
+    link_id_col: Annotated[str, Field(description="Join column on the trajectory/load CSV and the DRM layer.")] = "link_id",
+    aggregation: Annotated[Literal["count", "sum"], Field(description="Per-link aggregation for trajectory_csvs. Ignored when load_csv is set.")] = "count",
+    value_col: Annotated[str | None, Field(description="Numeric column to sum (trajectory_csvs + aggregation='sum'), or the volume column on load_csv (default 'volume').")] = None,
     n_classes: Annotated[int, Field(description="Number of graduated bins for symbology.", ge=2, le=15)] = 7,
     mode: Annotated[Literal["quantile", "equal_interval", "natural_breaks", "pretty"], Field(description="Binning strategy for graduated styling.")] = "quantile",
     palette: Annotated[str, Field(description='Sequential colorbrewer palette, e.g. "YlOrRd", "Blues", "Viridis".')] = "YlOrRd",
@@ -1620,9 +2074,12 @@ def qgis_render_link_density(
     basemap_paths: Annotated[list[str] | None, Field(description="Optional vector basemap layers drawn under links.")] = None,
     basemap: Annotated[str, Field(description='Tile basemap drawn under the links for real-world context. Presets: "light" (neutral grey, best under choropleths), "dark", "streets" (OpenStreetMap), "imagery" (satellite); "none" for a plain white background. Any QuickMapServices source installed in the QGIS profile can be used as "qms:<id>" (e.g. "qms:opentopomap") — call qgis_list_basemaps for the ids. The old CARTO names (positron/dark_matter/voyager) still work as aliases. No API key needed.')] = "none",
     basemap_opacity: Annotated[float, Field(description="Opacity of the tile basemap, 0.0-1.0.", ge=0.0, le=1.0)] = 1.0,
+    label_field: Annotated[str | None, Field(description="Haloed line label. Pass the density field name (or 'density') to label each link with its volume.")] = None,
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
+    scale_bar: Annotated[bool, Field(description="Draw a metric scale bar in the lower-left of the PNG.")] = False,
+    north_arrow: Annotated[bool, Field(description="Draw a north arrow in the upper-right of the PNG.")] = False,
 ) -> LinkDensityResult:
     """Render a DRM-link traffic-density choropleth from PFLOW trajectories. v2 workflow tool.
 
@@ -1653,18 +2110,31 @@ def qgis_render_link_density(
     abs_drm = os.path.abspath(drm_network_path)
     abs_output = os.path.abspath(output_png)
     abs_basemaps = [os.path.abspath(p) for p in (basemap_paths or [])]
-    abs_csvs = [os.path.abspath(p) for p in trajectory_csvs]
     basemap_spec = _resolve_basemap(basemap, basemap_opacity)
 
     if not os.path.exists(abs_drm):
         raise DRMNetworkNotFoundError(abs_drm)
 
-    density, n_rows_total = _aggregate_link_density(
-        csv_paths=abs_csvs,
-        link_id_col=link_id_col,
-        aggregation=aggregation,
-        value_col=value_col,
-    )
+    if load_csv and trajectory_csvs:
+        raise ValueError("Pass trajectory_csvs or load_csv, not both.")
+    if load_csv:
+        density, n_rows_total = _read_load_csv(
+            os.path.abspath(load_csv),
+            link_id_col=link_id_col,
+            volume_col=value_col or "volume",
+        )
+        aggregation = "sum"
+        value_col = value_col or "volume"
+    elif trajectory_csvs:
+        abs_csvs = [os.path.abspath(p) for p in trajectory_csvs]
+        density, n_rows_total = _aggregate_link_density(
+            csv_paths=abs_csvs,
+            link_id_col=link_id_col,
+            aggregation=aggregation,
+            value_col=value_col,
+        )
+    else:
+        raise ValueError("qgis_render_link_density requires trajectory_csvs or load_csv.")
 
     n_points_total = int(sum(density.values())) if aggregation == "count" else n_rows_total
 
@@ -1694,9 +2164,12 @@ def qgis_render_link_density(
         "extent": list(extent) if extent is not None else None,
         "basemap_paths": abs_basemaps,
         "basemap_spec": basemap_spec,
+        "label_field": label_field,
         "width": width,
         "height": height,
         "dpi": dpi,
+        "scale_bar": scale_bar,
+        "north_arrow": north_arrow,
     }
     result = get_executor().dispatch("render_link_density", params, timeout=120)
 
@@ -1718,6 +2191,189 @@ def qgis_render_link_density(
         basemap_attribution=result.get("basemap_attribution"),
         basemap_source=result.get("basemap_source"),
     )
+
+
+class SectionLoadResult(BaseModel):
+    output_csv: str
+    n_od: int
+    n_assigned: int
+    n_unassigned: int
+    n_unmatched_origins: int
+    n_unmatched_destinations: int
+    n_links_with_load: int
+    n_nodes: int
+    n_edges: int
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_assign_section_load(
+    od_csv: Annotated[str, Field(description="Long-format OD CSV (origin, destination, value).")],
+    network_path: Annotated[str, Field(description="Line network as GeoJSON or GeoPackage (DRM). Endpoints become graph nodes unless from_node/to_node fields are set.")],
+    output_csv: Annotated[str, Field(description="Absolute path for the link_id,volume CSV. Feed this to qgis_render_link_density(load_csv=...).")],
+    zones_path: Annotated[str | None, Field(description="Polygon/point layer used to snap OD ids to nearest network nodes via centroids. Omit if origin/dest already match graph node ids.")] = None,
+    origin_col: Annotated[str, Field(description="Origin column in od_csv.")] = "origin",
+    dest_col: Annotated[str, Field(description="Destination column in od_csv.")] = "destination",
+    value_col: Annotated[str, Field(description="OD volume column.")] = "trip_count",
+    zone_id_field: Annotated[str, Field(description="Zone id field on zones_path.")] = "zone_id",
+    link_id_field: Annotated[str, Field(description="Link id field on the network.")] = "link_id",
+    from_node_field: Annotated[str | None, Field(description="Optional from-node field; if omitted, nodes are rounded line endpoints.")] = None,
+    to_node_field: Annotated[str | None, Field(description="Optional to-node field.")] = None,
+) -> SectionLoadResult:
+    """All-or-nothing assignment of OD volumes onto a road network.
+
+    When to use: turn an OD matrix into section loads (link volumes) for
+    ``qgis_render_link_density``. Shortest-path assignment via networkx
+    (``uv sync --extra network``). Zones snap to the nearest network node.
+
+    Returns: ``SectionLoadResult`` with the volume CSV path and assignment
+    counts. Unroutable OD pairs increment ``n_unassigned`` instead of failing.
+
+    Chains into: ``qgis_render_link_density(load_csv=output_csv)``.
+    """
+    from qgis_mcp_workflows.errors import FieldNotFoundError
+    from qgis_mcp_workflows.section_load import (
+        assign_aon,
+        load_network,
+        load_zone_centroids,
+        read_od_csv,
+        snap_to_nodes,
+        write_volume_csv,
+    )
+
+    abs_od = os.path.abspath(od_csv)
+    abs_net = os.path.abspath(network_path)
+    abs_out = os.path.abspath(output_csv)
+    rows, columns = read_od_csv(abs_od)
+    for required in (origin_col, dest_col, value_col):
+        if required not in columns:
+            raise FieldNotFoundError(required, columns)
+
+    graph, node_xy = load_network(
+        abs_net,
+        link_id_field=link_id_field,
+        from_node_field=from_node_field,
+        to_node_field=to_node_field,
+    )
+    if zones_path:
+        centroids = load_zone_centroids(os.path.abspath(zones_path), zone_id_field=zone_id_field)
+        snapped = snap_to_nodes(centroids, node_xy)
+        origin_nodes = dest_nodes = snapped
+    else:
+        # OD ids are already graph node keys.
+        identity = {str(row[origin_col]): str(row[origin_col]) for row in rows}
+        identity.update({str(row[dest_col]): str(row[dest_col]) for row in rows})
+        origin_nodes = dest_nodes = identity
+
+    volumes, stats = assign_aon(
+        graph,
+        rows,
+        origin_nodes=origin_nodes,
+        dest_nodes=dest_nodes,
+        origin_col=origin_col,
+        dest_col=dest_col,
+        value_col=value_col,
+    )
+    write_volume_csv(abs_out, volumes, link_id_col=link_id_field)
+    return SectionLoadResult(output_csv=abs_out, **stats)
+
+
+class RouteResult(BaseModel):
+    output_csv: str
+    n_trips: int
+    n_legs: int
+    n_routed: int
+    n_straight: int
+    n_points: int
+    network_path: str
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_route_on_network(
+    input_csv: Annotated[str, Field(description="Stop/point CSV. Consecutive rows per trip_id (ordered by seq) become legs.")],
+    network_path: Annotated[str, Field(description="Road network: GUFM drm_inner_tokyo.tsv, or a line GeoJSON/GeoPackage with link_id.")],
+    output_csv: Annotated[str, Field(description="Routed point CSV (trip_id,seq,lon,lat,mode,datetime,link_id) for qgis_render_trajectory.")],
+    rail_network_path: Annotated[str | None, Field(description="Optional rail TSV/GeoJSON. Legs whose mode is RAIL/TRAIN use this instead of the road network.")] = None,
+    id_col: Annotated[str, Field(description="Trip grouping column. If missing, all rows are one trip.")] = "trip_id",
+    seq_col: Annotated[str, Field(description="Order column within a trip.")] = "seq",
+    lon_col: Annotated[str, Field(description="Longitude column.")] = "lon",
+    lat_col: Annotated[str, Field(description="Latitude column.")] = "lat",
+    mode_col: Annotated[str | None, Field(description="Mode column (destination of each leg). Default CAR when absent.")] = "mode",
+    time_col: Annotated[str | None, Field(description="Optional clock/datetime column (e.g. GUFM hero_stops 'clock').")] = None,
+    max_snap_km: Annotated[float, Field(description="If either end is farther than this from the network, the leg stays a straight line.", gt=0.0, le=50.0)] = 3.0,
+    link_id_field: Annotated[str, Field(description="link_id field when network_path is GeoJSON/GPKG.")] = "link_id",
+    from_node_field: Annotated[str | None, Field(description="Optional from-node field on a GeoJSON/GPKG network.")] = None,
+    to_node_field: Annotated[str | None, Field(description="Optional to-node field on a GeoJSON/GPKG network.")] = None,
+) -> RouteResult:
+    """Snap consecutive stops onto DRM/rail and write a routed trajectory CSV.
+
+    When to use: GUFM stop sequences (hero_stops.csv, decoded ACT locations)
+    before ``qgis_render_trajectory``. Same idea as
+    ``gufm/scripts/figures/routing.py``, as an MCP workflow: shortest path on
+    ``drm_inner_tokyo.tsv`` (road) / ``rail_inner_tokyo.tsv`` (RAIL legs),
+    straight-line fallback when snap fails or the graph is disconnected.
+
+    Needs ``uv sync --extra network``. The 57 MB Tokyo TSV is read from disk
+    (not copied into this repo) and cached for the rest of the process.
+
+    Chains into: ``qgis_render_trajectory(input_path=output_csv, mode_col='mode')``.
+    """
+    from qgis_mcp_workflows.errors import FieldNotFoundError, LayerNotFoundError
+    from qgis_mcp_workflows.route import (
+        load_route_network,
+        read_stop_csv,
+        route_sequences,
+        write_routed_csv,
+    )
+
+    abs_in = os.path.abspath(os.path.expanduser(input_csv))
+    abs_net = os.path.abspath(os.path.expanduser(network_path))
+    abs_out = os.path.abspath(os.path.expanduser(output_csv))
+    if not os.path.isfile(abs_in):
+        raise LayerNotFoundError(abs_in)
+    if not os.path.isfile(abs_net):
+        raise LayerNotFoundError(abs_net)
+    rows, columns = read_stop_csv(abs_in)
+    for required in (lon_col, lat_col):
+        if required not in columns:
+            raise FieldNotFoundError(required, columns)
+    id_use = id_col if id_col in columns else "trip_id"
+    seq_use = seq_col if seq_col in columns else "seq"
+    mode_use = mode_col if mode_col and mode_col in columns else None
+    time_use = time_col if time_col and time_col in columns else None
+    road = load_route_network(
+        abs_net,
+        link_id_field=link_id_field,
+        from_node_field=from_node_field,
+        to_node_field=to_node_field,
+    )
+    rail = None
+    if rail_network_path:
+        abs_rail = os.path.abspath(os.path.expanduser(rail_network_path))
+        if not os.path.isfile(abs_rail):
+            raise LayerNotFoundError(abs_rail)
+        rail = load_route_network(abs_rail)
+    routed, stats = route_sequences(
+        rows,
+        road,
+        rail=rail,
+        id_col=id_use,
+        seq_col=seq_use,
+        lon_col=lon_col,
+        lat_col=lat_col,
+        mode_col=mode_use,
+        time_col=time_use,
+        max_snap_km=max_snap_km,
+    )
+    write_routed_csv(abs_out, routed)
+    return RouteResult(output_csv=abs_out, network_path=abs_net, **stats)
 
 
 @_maybe_tool(
@@ -1897,6 +2553,68 @@ def qgis_export_layout(
     )
 
 
+class AtlasExportResult(BaseModel):
+    output_dir: str
+    output_path: str
+    format: str
+    n_pages: int
+    layout_name: str
+    files: list[str]
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_export_atlas(
+    qgz_path: Annotated[str, Field(description="Absolute path to a .qgz/.qgs whose layout has an atlas coverage layer.")],
+    layout_name: Annotated[str, Field(description="Print-composer layout name with atlas enabled.")],
+    output_dir: Annotated[str, Field(description="Directory for atlas pages (created if missing). PNG: one file per feature. PDF: atlas.pdf.")],
+    format: Annotated[Literal["png", "pdf", "jpg"], Field(description="png/jpg = one image per coverage feature; pdf = one multi-page file.")] = "png",
+    dpi: Annotated[int, Field(description="Export DPI.", ge=72, le=600)] = 300,
+) -> AtlasExportResult:
+    """Export every page of a print-layout atlas.
+
+    When to use: a .qgz already has an atlas (coverage layer + filename
+    expression) — e.g. one PNG per prefecture. Complements ``qgis_batch_render``
+    (attribute fan-out without a pre-authored atlas) and ``qgis_export_layout``
+    (single page).
+
+    Returns: ``AtlasExportResult`` with ``files`` (absolute paths) and ``n_pages``.
+    """
+    from qgis_mcp_workflows.errors import AtlasDisabledError, ExecutorError, LayoutNotFoundError
+    from qgis_mcp_workflows.executors import get_executor
+
+    abs_qgz = os.path.abspath(qgz_path)
+    abs_dir = os.path.abspath(output_dir)
+    os.makedirs(abs_dir, exist_ok=True)
+    params = {
+        "qgz_path": abs_qgz,
+        "layout_name": layout_name,
+        "output_dir": abs_dir,
+        "format": format,
+        "dpi": dpi,
+    }
+    try:
+        result = get_executor().dispatch("export_atlas", params, timeout=300)
+    except ExecutorError as err:
+        if "LAYOUT_NOT_FOUND" in err.message:
+            raise LayoutNotFoundError(layout_name, []) from err
+        if "ATLAS_DISABLED" in err.message:
+            raise AtlasDisabledError(layout_name) from err
+        raise
+    files = [os.path.abspath(p) for p in result.get("files") or []]
+    return AtlasExportResult(
+        output_dir=result.get("output_dir", abs_dir),
+        output_path=result.get("output_path") or (files[0] if files else abs_dir),
+        format=result.get("format", format),
+        n_pages=int(result.get("n_pages") or len(files)),
+        layout_name=result.get("layout_name", layout_name),
+        files=files,
+    )
+
+
 @_maybe_tool(
     annotations=ToolAnnotations(
         readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
@@ -2040,9 +2758,9 @@ def qgis_batch_render(
 def qgis_figures_to_pptx(
     figure_paths: Annotated[list[str], Field(description="Absolute paths to PNG/JPG figure files. One per slide.")],
     pptx_path: Annotated[str, Field(description="Absolute path for the output .pptx.")],
-    layout: Annotated[Literal["title_and_image", "image_only", "two_column", "title_image_caption"], Field(description="Slide layout per figure.")] = "title_and_image",
+    layout: Annotated[Literal["title_and_image", "image_only", "two_column", "title_image_caption"], Field(description='Slide layout. "two_column" pairs consecutive figures. "title_image_caption" uses a newline in captions[i] as title vs body under the figure.')] = "title_and_image",
     captions: Annotated[list[str] | None, Field(description="Optional per-slide captions. Must match length of figure_paths if given.")] = None,
-    template_pptx: Annotated[str | None, Field(description="If given, slides are appended to this template; else a new blank deck is created.")] = None,
+    template_pptx: Annotated[str | None, Field(description="If given, slides are appended to this template. If omitted, the bundled Sekimoto-lab blank (assets/sekilab_blank.pptx) is used when present.")] = None,
 ) -> PptxResult:
     """Drop figures into a PowerPoint deck. Delivery tool — closes the W17 loop.
 
@@ -2054,16 +2772,9 @@ def qgis_figures_to_pptx(
     per-slide titles (None for slides without titles).
     """
     from pptx import Presentation
-    from pptx.util import Inches
-
-    # python-pptx default master layouts: 5 = Title Only, 6 = Blank.
-    # title_image_caption / two_column degrade to title_only for v0.3.
-    LAYOUT_INDEX = {
-        "title_and_image": 5,
-        "image_only": 6,
-        "two_column": 5,
-        "title_image_caption": 5,
-    }
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN
+    from pptx.util import Inches, Pt
 
     if captions is not None and len(captions) != len(figure_paths):
         raise ValueError(
@@ -2071,27 +2782,123 @@ def qgis_figures_to_pptx(
             f"({len(figure_paths)}). Pass captions=None to skip titles entirely."
         )
 
+    from qgis_mcp_workflows.helpers import (
+        SEKILAB_SLIDE_HEIGHT,
+        SEKILAB_SLIDE_WIDTH,
+        bundled_asset,
+    )
+
+    abs_figs = [os.path.abspath(fig) for fig in figure_paths]
     abs_pptx = os.path.abspath(pptx_path)
-    prs = Presentation(os.path.abspath(template_pptx)) if template_pptx else Presentation()
-    layout_idx = LAYOUT_INDEX.get(layout, 5)
-    chosen_layout = prs.slide_layouts[layout_idx]
+    if template_pptx:
+        prs = Presentation(os.path.abspath(template_pptx))
+    else:
+        bundled = bundled_asset("assets", "sekilab_blank.pptx")
+        if bundled:
+            prs = Presentation(bundled)
+        else:
+            prs = Presentation()
+            prs.slide_width = SEKILAB_SLIDE_WIDTH
+            prs.slide_height = SEKILAB_SLIDE_HEIGHT
+    n_layouts = len(prs.slide_layouts)
+    blank = prs.slide_layouts[6] if n_layouts > 6 else prs.slide_layouts[n_layouts - 1]
+    title_only = prs.slide_layouts[5] if n_layouts > 5 else prs.slide_layouts[0]
+    slide_w = int(prs.slide_width)
+
+    def _caption_at(i: int) -> str | None:
+        if captions is None:
+            return None
+        return captions[i]
+
+    def _split_title_body(text: str | None) -> tuple[str | None, str | None]:
+        if not text:
+            return None, None
+        if "\n" in text:
+            head, tail = text.split("\n", 1)
+            return (head.strip() or None), (tail.strip() or None)
+        return text, None
+
+    def _add_textbox(slide, left, top, width, height, text: str, *, size=12, bold=False):
+        box = slide.shapes.add_textbox(left, top, width, height)
+        tf = box.text_frame
+        tf.word_wrap = True
+        p = tf.paragraphs[0]
+        p.text = text
+        p.font.size = Pt(size)
+        p.font.bold = bold
+        p.font.color.rgb = RGBColor(0x33, 0x33, 0x33)
+        p.alignment = PP_ALIGN.LEFT
+        return box
 
     slide_titles: list[str | None] = []
-    for i, fig in enumerate(figure_paths):
-        slide = prs.slides.add_slide(chosen_layout)
-        title_text = None
-        if captions is not None and layout_idx != 6 and slide.shapes.title is not None:
-            title_text = captions[i]
-            slide.shapes.title.text = title_text
-        slide_titles.append(title_text)
-        slide.shapes.add_picture(
-            os.path.abspath(fig), Inches(0.5), Inches(1.5), height=Inches(5.5)
-        )
+    slides_added = 0
+
+    if layout == "two_column":
+        # Pair consecutive figures on one slide: left / right, caption under each.
+        for i in range(0, len(abs_figs), 2):
+            slide = prs.slides.add_slide(blank)
+            slides_added += 1
+            gutter = Inches(0.35)
+            col_w = (slide_w - gutter * 3) // 2
+            top = Inches(0.4)
+            img_h = Inches(5.4)
+            cap_h = Inches(1.0)
+            pair_titles: list[str] = []
+            for col, idx in enumerate((i, i + 1)):
+                if idx >= len(abs_figs):
+                    break
+                left = gutter + col * (col_w + gutter)
+                slide.shapes.add_picture(abs_figs[idx], left, top, width=col_w)
+                cap = _caption_at(idx)
+                if cap:
+                    _add_textbox(slide, left, top + img_h + Inches(0.1), col_w, cap_h, cap, size=12)
+                    pair_titles.append(cap.split("\n", 1)[0])
+            slide_titles.append(" | ".join(pair_titles) if pair_titles else None)
+    elif layout == "title_image_caption":
+        # Title on top; image; leftover caption lines under the figure.
+        # A newline in captions[i] splits title vs body; a single line is the title.
+        for i, fig in enumerate(abs_figs):
+            slide = prs.slides.add_slide(title_only)
+            slides_added += 1
+            title_text, body = _split_title_body(_caption_at(i))
+            if title_text and slide.shapes.title is not None:
+                slide.shapes.title.text = title_text
+            slide_titles.append(title_text)
+            img_top = Inches(1.35)
+            img_left = Inches(0.6)
+            img_width = slide_w - Inches(1.2)
+            img_height = Inches(4.7) if body else Inches(5.5)
+            slide.shapes.add_picture(fig, img_left, img_top, width=img_width, height=img_height)
+            if body:
+                _add_textbox(
+                    slide,
+                    img_left,
+                    img_top + img_height + Inches(0.08),
+                    img_width,
+                    Inches(0.9),
+                    body,
+                    size=13,
+                )
+    else:
+        # title_and_image (layout 5) / image_only (layout 6) — unchanged.
+        layout_idx = 6 if layout == "image_only" else 5
+        if layout_idx >= n_layouts:
+            layout_idx = 0 if layout != "image_only" else n_layouts - 1
+        chosen = prs.slide_layouts[layout_idx]
+        for i, fig in enumerate(abs_figs):
+            slide = prs.slides.add_slide(chosen)
+            slides_added += 1
+            title_text = None
+            if layout != "image_only" and _caption_at(i) and slide.shapes.title is not None:
+                title_text = _caption_at(i)
+                slide.shapes.title.text = title_text
+            slide_titles.append(title_text)
+            slide.shapes.add_picture(fig, Inches(0.5), Inches(1.5), height=Inches(5.5))
 
     prs.save(abs_pptx)
     return PptxResult(
         pptx_path=abs_pptx,
-        n_slides_added=len(figure_paths),
+        n_slides_added=slides_added,
         n_slides_total=len(prs.slides),
         slide_titles=slide_titles,
     )

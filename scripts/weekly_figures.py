@@ -1,8 +1,8 @@
 """Render the weekly figure set into the vault for /kb-report consumption.
 
 Two modes:
-- Default: real PFLOW. Reads from H:/Dropbox/PFLOW/output/... and writes to
-  H:/Dropbox/obsidian-vault/wiki/qgis/figures/weekly/<date>/.
+- Default: GUFM. 23-ward polygons in assets/ plus a routed trajectory CSV
+  under ~/Dropbox/gufm/. Writes to the vault wiki/qgis/figures/weekly/<date>/.
 - Demo mode (`--demo-mode`): uses tests/fixtures/*.csv|*.geojson. Used by CI and
   for the unit tests. Writes anywhere (caller-controlled --output-root).
 
@@ -21,19 +21,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VAULT_QGIS_FIGURES = Path("H:/Dropbox/obsidian-vault/wiki/qgis/figures/weekly")
 
-# Default real-data paths — keep in sync with DESIGN.md §10 test data inventory.
-DEFAULT_ZONES_PATH = (
-    "H:/Dropbox/PFLOW/Pseudo-PFLOW/src/shared/gm-jp/polbnda_jpn_new.shp"
+# Default real-data paths — keep in sync with DESIGN.md §10 (GUFM inventory).
+_GUFM = Path.home() / "Dropbox" / "gufm"
+DEFAULT_ZONES_PATH = str(REPO_ROOT / "assets" / "zones_tokyo23.gpkg")
+DEFAULT_ZONE_TRIPS_CSV = str(REPO_ROOT / "assets" / "tokyo23_home_counts.csv")
+DEFAULT_TRAJECTORY_CSV = str(
+    _GUFM / "21_decks" / "2026-06-12_lab_meeting" / "_mapdata" / "gt_routed.csv"
 )
-DEFAULT_ZONE_TRIPS_CSV = (
-    "H:/Dropbox/PFLOW/output (Selective Sync Conflict)/"
-    "trips/truck/run_20260422_215727/zone_trips.csv"
-)
-DEFAULT_TRAJECTORY_CSV = (
-    "H:/Dropbox/PFLOW/output (Selective Sync Conflict)/"
-    "trajectory/taxi/osaka/trajectory_0000.csv"
-)
-DEFAULT_DRM_GPKG = "assets/drm_network.gpkg"
+DEFAULT_DRM_GPKG = str(_GUFM / "10_data" / "urban_kg" / "urban_data" / "road" / "DRM_Tokyo.shp")
 
 # Demo-mode paths — bundled fixtures, suitable for CI.
 DEMO_ZONES_PATH = REPO_ROOT / "tests" / "benchmarks" / "fixtures" / "scaled_zones_134.geojson"
@@ -84,10 +79,12 @@ def run_weekly(
     choro_out = out_dir / "choropleth.png"
     choro_result = qgis_render_choropleth(
         zones_path=zones_path,
-        value_field="total_trips",
+        value_field="total_trips" if demo_mode else "n_persons",
         output_png=str(choro_out),
         value_csv=zone_trips_csv,
-        title="Weekly trips by zone" if not demo_mode else "Demo: synthetic zones",
+        join_field="zone_id",
+        palette="YlOrRd" if demo_mode else "gufm",
+        title="Weekly trips by zone" if demo_mode else "GUFM home-zone persons (23 wards)",
     )
     figures["choropleth"] = {
         "path": choro_result.output_path,
@@ -103,6 +100,7 @@ def run_weekly(
         output_png=str(traj_out),
         render_mode="lines" if demo_mode else "heatmap",
         sample_rate=1.0 if demo_mode else 0.01,
+        mode_col=None if demo_mode else "mode",
     )
     figures["trajectory"] = {
         "path": traj_result.output_path,

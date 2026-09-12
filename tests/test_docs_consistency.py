@@ -40,6 +40,19 @@ def test_readme_tool_count():
     assert f"## Tools ({total} standalone" in text
 
 
+def test_agents_md_workflow_count():
+    total = len(_registered_tools())
+    text = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+    assert f"- {total - 1} workflow tools + 1 escape hatch" in text
+    assert f"## MCP Tools ({total} total" in text
+
+
+def test_server_docstring_does_not_hardcode_stale_count():
+    src = (REPO / "src" / "qgis_mcp_workflows" / "server.py").read_text(encoding="utf-8")
+    assert "v0.2 scaffold" not in src
+    assert "12 workflow tools" not in src
+
+
 def test_design_md_tool_surface_heading():
     """DESIGN.md is the spec — its §4 heading is the authoritative count."""
     total = len(_registered_tools())

@@ -95,6 +95,50 @@ def test_template_pptx_appends_slides(tmp_path: Path):
     assert len(prs.slides) == 2
 
 
+def test_two_column_pairs_figures_on_one_slide(tmp_path: Path):
+    from pptx import Presentation
+
+    from qgis_mcp_workflows.server import qgis_figures_to_pptx
+
+    a = _make_png(tmp_path / "a.png", color=(180, 60, 60))
+    b = _make_png(tmp_path / "b.png", color=(60, 180, 60))
+    c = _make_png(tmp_path / "c.png", color=(60, 60, 180))
+    out = tmp_path / "out.pptx"
+    result = qgis_figures_to_pptx(
+        figure_paths=[str(a), str(b), str(c)],
+        pptx_path=str(out),
+        layout="two_column",
+        captions=["left", "right", "orphan"],
+    )
+    assert result.n_slides_added == 2
+    assert result.n_slides_total == 2
+    assert result.slide_titles[0] == "left | right"
+    assert result.slide_titles[1] == "orphan"
+    prs = Presentation(str(out))
+    assert len(prs.slides) == 2
+    assert len(prs.slides[0].shapes) >= 3
+
+
+def test_title_image_caption_splits_newline(tmp_path: Path):
+    from pptx import Presentation
+
+    from qgis_mcp_workflows.server import qgis_figures_to_pptx
+
+    img = _make_png(tmp_path / "fig.png")
+    out = tmp_path / "out.pptx"
+    result = qgis_figures_to_pptx(
+        figure_paths=[str(img)],
+        pptx_path=str(out),
+        layout="title_image_caption",
+        captions=["Truck trips\nSource: PFLOW run_20260422"],
+    )
+    assert result.slide_titles == ["Truck trips"]
+    prs = Presentation(str(out))
+    assert prs.slides[0].shapes.title.text == "Truck trips"
+    texts = [sh.text_frame.text for sh in prs.slides[0].shapes if sh.has_text_frame]
+    assert any("Source: PFLOW run_20260422" in t for t in texts)
+
+
 # T5 — missing figure_path raises actionable FileNotFoundError before pptx logic
 def test_missing_figure_path_raises_file_not_found(tmp_path: Path):
     from qgis_mcp_workflows.server import qgis_figures_to_pptx

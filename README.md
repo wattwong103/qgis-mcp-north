@@ -1,8 +1,8 @@
 # qgis-mcp-workflows
 
 A focused fork of [`nkarasiak/qgis-mcp`](https://github.com/nkarasiak/qgis-mcp) for
-**transportation-research figure pipelines** — PFLOW, GUFM, weekly decks (the "W17"
-pattern). 13 workflow tools (collapsible to 5 in compound mode), two transports,
+**transportation-research figure pipelines** — GUFM first, PFLOW still supported,
+weekly decks. Workflow tools (collapsible to 5 in compound mode), two transports,
 CI-friendly.
 
 > Renamed from `qgis-mcp-north` in v1.1.0. The fork's positioning (workflow tools, not 51 PyQGIS primitives) is now in the name. Existing users: see the [migration note](#v110-rename-migration) below.
@@ -46,11 +46,18 @@ The headless runner injects a stub `iface` that no-ops UI calls. Every command
 handler that doesn't touch the canvas / layer-tree-view works in both transports
 for free — a v0.4 architectural promise that v0.5+ tools inherit.
 
-## Tools (19 standalone — 18 workflow + `qgis_eval`; 5 grouped in compound mode)
+## Tools (26 standalone — 25 workflow + `qgis_eval`; 5 grouped in compound mode)
 
 | Tool | Purpose |
 |---|---|
-| `qgis_render_from_duckdb` | Render a DuckDB query result directly, skipping the CSV intermediate |
+| `qgis_spatial_join` | Join attributes by location; writes GeoPackage / GeoJSON |
+| `qgis_zonal_stats` | Raster statistics per polygon (JAXA LULC, DEM) → GeoPackage or CSV |
+| `qgis_export_atlas` | Export every atlas page from a print layout (PNG per feature or one PDF) |
+| `qgis_assign_section_load` | All-or-nothing OD → link volumes (`[network]` extra); feed `load_csv` to link-density |
+| `qgis_route_on_network` | Snap stop sequences onto DRM/rail (GUFM Tokyo TSV); writes routed CSV |
+| `qgis_ping` | Liveness check against the plugin socket or headless subprocess |
+| `qgis_diagnose` | Stack health + plugin vs server version match |
+| `qgis_render_from_duckdb` | Render a DuckDB query result directly, skipping the CSV intermediate
 | `qgis_list_basemaps` | List every basemap `basemap=` accepts here: presets + QuickMapServices catalog |
 | `qgis_layer_inspect` | Metadata-only inspect (no project mutation) |
 | `qgis_load_layer` | Register layer + return layer_id; optional CRS override |
@@ -63,7 +70,7 @@ for free — a v0.4 architectural promise that v0.5+ tools inherit.
 | `qgis_render_od_flows` | Origin-destination arcs over a zones layer, data-defined widths |
 | `qgis_export_layout` | Print-composer → PNG/PDF/SVG |
 | `qgis_batch_render` | Fan-out per attribute value; manifest + per-value errors |
-| `qgis_figures_to_pptx` | Assemble PNGs into a PowerPoint deck |
+| `qgis_figures_to_pptx` | Assemble PNGs into a PowerPoint deck (defaults to Sekimoto-lab blank) |
 | `qgis_eval` | Arbitrary PyQGIS escape hatch with `return_vars` capture |
 
 Full input/output schemas, response shapes, and error taxonomy: [`docs/DESIGN.md`](docs/DESIGN.md).
@@ -99,13 +106,13 @@ python install.py
 
 The installer:
 - Symlinks `qgis_mcp_workflows_plugin/` into your active QGIS profile.
-- Sets up the Python venv (`uv sync`).
-- Optionally configures MCP clients (Claude Desktop, Cursor, VS Code, Windsurf, Zed, Claude Code).
+- Sets up the Python venv (`uv sync`). Do not reuse a Dropbox-synced `.venv` from another machine — recreate it.
+- Optionally configures MCP clients (Claude Desktop, Claude Code, Codex, Grok, Cursor, VS Code, Windsurf, Zed).
 
 Non-interactive:
 
 ```bash
-python install.py --non-interactive --clients claude-desktop,cursor
+python install.py --non-interactive --clients claude-desktop,claude-code,codex,grok
 ```
 
 Remote mode (no clone needed; uses `uvx` from GitHub):
@@ -129,14 +136,14 @@ From any MCP client:
   total_trips field, YlOrRd palette, quantile breaks. Save to C:\temp\choropleth.png.
 ```
 
-Concrete PFLOW recipes: [`docs/pflow-usage.md`](docs/pflow-usage.md).
+GUFM recipes: [`docs/gufm-usage.md`](docs/gufm-usage.md). PFLOW (historical): [`docs/pflow-usage.md`](docs/pflow-usage.md).
 
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
 | `QGIS_MCP_WORKFLOWS_TRANSPORT` | `auto` | `plugin` / `headless` / `auto` (probe :9877, fall back to headless) |
-| `QGIS_MCP_WORKFLOWS_TOOL_MODE` | `full` | `full` (13 tools) / `compound` (5 grouped tools) |
+| `QGIS_MCP_WORKFLOWS_TOOL_MODE` | `full` | `full` (standalone tools) / `compound` (5 grouped tools) |
 | `QGIS_MCP_WORKFLOWS_HOST` | `localhost` | Plugin socket host |
 | `QGIS_MCP_WORKFLOWS_PORT` | `9877` | Plugin socket port (upstream uses 9876) |
 | `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER` | (auto-detected) | Headless: Windows `python-qgis(-ltr).bat`, or macOS `<QGIS.app>/Contents/MacOS/bin/python3` |

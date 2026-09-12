@@ -144,6 +144,83 @@ def test_configure_client_creates_backup_when_replacing(install_mod):
     assert backup.exists(), "backup .bak file should be created when config exists"
 
 
+def test_configure_cli_client_invokes_mcp_add(install_mod, monkeypatch):
+    """claude-code / codex / grok run `<cli> mcp add qgis-workflows -- <launch>`."""
+    recorded: list[list[str]] = []
+
+    def fake_which(name):
+        if name in {"claude", "codex", "grok", "uv"}:
+            return f"/bin/{name}"
+        return None
+
+    def fake_run(cmd, **kwargs):
+        recorded.append(list(cmd))
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(install_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(install_mod.subprocess, "run", fake_run)
+
+    install_mod.configure_client("claude-code", remote=False)
+    install_mod.configure_client("codex", remote=False)
+    install_mod.configure_client("grok", remote=False)
+
+    add_calls = [c for c in recorded if "add" in c]
+    assert len(add_calls) == 3
+    for call in add_calls:
+        assert "qgis-workflows" in call
+        assert "--" in call
+        assert "qgis-mcp-workflows-server" in call
+        assert "src/qgis_mcp_workflows/server.py" not in call
+        joined = " ".join(call)
+        assert "--directory" in joined
+    claude_add = next(c for c in add_calls if c[0] == "/bin/claude")
+    assert "-s" in claude_add and "user" in claude_add
+
+
+def test_configure_grok_writes_toml_when_cli_missing(install_mod, monkeypatch):
+    def fake_which(name):
+        if name == "uv":
+            return "/bin/uv"
+        return None
+
+    monkeypatch.setattr(install_mod.shutil, "which", fake_which)
+    install_mod.configure_client("grok", remote=False)
+    toml_path = install_mod._home() / ".grok" / "config.toml"
+    text = toml_path.read_text(encoding="utf-8")
+    assert "[mcp_servers.qgis-workflows]" in text
+    assert "qgis-mcp-workflows-server" in text
+    assert "server.py" not in text
+
+
+def test_unconfigure_cli_uses_qgis_workflows_name(install_mod, monkeypatch):
+    recorded: list[list[str]] = []
+
+    def fake_which(name):
+        return f"/bin/{name}" if name in {"claude", "uv"} else None
+
+    def fake_run(cmd, **kwargs):
+        recorded.append(list(cmd))
+
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(install_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(install_mod.subprocess, "run", fake_run)
+    install_mod.unconfigure_client("claude-code")
+    assert recorded
+    assert recorded[0][-1] == "qgis-workflows"
+
+
 def test_configure_client_remote_uses_uvx(install_mod):
     install_mod.configure_client("claude-desktop", remote=True)
     cfg_path = install_mod._client_registry()["claude-desktop"]["path"]

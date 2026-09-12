@@ -136,6 +136,67 @@ def test_compound_render_choropleth_round_trip(compound_module, fake_executor, t
     assert result.field == "total_trips"
 
 
+def test_compound_inspect_basemaps(compound_module, fake_executor):
+    _server, compound = compound_module
+    fake_executor.responses["list_basemaps"] = {
+        "presets": ["light"], "qms": [], "n_qms": 0, "qms_rejected": [],
+    }
+    result = compound.qgis_inspect(kind="basemaps")
+    assert fake_executor.calls[0][0] == "list_basemaps"
+    assert result.presets == ["light"]
+
+
+def test_compound_render_catchment_dispatches(compound_module, fake_executor):
+    _server, compound = compound_module
+    fake_executor.responses["render_catchment"] = {
+        "output_path": "/tmp/c.png",
+        "width": 1600, "height": 1200, "dpi": 150,
+        "extent": [0, 0, 1, 1], "crs": "EPSG:4326", "n_layers": 1,
+        "method": "voronoi", "n_points": 3, "n_catchments": 3,
+    }
+    result = compound.qgis_render(
+        mode="catchment", output_png="/tmp/c.png", points_path="/tmp/pts.geojson",
+    )
+    assert fake_executor.calls[0][0] == "render_catchment"
+    assert result.method == "voronoi"
+
+
+def test_compound_export_atlas(compound_module, fake_executor):
+    _server, compound = compound_module
+    fake_executor.responses["export_atlas"] = {
+        "output_dir": "/tmp/atlas",
+        "output_path": "/tmp/atlas/atlas_0.png",
+        "format": "png",
+        "n_pages": 2,
+        "layout_name": "A",
+        "files": ["/tmp/atlas/atlas_0.png"],
+    }
+    result = compound.qgis_export(
+        kind="atlas",
+        qgz_path="/tmp/p.qgz",
+        layout_name="A",
+        output_dir="/tmp/atlas",
+    )
+    assert fake_executor.calls[0][0] == "export_atlas"
+    assert result.n_pages == 2
+
+
+def test_compound_export_compose_layout(compound_module, fake_executor):
+    _server, compound = compound_module
+    fake_executor.responses["compose_layout"] = {
+        "output_path": "/tmp/layout.png",
+        "format": "png", "n_layers": 1,
+        "items": ["map", "legend"], "page_size_mm": [297, 210],
+    }
+    result = compound.qgis_export(
+        kind="compose_layout",
+        output_path="/tmp/layout.png",
+        layer_paths=["/tmp/zones.geojson"],
+    )
+    assert fake_executor.calls[0][0] == "compose_layout"
+    assert result.format == "png"
+
+
 def test_compound_render_map_requires_layer_ids(compound_module, fake_executor):
     """qgis_render(mode='map') without layer_ids → ValueError before dispatch."""
     _server, compound = compound_module

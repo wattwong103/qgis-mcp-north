@@ -60,7 +60,34 @@ COLORMAPS: dict[str, list[tuple[float, tuple[int, int, int]]]] = {
         (0.0, (84, 48, 5)), (0.25, (191, 129, 45)), (0.5, (245, 245, 245)),
         (0.75, (53, 151, 143)), (1.0, (0, 60, 48)),
     ],
+    # GUFM Theory Companion (tobler-figure / 02_theory preamble)
+    "gufm": [
+        (0.0, (244, 246, 251)), (0.4, (31, 78, 121)), (0.7, (52, 152, 219)),
+        (1.0, (184, 92, 0)),
+    ],
 }
+
+# JAXA High-Resolution LULC Japan v25.04 — copied from the GeoTIFF colour table
+# at PFLOW Pseudo-PFLOW/src/truck/2024JPN_v25.04_100m/2024JPN_v25.04_100m.tif.
+# Value 0 is nodata (transparent). Used when basemap_paths includes that raster.
+JAXA_LULC_CLASSES: list[tuple[int, tuple[int, int, int, int], str]] = [
+    (0, (0, 0, 0, 0), "unclassified"),
+    (1, (0, 0, 100, 255), "water"),
+    (2, (255, 0, 0, 255), "built-up"),
+    (3, (0, 128, 255, 255), "paddy"),
+    (4, (255, 193, 191, 255), "cropland"),
+    (5, (255, 255, 0, 255), "grassland"),
+    (6, (128, 255, 0, 255), "deciduous_broadleaf"),
+    (7, (0, 255, 128, 255), "deciduous_needleleaf"),
+    (8, (86, 172, 0, 255), "evergreen_broadleaf"),
+    (9, (0, 172, 86, 255), "evergreen_needleleaf"),
+    (10, (128, 100, 0, 255), "bare"),
+    (11, (217, 240, 5, 255), "bamboo"),
+    (12, (161, 41, 119, 255), "solar_panel"),
+    (13, (0, 150, 160, 255), "wetland"),
+    (14, (255, 255, 255, 255), "greenhouse"),
+    (15, (166, 206, 227, 255), "rock_reef_tidal"),
+]
 
 # Maps suited to signed/diverging data (neutral midpoint, two diverging hues).
 DIVERGING: frozenset[str] = frozenset({"vik", "roma", "balance", "RdBu", "BrBG"})

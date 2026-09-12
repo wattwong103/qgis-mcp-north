@@ -3,6 +3,152 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.14.0 — 2026-09-13 — GUFM DRM routing
+
+GUFM already routed in matplotlib (`scripts/figures/routing.py`). This fork only
+drew those CSVs. v1.14 is the MCP workflow.
+
+### Added
+
+- `qgis_route_on_network` — snap consecutive stops onto a line network
+  (GUFM `drm_inner_tokyo.tsv` / `rail_inner_tokyo.tsv`, or GeoJSON/GPKG).
+  Writes `trip_id,seq,lon,lat,mode,datetime,link_id` for
+  `qgis_render_trajectory`. Straight-line fallback when snap > 3 km or the
+  graph is disconnected. `[network]` extra. Prompt `prompt_gufm_route`.
+
+## v1.13.1 — 2026-09-12 — GUFM live-test fixes
+
+Live 23-ward choropleth and routed-trajectory renders showed three gaps.
+
+### Fixed
+
+- `qgis_render_choropleth` now actually paints `title` and `legend` on the PNG
+  (the MCP args existed but were never sent to the plugin).
+- Vector `basemap_paths` no longer use QGIS default opaque brown fill — polygons
+  get a light GUFM underlay, lines a pale rail grey.
+- Trajectory polylines split on jumps > ~8 km so unrouted teleport legs stop
+  blowing the map extent.
+- `tokyo23_home_counts.csv` is filtered to the 23 special wards (13101–13123).
+- Plugin module has `from __future__ import annotations` so 3.9-LTR can load
+  the PEP 585 annotations already in the class body.
+
+## v1.13.0 — 2026-09-12 — GUFM leftovers
+
+Closes DESIGN.md §8 items 3, 5, 6, 9, 13 using GUFM as the primary figure
+pipeline (not PFLOW MFS).
+
+### Added
+
+- `assets/zones_tokyo23.gpkg` / `assets/zones_mesh_l3.gpkg` / `tokyo23_home_counts.csv`
+  from GUFM UKG shapefiles (`scripts/build_gufm_zones.py`). Ward `zone_id` is
+  KSJ `N03_007` (same as GUFM `home_zone`).
+- `assets/sekilab_blank.pptx` — default `qgis_figures_to_pptx` template
+  (Sekimoto-lab widescreen, empty). `scripts/make_sekilab_blank.py`.
+- JAXA HRLULC 15-class palette (`colormaps.JAXA_LULC_CLASSES`). `basemap_paths`
+  now loads rasters; `*lulc*` / `*jaxa*` / `*2024jpn*` get that palette.
+- Graduated/categorized palette `gufm` (Theory Companion colours).
+- `docs/gufm-usage.md`. Prompt `prompt_gufm_wards`.
+
+### Changed
+
+- Weekly-figure defaults and DESIGN §10 inventory are GUFM-first.
+- PPTX layout indices fall back when a template has fewer than 7 layouts.
+
+## v1.12.0 — 2026-09-12 — spatial join + zonal stats
+
+Next GitHub-shaped slice: nkarasiak's analysis tools (`spatial_join`,
+`zonal_statistics`, `get_unique_values`) as atomic workflows, not a
+Processing dump.
+
+### Added
+
+- `qgis_spatial_join` — join attributes by location (`QgsSpatialIndex` +
+  geometry predicates; no Processing). Writes GeoPackage / GeoJSON / shapefile.
+  `SpatialJoinEmptyError` when nothing overlaps.
+- `qgis_zonal_stats` — raster statistics per polygon via `QgsZonalStatistics`
+  (qgis.analysis). GeoPackage or CSV. The path for JAXA LULC (or any raster)
+  onto zone polygons before a choropleth.
+- Prompts `prompt_spatial_join` / `prompt_zonal_stats`.
+
+### Changed
+
+- `qgis_layer_inspect` fills `n_unique` per field when the layer has ≤ 10 000
+  features (the unique-value counts DESIGN already documented). Larger layers
+  stay `n_unique=None` so trajectory CSVs stay cheap.
+
+## v1.11.0 — 2026-09-12 — resources, atlas, remaining furniture
+
+Next GitHub-shaped slice: upstream's resource URIs (slimmed), atlas export as one
+workflow, and scale-bar overlay on the remaining renderers.
+
+### Added
+
+- MCP resources `qgis://status`, `qgis://project`, `qgis://basemaps` (read-only
+  context packs, same idea as nkarasiak's 8 URIs / Aaa2122 `qgis_context`).
+- `qgis_export_atlas` — every atlas page from a pre-authored .qgz layout
+  (PNG per feature or one multi-page PDF). `AtlasDisabledError` when the layout
+  has no coverage layer. Compound: `qgis_export(kind="atlas")`.
+- Prompt `prompt_atlas`.
+- Scale bar / north arrow overlay on DuckDB/WKT, diagram-map, and catchment renders.
+
+### Fixed
+
+- `get_project_info` no longer crashes on layers that have no layer-tree node
+  (attribute-only tables) — same class of bug as upstream v0.9.2.
+
+## v1.10.0 — 2026-09-12 — map furniture + agent prompts
+
+What GitHub QGIS MCP servers and the QGIS print-layout docs both do that this
+fork's fast PNG path did not: scale bar, north arrow, and recipe prompts.
+
+### Added
+
+- `scale_bar` / `north_arrow` on `qgis_render_map`, `qgis_render_choropleth`,
+  `qgis_render_trajectory`, `qgis_render_od_flows`, `qgis_render_link_density`.
+  Painted onto the PNG with `QgsDistanceArea` (true ground length). Off by
+  default so existing figures stay byte-identical. Basemap attribution is drawn
+  when a tile layer is present.
+- MCP prompts: `prompt_choropleth`, `prompt_w17`, `prompt_section_load`.
+- Server instructions now start with ping/diagnose and name the publication flags.
+
+## v1.9.0 — 2026-09-12 — section load + OD/link labels
+
+Closes the last two v1.4 cartography leftovers.
+
+### Added
+
+- `qgis_assign_section_load` — all-or-nothing assignment of an OD CSV onto a line network (GeoJSON or GeoPackage). Snaps zone centroids to nearest nodes, writes `link_id,volume`. New `[network]` extra (`networkx`, `scipy`). Chain: `qgis_render_link_density(load_csv=...)`.
+- `qgis_render_link_density(..., load_csv=)` accepts that volume CSV instead of trajectory files.
+- Haloed `label_field` on OD arcs (`origin` / `destination` / `trip_count`) and link-density lines.
+
+## v1.8.0 — 2026-09-12 — figure pipeline fidelity
+
+Closes two DESIGN.md leftovers that made weekly-deck figures worse than they needed to be.
+
+### Added
+
+- `qgis_render_trajectory` tile `basemap=` / `basemap_opacity` (same presets + `qms:<id>` as choropleth/OD). Plugin reprojects to EPSG:3857 when a tile layer is present so XYZ tiles stay aligned.
+- `qgis_figures_to_pptx` layouts that used to alias `title_only`:
+  - `two_column` — pairs consecutive figures on one slide, caption under each.
+  - `title_image_caption` — title on top; a newline in `captions[i]` becomes body text under the figure.
+
+## v1.7.0 — 2026-09-12 — agent reliability
+
+Make the MCP actually usable from Claude Desktop, Claude Code, Codex, and Grok.
+
+### Fixed
+
+- Hollow Dropbox `.venv` (missing pydantic sources) killed the stdio process on import, so clients reported a handshake failure even when QGIS was listening on :9877. Recreate with `uv sync`. The server now prints that hint to stderr if the MCP SDK fails to import.
+- `install.py` only printed a Claude Code command, and the printed local command still used `src/qgis_mcp_workflows/server.py` (`ModuleNotFoundError: mcp`). Uninstall named the server `qgis` while add named it `qgis-workflows`.
+
+### Added
+
+- `qgis_ping` / `qgis_diagnose` (plugin handlers were already there; they are now MCP tools, both tool modes).
+- `install.py` actually runs `claude mcp add -s user`, `codex mcp add`, and `grok mcp add` for `qgis-workflows`. Grok falls back to `~/.grok/config.toml` if the CLI is missing. Launch command is always `uv run --directory <repo> qgis-mcp-workflows-server`.
+- Compound mode dispatches post-v1.0 tools (`link_density`, `diagram_map`, `catchment`, `duckdb`, `compose_layout`, `list_basemaps`) and v1.4 params (`diverging`, `basemap`, `arc_style`, `label_field`).
+- PNG render/export tools attach MCP `ImageContent` when the written file exists and is under 1.5 MB. `output_path` stays canonical.
+- `mcp[cli]>=1.20.0,<3` plus a FastMCP / MCPServer import fallback.
+
 ## v1.6.0 — 2026-08-31 — v0.3 roadmap salvage
 
 Closes the two items the v0.3 roadmap flagged and v1.x never shipped. With these

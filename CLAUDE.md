@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`qgis-mcp-workflows` (v1.1.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
+`qgis-mcp-workflows` (v1.14.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
 
 Key differences from upstream:
-- 18 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
+- 25 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
 - Two transports: `plugin` (TCP socket → running QGIS) and `headless` (PyQGIS subprocess), selected via `--transport=auto|plugin|headless`.
 - Plugin folder: `qgis_mcp_workflows_plugin/`. Python package: `qgis-mcp-workflows` (importable as `qgis_mcp_workflows`). Default socket port: **9877** (vs upstream 9876). Both servers can run side-by-side.
 
@@ -79,10 +79,12 @@ uv tool run ruff check src/ tests/
 | `QGIS_MCP_WORKFLOWS_LOG_FILE` | `~/.local/share/qgis-mcp-workflows/server.log` | Rotating log file (5MB × 3) — empty disables file logging |
 | `QGIS_MCP_WORKFLOWS_LOG_LEVEL` | `INFO` | File log level. Console (stderr) is always WARNING+ |
 
-## MCP Tools (19 total as of v1.5; 5 grouped tools in compound mode. See `docs/DESIGN.md` §4 for full signatures.)
+## MCP Tools (26 total as of v1.14; 5 grouped tools in compound mode. See `docs/DESIGN.md` §4 for full signatures.)
 
 | Tool | Status | Notes |
 |---|---|---|
+| `qgis_ping` | ✅ v1.7 | Liveness: `{pong, transport}` against plugin or headless |
+| `qgis_diagnose` | ✅ v1.7 | Stack health + plugin/server version match |
 | `qgis_layer_inspect` | ✅ v0.3 | Read-only metadata; loads + removes transiently |
 | `qgis_load_layer` | ✅ v0.3 / v0.4 | `crs=` override (v0.4) wired through `set_layer_crs` with rollback |
 | `qgis_project_load` | ✅ v0.5 | Loads .qgz; returns layers + layouts; stateful (subsequent `export_layout`/`batch_render` reuse the loaded project) |
@@ -90,7 +92,7 @@ uv tool run ruff check src/ tests/
 | `qgis_style_graduated` | ✅ v1.0 | Graduated symbology with `mode ∈ {quantile, equal_interval, natural_breaks, pretty}`; returns explicit `breaks` array. v1.4: `diverging`+`center` (symmetric breaks for signed data) and scientific colormaps via `colormaps.py` (shared `_build_graduated_renderer`). |
 | `qgis_render_map` | ✅ v0.3 | Plugin handler: `render_layers_to_path` |
 | `qgis_render_choropleth` | ✅ v0.3 | Plugin handler: `render_choropleth` (atomic load+style+render+cleanup). v0.6: tile `basemap=`. v1.4: `diverging`+`center`, scientific colormaps, `label_field` (haloed labels). |
-| `qgis_render_trajectory` | ✅ v0.5 | Lines/points/heatmap from PFLOW CSV or GPX; stride sampling + `max_points` ceiling; optional `movingpandas` speed-binned line rendering when `[trajectory]` extra installed |
+| `qgis_render_trajectory` | ✅ v0.5 / v1.8 | Lines/points/heatmap from PFLOW CSV or GPX; stride sampling + `max_points` ceiling; tile `basemap=`; optional `movingpandas` speed-binned line rendering when `[trajectory]` extra installed |
 | `qgis_render_od_flows` | ✅ v0.5 | Centroid arcs over a zones layer; data-defined stroke width; unmatched origin/destination counts surface in response. v1.4: `arc_style ∈ {line,arrow,curved}` (QgsArrowSymbolLayer), tile `basemap=`. |
 | `qgis_render_link_density` | ✅ v1.2 | DRM-link traffic density from PFLOW trajectories. Streaming MCP-side aggregation + plugin-side graduated line render. Requires one-time `scripts/build_drm_network.py` to produce `assets/drm_network.gpkg`. v1.4: tile `basemap=`, scientific colormaps. |
 | `qgis_render_diagram_map` | ✅ v1.4 | Chart-in-map: pie/bar `QgsDiagramRenderer` glyphs per feature, one slice/bar per `value_field`; optional tile basemap. |
@@ -98,17 +100,22 @@ uv tool run ruff check src/ tests/
 | `qgis_export_layout` | ✅ v0.5 | PNG/PDF/SVG via `QgsLayoutExporter`; loads `qgz_path` internally if not already loaded; `LayoutNotFoundError` when layout missing |
 | `qgis_compose_layout` | ✅ v1.4 | Programmatic `QgsPrintLayout`: titled map panel + linked legend / scale bar / north arrow, export PNG/PDF/SVG. Complements `export_layout` (which only exports pre-authored `.qgz`). |
 | `qgis_batch_render` | ✅ v0.5 | Fan-out per attribute value; active-layer convention (saved-active → first vector fallback); manifest + per-value errors; `subset_string` reset in `finally` |
-| `qgis_figures_to_pptx` | ✅ v0.3 | Pure python-pptx; `two_column` + `title_image_caption` degrade to `title_only` |
+| `qgis_figures_to_pptx` | ✅ v0.3 / v1.8 | Pure python-pptx. `two_column` pairs figures; `title_image_caption` splits a newline in the caption into title vs body. |
 | `qgis_list_basemaps` | ✅ v1.5 | Discovery for `basemap=`: built-in presets + every usable QuickMapServices source in the QGIS profile, plus `qms_rejected` explaining what was filtered (non-3857 CRS, licence-restricted providers) and why. |
 | `qgis_render_from_duckdb` | ✅ v1.6 | Query a DuckDB file and render the result — no CSV intermediate. Geometry via `geometry_column` (WKT text) or `lon_column`/`lat_column`. Connection is READ-ONLY and the query is LIMIT-wrapped, so a mistaken `SELECT *` against a multi-GB store (e.g. `output/viz/kichijoji.duckdb`, ~10M waypoints) can neither mutate nor OOM. Plugin handler: `render_wkt_features`. |
+| `qgis_export_atlas` | ✅ v1.11 | Export every page of a print-layout atlas (PNG per feature or one PDF). |
+| `qgis_spatial_join` | ✅ v1.12 | Join attributes by location (`QgsSpatialIndex`); writes GeoPackage/GeoJSON. |
+| `qgis_zonal_stats` | ✅ v1.12 | Raster stats per polygon (`QgsZonalStatistics`); JAXA LULC onto zones. |
+| `qgis_assign_section_load` | ✅ v1.9 | All-or-nothing OD assignment onto a line network (networkx). Writes `link_id,volume` for `qgis_render_link_density(load_csv=...)`. `[network]` extra. |
+| `qgis_route_on_network` | ✅ v1.14 | Snap consecutive stops onto GUFM DRM/rail TSV (or a line GeoJSON/GPKG). Writes routed `trip_id,seq,lon,lat,mode,datetime,link_id` for `qgis_render_trajectory`. `[network]` extra. |
 | `qgis_eval` | ✅ v1.0 | Arbitrary PyQGIS escape hatch with `return_vars` capture. Plugin's `execute_code` augmented with `_json_safe()` fallback (non-serializable values → `repr()`). |
 
 ## Key Details
 
-- **Python**: 3.12. Package manager: `uv` (pyproject.toml).
-- **Main deps**: `mcp[cli]>=1.20.0`, `pydantic>=2.7`. Optional: `python-pptx` (`pptx` extra), `movingpandas` (`trajectory` extra).
+- **Python**: 3.12. Package manager: `uv` (pyproject.toml). Recreate `.venv` with `uv sync` on each machine — a Dropbox-synced venv is often missing package sources and the MCP handshake then dies on import.
+- **Main deps**: `mcp[cli]>=1.20.0,<3`, `pydantic>=2.7`. Optional: `python-pptx` (`pptx` extra), `movingpandas` (`trajectory` extra), `networkx` (`network` extra).
 - **Tools are sync `def`** (not async — the v0.4 dispatch path is synchronous; FastMCP supports both).
-- **All response paths return `output_path` (absolute)**. No tool returns base64. No tool returns relative paths.
+- **All response paths return `output_path` (absolute)**. PNG renders also attach MCP image content when the file exists and is under 1.5 MB. No tool returns relative paths.
 - **Errors must be actionable.** Every typed exception in `src/qgis_mcp_workflows/errors.py` ends with `Next: <suggested tool call>`. Add new error classes when a recovery hint changes.
 - **Headless caveats**: handlers that genuinely need `iface` (canvas extent/refresh, layer-tree-view manipulation, message bar) raise loudly from the stub; switch to plugin transport for those. The v0.3 + v0.5 workflow tools shouldn't hit any of them.
 - **macOS**: `HeadlessExecutor` auto-detects `/Applications/QGIS-LTR.app` (then `QGIS.app`, then any `QGIS*.app`) and injects `PROJ_LIB`, `GDAL_DATA`, `QGIS_PREFIX_PATH` from the bundle via `_bundle_env()`. Two silent-corruption traps this avoids: without PROJ/GDAL paths every CRS is invalid; without Qt's org/app name set (`headless_runner.py`) the profile resolves wrong, `QgsStyle.defaultStyle()` has zero color ramps, and graduated renders collapse to one flat colour. **`qgis_mcp_workflows_plugin/` must stay Python 3.9-compatible** — QGIS-LTR on macOS bundles 3.9, while the MCP server runs 3.12.

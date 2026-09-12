@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **draft v0.2 (post-rename)**, 2026-05-22
+Status: **v1.14.0**, 2026-09-13
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -12,7 +12,7 @@ This document is the spec. Implementation follows. If a tool's signature, respon
 
 Three problems with upstream that the fork solves:
 
-**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **18 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
+**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **25 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
 
 **No headless mode.** Upstream requires QGIS Desktop running with the plugin enabled. That's incompatible with scheduled overnight runs, CI, or any automation. We add a **PyQGIS-subprocess transport** alongside the existing plugin transport. Same tools, two backends, selected by config or CLI flag.
 
@@ -46,7 +46,7 @@ Out of scope: replacing upstream as a general-purpose QGIS MCP. We intentionally
                   PyQGIS API                PyQGIS API (same)
 ```
 
-**Two transports, one tool surface.** The MCP server exposes the same 13 tools regardless of transport. A thin executor abstraction (`src/qgis_mcp_workflows/executors/{plugin,headless}.py`) hides the difference. Tools are written against the executor interface; they never directly speak socket or PyQGIS.
+**Two transports, one tool surface.** The MCP server exposes the same tools regardless of transport. A thin executor abstraction (`src/qgis_mcp_workflows/executors/{plugin,headless}.py`) hides the difference. Tools are written against the executor interface; they never directly speak socket or PyQGIS.
 
 **Transport selection.** CLI flag `--transport={plugin,headless,auto}`. `auto` (default) checks for a running plugin on port 9877 and falls back to headless. Config file in `~/.config/qgis-mcp-workflows/config.toml` can override per-machine.
 
@@ -94,9 +94,19 @@ Upstream's plugin and server stay untouched. If the user installs both, Claude D
 
 ---
 
-## 4. Tool surface (18 workflow + 1 escape hatch)
+## 4. Tool surface (25 workflow + 1 escape hatch)
 
 For each tool: signature, what it does, response shape, and the typical chain.
+
+### Connectivity (2)
+
+#### `qgis_ping() → {pong: bool, transport: str}`
+
+Liveness check against the active executor (plugin socket or headless subprocess). Always registered, including compound mode.
+
+#### `qgis_diagnose() → {status, transport, checks}`
+
+Plugin-side health checks plus `enrich_diagnose` (server vs plugin version match). Always registered. Call this after an update or when a tool looks missing.
 
 ### Inspection & Loading (3)
 
@@ -115,7 +125,9 @@ LayerInfo = {
 }
 ```
 
-Chains into: `qgis_load_layer`, `qgis_render_choropleth`, `qgis_render_trajectory`.
+`n_unique` is filled when `n_features ≤ 10_000` (one extra no-geometry scan). Larger layers (trajectory CSVs) leave it `None` so inspect stays cheap.
+
+Chains into: `qgis_load_layer`, `qgis_render_choropleth`, `qgis_render_trajectory`, `qgis_spatial_join`.
 
 #### `qgis_load_layer(path: str, name: str | None = None, crs: str | None = None) → LoadedLayer`
 
@@ -142,6 +154,42 @@ ProjectInfo = {
 ```
 
 Chains into: `qgis_export_layout`, `qgis_render_map`, `qgis_batch_render`.
+
+### Analysis (2)
+
+GitHub analogue: nkarasiak `spatial_join` / `zonal_statistics` / `get_unique_values`. Wrapped as atomic workflows (load + compute + write + cleanup). No Processing toolbox.
+
+#### `qgis_spatial_join(target_path: str, join_path: str, output_path: str, predicate: str = "intersects", method: str = "one_to_one", join_fields: list[str] | None = None, prefix: str = "", keep_unmatched: bool = True) → SpatialJoinResult`
+
+Join attributes by location. Target keeps geometry; join-layer attributes are copied onto matching features. `predicate ∈ {intersects, contains, within, touches, overlaps, crosses, equals}`. `method="one_to_one"` keeps the first match; `one_to_many` duplicates the target once per match. Collision names get a `_j` suffix. Raises `SpatialJoinEmptyError` when nothing overlaps.
+
+```python
+SpatialJoinResult = {
+    "output_path": str,
+    "n_target": int, "n_join": int,
+    "n_matched": int, "n_unmatched": int,
+    "n_output_features": int,
+    "predicate": str, "method": str,
+    "joined_fields": [str],
+}
+```
+
+Chains into: `qgis_render_choropleth`, `qgis_style_categorized`, `qgis_layer_inspect`.
+
+#### `qgis_zonal_stats(zones_path: str, raster_path: str, output_path: str, stats: list[str] | None = None, prefix: str = "", raster_band: int = 1) → ZonalStatsResult`
+
+Raster statistics per polygon via `QgsZonalStatistics` (qgis.analysis — works headless). Default `stats=["count","sum","mean"]`. `.gpkg` keeps geometry; `.csv` is attributes only. The path for JAXA LULC (or any raster) onto zone polygons.
+
+```python
+ZonalStatsResult = {
+    "output_path": str,
+    "n_zones": int, "n_with_value": int,
+    "stats": [str], "fields_added": [str],
+    "raster_band": int, "prefix": str,
+}
+```
+
+Chains into: `qgis_render_choropleth(zones_path=output_path, value_field=...)`.
 
 ### Styling (2)
 
@@ -248,7 +296,30 @@ ODFlowResult = RenderResult | {
 }
 ```
 
-#### `qgis_render_link_density(trajectory_csvs: list[str], drm_network_path: str, output_png: str, link_id_col: str = "link_id", aggregation: str = "count", value_col: str | None = None, n_classes: int = 7, mode: str = "quantile", palette: str = "YlOrRd", min_density: float = 1.0, top_n: int | None = None, extent: list[float] | None = None, basemap_paths: list[str] | None = None, width: int = 1600, height: int = 1200, dpi: int = 150) → LinkDensityResult`
+#### `qgis_export_atlas(qgz_path: str, layout_name: str, output_dir: str, format: str = "png", dpi: int = 300) → AtlasExportResult`
+
+**Workflow tool.** Export every page of a print-layout atlas. PNG/JPG: one image per coverage feature. PDF: one multi-page `atlas.pdf`. Raises `AtlasDisabledError` when the layout has no coverage layer — then use `qgis_export_layout` or `qgis_batch_render`.
+
+#### `qgis_assign_section_load(od_csv: str, network_path: str, output_csv: str, zones_path: str | None = None, origin_col: str = "origin", dest_col: str = "destination", value_col: str = "trip_count", zone_id_field: str = "zone_id", link_id_field: str = "link_id") → SectionLoadResult`
+
+**Workflow tool.** All-or-nothing assignment of OD volumes onto a directed line network. Requires the `[network]` extra (`networkx`). Zone centroids snap to the nearest graph node; unroutable pairs increment `n_unassigned`. Writes `link_id,volume` for `qgis_render_link_density(load_csv=...)`.
+
+#### `qgis_route_on_network(input_csv: str, network_path: str, output_csv: str, rail_network_path: str | None = None, ...) → RouteResult`
+
+**Workflow tool.** Snap consecutive stops onto a line network and write a routed trajectory CSV. GUFM path: `hero_stops.csv` (or decoded ACT locations) + `10_data/network_cache/drm_inner_tokyo.tsv` (road) and optional `rail_inner_tokyo.tsv` (RAIL/TRAIN legs). Same algorithm as `gufm/scripts/figures/routing.py` (shortest path, 3 km snap, straight-line fallback), as an MCP tool. GeoJSON/GPKG networks work too. Needs `[network]` extra. Does **not** copy the 57 MB TSV into this repo.
+
+```python
+RouteResult = {
+    "output_csv": str,
+    "n_trips": int, "n_legs": int,
+    "n_routed": int, "n_straight": int, "n_points": int,
+    "network_path": str,
+}
+```
+
+Chains into: `qgis_render_trajectory(input_path=output_csv, mode_col="mode")`.
+
+#### `qgis_render_link_density(drm_network_path: str, output_png: str, trajectory_csvs: list[str] | None = None, load_csv: str | None = None, ...) → LinkDensityResult`
 
 **Workflow tool.** Render DRM-link traffic density from PFLOW trajectories. Aggregates one or more trajectory CSVs by `link_id`, joins to a pre-built DRM line layer, applies graduated symbology, renders.
 
@@ -353,7 +424,7 @@ transit-figure pipeline. Each a separate commit, unit-tested + live-verified.
 - `qgis_render_od_flows`: `arc_style ∈ {"line", "arrow", "curved"}` — directional `QgsArrowSymbolLayer` arrows, optionally curved; width/head scale with flow.
 - `qgis_render_od_flows` / `qgis_render_link_density`: tile `basemap=` + `basemap_opacity` (same live-XYZ presets as choropleth); link-density color routes through the scientific-colormap helper.
 
-**Deferred to a follow-up PR:** `qgis_assign_section_load` (network all-or-nothing assignment; adds a `[network]` extra with networkx + scipy). Minor: trajectory tile basemap, OD/link halo labels.
+**v1.9 leftovers closed:** `qgis_assign_section_load` (all-or-nothing assignment, `[network]` extra) and haloed `label_field` on OD arcs / link-density lines. Trajectory tile `basemap=` shipped in v1.8.
 
 ### Basemaps — presets and QuickMapServices (v1.5)
 
@@ -457,7 +528,7 @@ The mcp-builder skill emphasizes "actionable error messages." Every error messag
 
 **Idempotency annotations.** All `render_*`, `export_*`, `figures_to_pptx`, and `batch_render` are non-idempotent (they write files). Annotate accordingly. `layer_inspect`, `style_*` (in headless mode, where styling is in-memory) are read-only or idempotent.
 
-**Output discipline.** Every tool that writes a file returns the absolute path in `output_path`. No tool returns base64-encoded image bytes. Inline preview is the host's job, not the MCP's.
+**Output discipline.** Every tool that writes a file returns the absolute path in `output_path`. The path is canonical. When the written file is an existing PNG under 1.5 MB, the MCP result also includes `ImageContent` so the model can see the figure in the same turn. Oversize / missing / non-PNG outputs stay path-only. Tools do not return a parallel `render_map_base64` payload.
 
 **Logging.** Server logs to `~/.local/share/qgis-mcp-workflows/logs/server-{date}.log`. Plugin logs go to QGIS Message Log under tab `qgis-mcp-workflows`.
 
@@ -500,6 +571,12 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 
 **v1.4 — cartography pass.** ✅ Shipped 2026-06-23 on `feat/choropleth-diverging-colormaps`, grounded in the `N:\TransInfor` transit-figure pipeline. Seven slices, each its own commit + verified live against TransInfor data: (1) diverging color schemes + vendored scientific colormaps (`colormaps.py`, shared `_build_graduated_renderer`/`_resolve_color_ramp`); (2) tile basemaps + scientific colormaps on OD-flows & link-density; (3) directional/curved OD arcs (`arc_style`, `QgsArrowSymbolLayer`); (4) `qgis_compose_layout` (programmatic print layouts); (5) haloed `label_field` on choropleth; (6) `qgis_render_diagram_map` (chart-in-map pie/bar diagrams); (7) `qgis_render_catchment` (Voronoi service areas). Tool surface 14 → 17. Deferred to a follow-up PR: `qgis_assign_section_load` (network section-load assignment; `[network]` extra = networkx + scipy). Pre-existing ruff debt (SIM105 ×9, import-sort) left untouched.
 
+**v1.12 — spatial analysis workflows.** ✅ Shipped 2026-09-12. GitHub analogue: nkarasiak `spatial_join` / `zonal_statistics` / `get_unique_values`, wrapped as atomic workflows (no Processing toolbox). `qgis_spatial_join` (`QgsSpatialIndex` + geometry predicates) and `qgis_zonal_stats` (`QgsZonalStatistics` from qgis.analysis, headless-safe). `qgis_layer_inspect` fills `n_unique` when `n_features ≤ 10_000`. Tool surface 22 → 24 workflow tools.
+
+**v1.13 — GUFM leftovers.** ✅ Shipped 2026-09-12. Closed §8 items 3, 5, 6, 9, 13 against GUFM (not PFLOW MFS): Tokyo 23-ward + L3 mesh GeoPackages, Sekimoto-lab blank PPTX default, JAXA LULC raster underlays + published 15-class palette, KSJ `N03_007` as `zone_id`. Palette `gufm` from the Theory Companion. Recipes: `docs/gufm-usage.md`.
+
+**v1.14 — GUFM DRM routing.** ✅ Shipped 2026-09-12. `qgis_route_on_network` snaps stop sequences onto GUFM `drm_inner_tokyo.tsv` / `rail_inner_tokyo.tsv` (or a line GeoJSON/GPKG) and writes a routed CSV for `qgis_render_trajectory`. MCP-side networkx; TSV stays in the GUFM tree (57 MB, not copied).
+
 ---
 
 ## 8. Resolved & open questions
@@ -508,27 +585,23 @@ Resolved (2026-04-30, against `H:\Dropbox\PFLOW\output (Selective Sync Conflict)
 
 1. ~~**PFLOW zone schema**~~ → Multiple coexisting zone systems: `MFS##` (mesh, ~111 zones in `zone_trips.csv`), `PRF##` (47 prefectures, used in `od_flows.csv`), `Z##` (used in trip-level `trips.csv`). All string-typed. No single "134-zone" file — caller must specify which system per render. CRS: **EPSG:4326** (lon/lat), not JGD2011.
 2. ~~**PFLOW value-field conventions**~~ → `total_trips`, `origin_trips`, `dest_trips` (zone_trips.csv); `trip_count`, `avg_distance_km` (od_flows.csv). Tool defaults updated.
-3. **~~GUFM trajectory schema~~ deferred** → GUFM data unavailable for v1. PFLOW trajectory schema is the v1 default: `lon, lat, datetime, trip_id, transport_mode, purpose, passenger_in, fare_yen, link_id`. Tool defaults updated.
+3. ~~**GUFM trajectory schema**~~ → Closed in v1.13. Routed CSV from `gufm/scripts/figures/dump_trajectories_for_qgis.py`: `trip_id, seq, lon, lat, mode, datetime`. Same lon/lat/datetime/trip_id defaults as PFLOW; set `mode_col="mode"`. Persona `home_zone` is JIS `N03_007` (e.g. `13101`).
 4. ~~**OD CSV shape**~~ → Long format confirmed: `origin, destination, trip_count, avg_distance_km` (12,041 rows in `od_flows.csv`). Tool defaults updated.
 
-Still open:
+Closed in v1.13 (GUFM, not PFLOW MFS):
 
-5. **No master MFS-zone polygon shapefile exists in PFLOW.** Confirmed against all four user-pointed locations (`/shared/gm-jp/`, `/truck/2024JPN_v25.04_100m/`, `/data/network/`, `/output/`). What exists:
-    - `polbnda_jpn_new.shp` → administrative (prefectural) polygons, not MFS-coded.
-    - `2024JPN_v25.04_100m.tif` → JAXA LULC raster, not zone codes.
-    - `mfs/{kanto,osaka}/zone_mapping.py` → Python source defining MFS zone composition.
+5. ~~**No master MFS-zone polygon shapefile exists in PFLOW.**~~ Closed in v1.13 against GUFM, not PFLOW MFS. Canonical polygons:
+    - `assets/zones_tokyo23.gpkg` — 23 wards, `zone_id` = KSJ `N03_007` (matches GUFM `home_zone`).
+    - `assets/zones_mesh_l3.gpkg` — JIS L3 (1 km, ADR-15), dissolved from `Tokyo23_mesh.shp` L4 `KEY_CODE[:8]`.
+    Rebuild: `uv run --no-sync --extra drm scripts/build_gufm_zones.py`. Source shapefiles stay in `~/Dropbox/gufm/10_data/urban_kg/urban_data/polygon/`.
 
-    **Decision (v0.3): use prefecture polygons directly** from `polbnda_jpn_new.shp` joined to a derived `prefecture → total_trips` aggregate. Demonstrates the choropleth tool end-to-end on a 47-zone case while postponing MFS construction.
-
-    **Decision (v0.4): build MFS polygons** as a one-time prep script (`scripts/build_mfs_zones.py`) that reads `zone_mapping.py` and either dissolves `polbnda_jpn_new.shp` or constructs a mesh grid, writing `assets/zones_mfs.gpkg`. This becomes the canonical `zones_path` for `qgis_render_choropleth` PFLOW tests from v0.4 onward.
-
-6. **PPTX template.** Is there a Chulalongkorn / Sekimoto-lab / W17 deck template `figures_to_pptx` should default to? If so, drop the path in `assets/` and we'll wire it as the default `template_pptx`.
+6. ~~**PPTX template.**~~ Closed in v1.13. `qgis_figures_to_pptx` defaults to `assets/sekilab_blank.pptx` (Sekimoto-lab 20×11.25 in widescreen, zero content slides). The filled `21_decks/_templates/Seki_Lab_Template_latest.pptx` is 17 slides / one DEFAULT layout and must not be the default (appending would dump figures after lab content). Rebuild: `uv run --no-sync --extra pptx scripts/make_sekilab_blank.py`.
 
 7. **DuckDB integration.** ✅ **Shipped in v1.6** as `qgis_render_from_duckdb`. Flagged here originally against a `viz/pflow.duckdb` that turned out not to exist; the real stores are inventoried in §10.
 
 8. ~~**DRM-link aggregation (v2 candidate).**~~ → Resolved in v1.2 (2026-05-22). Shipped `qgis_render_link_density` + `scripts/build_drm_network.py` (one-time prep, builds `assets/drm_network.gpkg` from 47 prefecture-sharded DRM TSVs). MCP-side streaming aggregation (no full-load), plugin-side graduated line rendering. New `[drm]` extra (pyogrio + geopandas) for the prep script only; tool runtime adds no deps. New error: `DRMNetworkNotFoundError`. See §4 for the tool signature.
 
-9. **JAXA LULC raster as basemap.** `2024JPN_v25.04_100m.tif` (uint8, 15 categorical classes, EPSG:4326) loads through `qgis_load_layer` → `qgis_render_map` already, no new tool needed. Worth documenting as an optional `basemap_paths` entry for choropleth/trajectory renders that want land-cover context. Default styling: per-class palette matching JAXA's published legend (assets/jaxa_lulc_legend.png available).
+9. ~~**JAXA LULC raster as basemap.**~~ Closed in v1.13. `basemap_paths` accepts rasters; filenames matching `lulc` / `jaxa` / `2024jpn` get the 15-class palette copied from the GeoTIFF colour table (`colormaps.JAXA_LULC_CLASSES`). File still lives at `~/Dropbox/PFLOW/Pseudo-PFLOW/src/truck/2024JPN_v25.04_100m/2024JPN_v25.04_100m.tif` (not copied; 16 MB). Analysis path remains `qgis_zonal_stats`.
 
 Resolved during v0.3 (2026-04-30):
 
@@ -536,11 +609,11 @@ Resolved during v0.3 (2026-04-30):
 
 11. ~~**Choropleth memory-layer architecture**~~ → Implemented as a single plugin command (`render_choropleth`) rather than 8 MCP-side dispatch round-trips. Reason: plugin's `get_layer_features(include_geometry=True)` returns geometry summaries, not full WKT (token-efficiency optimisation in upstream). Decision: keep the CSV-parse + `value_dict` build on the MCP side (matches "approach B" intent — stdlib `csv` only), but push the geometry copy + style + render into one atomic plugin command that cleans up after itself.
 
-12. **`qgis_figures_to_pptx` layout fidelity.** v0.3 ships `title_and_image` and `image_only` with full python-pptx fidelity; `two_column` and `title_image_caption` are accepted but degrade to `title_only`. Promoting them is mechanical and can land in any later release.
+12. **~~`qgis_figures_to_pptx` layout fidelity~~ closed in v1.8.** `two_column` pairs consecutive figures on one slide; `title_image_caption` uses a newline in `captions[i]` as title vs body under the figure. `title_and_image` / `image_only` unchanged.
 
 Still open after v0.3:
 
-13. **`polbnda_jpn_new.shp` prefecture-id field name.** Not yet verified against the live shapefile — requires running `qgis_layer_inspect` end-to-end with QGIS open. Once verified, drop the actual field name into the v0.3 demo prompt and §10 of this doc.
+13. ~~**`polbnda_jpn_new.shp` prefecture-id field name.**~~ Closed in v1.13. KSJ N03 schema (same as GUFM `Tokyo23.shp`): `N03_001` prefecture, `N03_004` municipality name, **`N03_007` JIS municipality code** (5-digit, e.g. `13101`). `polbnda_jpn_new.shp` has 1905 municipality polygons, not 47 prefectures — dissolve on `N03_001` for a prefecture choropleth. GUFM 23-ward layer is the Tokyo subset; `assets/zones_tokyo23.gpkg` exposes `N03_007` as `zone_id`.
 
 Resolved during v0.4 (2026-05-01):
 
@@ -567,7 +640,35 @@ Still open after v0.4:
 
 ---
 
-## 10. Test data inventory (PFLOW)
+## 10. Test data inventory
+
+### GUFM (primary as of v1.13)
+
+Recipes: [`docs/gufm-usage.md`](gufm-usage.md). Rebuild committed assets with
+`scripts/build_gufm_zones.py` and `scripts/make_sekilab_blank.py`.
+
+| File | What |
+|---|---|
+| `assets/zones_tokyo23.gpkg` | 23 wards; `zone_id` = `N03_007` (JIS, e.g. `13101`) |
+| `assets/zones_mesh_l3.gpkg` | JIS L3 1 km mesh (ADR-15); `zone_id` = 8-digit code |
+| `assets/tokyo23_home_counts.csv` | Demo join CSV: `zone_id,n_persons` from GUFM personas sample |
+| `assets/sekilab_blank.pptx` | Default `template_pptx` (lab widescreen, 0 slides) |
+| `~/Dropbox/gufm/10_data/urban_kg/urban_data/polygon/Tokyo23.shp` | Source wards (no `.prj`; treat as EPSG:4326) |
+| `~/Dropbox/gufm/10_data/urban_kg/urban_data/polygon/Tokyo23_mesh.shp` | Source L4 mesh (`KEY_CODE` 9-digit) |
+| `~/Dropbox/gufm/10_data/urban_kg/urban_data/road/Tokyo_railway.shp` | Rail underlay |
+| `~/Dropbox/gufm/10_data/urban_kg/urban_data/road/DRM_Tokyo.shp` | Tokyo DRM shapefile (large; do not copy) |
+| `~/Dropbox/gufm/10_data/network_cache/drm_inner_tokyo.tsv` | GUFM inner-Tokyo DRM cache (57 MB, 289k links) — `qgis_route_on_network` |
+| `~/Dropbox/gufm/10_data/network_cache/rail_inner_tokyo.tsv` | GUFM inner-Tokyo rail cache (649 links) |
+| `~/Dropbox/gufm/21_decks/2026-06-12_lab_meeting/_mapdata/hero_stops.csv` | Unrouted ACT stops (seq, lon, lat, clock, act) |
+| `~/Dropbox/gufm/10_data/ksj/extracted/N02-22_RailroadSection.geojson` | KSJ rail sections |
+| `~/Dropbox/gufm/21_decks/2026-06-12_lab_meeting/_mapdata/gt_routed.csv` | Routed GT trajectories (`mode` column) |
+| `~/Dropbox/gufm/10_data/pflow_personas_sample.csv` | `home_zone` matches `N03_007` |
+
+GUFM trajectory columns: `trip_id, seq, lon, lat, mode, datetime`.
+
+### PFLOW (historical W17)
+
+**DuckDB (for `qgis_render_from_duckdb`).** The roadmap named `viz/pflow.duckdb`;
 
 **DuckDB (for `qgis_render_from_duckdb`).** The roadmap named `viz/pflow.duckdb`;
 no file by that name exists. The real equivalents, and where they are on macOS:

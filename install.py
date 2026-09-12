@@ -2,11 +2,11 @@
 """Multi-client installer for QGIS MCP.
 
 Symlinks the QGIS plugin and configures MCP clients (Claude Desktop,
-Cursor, VS Code Copilot, Windsurf, Zed, Claude Code).
+Claude Code, Codex CLI, Grok, Cursor, VS Code Copilot, Windsurf, Zed).
 
 Usage:
     python install.py                          # Interactive menu
-    python install.py --non-interactive --clients claude-desktop,cursor
+    python install.py --non-interactive --clients claude-desktop,claude-code,codex,grok
     python install.py --remote                 # Use uvx (no local clone needed)
     python install.py --uninstall --clients cursor
 """
@@ -84,7 +84,9 @@ def _client_registry() -> dict[str, ClientInfo]:
         "vscode": {"path": vscode_cfg, "key": "mcpServers", "project_local": True},
         "windsurf": {"path": windsurf_cfg, "key": "mcpServers"},
         "zed": {"path": zed_cfg, "key": "context_servers"},
-        "claude-code": {"print_only": True},
+        "claude-code": {"cli": "claude", "add_prefix": ["mcp", "add", "-s", "user"], "remove_cmd": ["mcp", "remove", "-s", "user"]},
+        "codex": {"cli": "codex", "add_prefix": ["mcp", "add"], "remove_cmd": ["mcp", "remove"]},
+        "grok": {"cli": "grok", "add_prefix": ["mcp", "add"], "remove_cmd": ["mcp", "remove"]},
     }
 
 
@@ -199,6 +201,115 @@ def _server_entry(client: str, remote: bool) -> dict:
     return _remote_entry() if remote else _local_entry()
 
 
+SERVER_NAME = "qgis-workflows"
+
+
+def _launch_argv(remote: bool) -> list[str]:
+    """Command + args used by CLI `mcp add` clients. Same as JSON `_local_entry`."""
+    if remote:
+        return ["uvx", "--from", GITHUB_URL, "qgis-mcp-workflows-server"]
+    if shutil.which("uv"):
+        return ["uv", "run", "--directory", str(REPO_DIR), "qgis-mcp-workflows-server"]
+    return [str(_venv_python()), str(REPO_DIR / "src" / "qgis_mcp_workflows" / "server.py")]
+
+
+def _write_grok_toml(remote: bool) -> Path:
+    """Merge [mcp_servers.qgis-workflows] into ~/.grok/config.toml (CLI missing)."""
+    path = _home() / ".grok" / "config.toml"
+    argv = _launch_argv(remote)
+    command, args = argv[0], argv[1:]
+    args_toml = ", ".join(json.dumps(a) for a in args)
+    block = (
+        f"\n[mcp_servers.{SERVER_NAME}]\n"
+        f"command = {json.dumps(command)}\n"
+        f"args = [{args_toml}]\n"
+    )
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    if path.exists():
+        _backup(path)
+    marker = f"[mcp_servers.{SERVER_NAME}]"
+    if marker in existing:
+        before, _, rest = existing.partition(marker)
+        # Drop the old table body up to the next top-level [section] or EOF.
+        idx = 0
+        lines = rest.splitlines(keepends=True)
+        # rest starts after the marker; skip remainder of that header line + body
+        if lines:
+            lines = lines[1:]
+        while idx < len(lines):
+            stripped = lines[idx].lstrip()
+            if stripped.startswith("[") and not stripped.startswith("[mcp_servers." + SERVER_NAME):
+                break
+            idx += 1
+        existing = before.rstrip() + "\n" + "".join(lines[idx:])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(existing.rstrip() + "\n" + block, encoding="utf-8")
+    return path
+
+
+def _configure_cli_client(client_name: str, remote: bool) -> None:
+    """Run `<cli> mcp add qgis-workflows -- <launch>` (Claude Code / Codex / Grok)."""
+    info = _client_registry()[client_name]
+    cli_name = str(info["cli"])
+    cli_bin = shutil.which(cli_name)
+    argv = _launch_argv(remote)
+    add_prefix = list(info["add_prefix"])
+
+    if not cli_bin:
+        if client_name == "grok":
+            written = _write_grok_toml(remote)
+            print(f"  '{cli_name}' CLI not found; wrote {written}")
+            return
+        if client_name == "claude-code":
+            # Project-local fallback so a clone still works without the CLI.
+            mcp_path = REPO_DIR / ".mcp.json"
+            config = _read_json(mcp_path)
+            if mcp_path.exists():
+                _backup(mcp_path)
+            config.setdefault("mcpServers", {})
+            config["mcpServers"][SERVER_NAME] = _server_entry("cursor", remote)
+            _write_json(mcp_path, config)
+            print(f"  '{cli_name}' CLI not found; wrote {mcp_path}")
+            print(f"  Or run: {cli_name} {' '.join(add_prefix)} {SERVER_NAME} -- {' '.join(argv)}")
+            return
+        print(f"  '{cli_name}' CLI not found in PATH - skipping.")
+        print(f"  {cli_name} {' '.join(add_prefix)} {SERVER_NAME} -- {' '.join(argv)}")
+        return
+
+    remove_cmd = [cli_bin, *list(info["remove_cmd"]), SERVER_NAME]
+    subprocess.run(remove_cmd, capture_output=True)
+    result = subprocess.run(
+        [cli_bin, *add_prefix, SERVER_NAME, "--", *argv],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        print(f"  Configured {cli_name} ({SERVER_NAME}, user scope).")
+    else:
+        err = (result.stderr or result.stdout or "").strip()
+        print(f"  Failed to configure {cli_name}: {err}")
+
+
+def _unconfigure_cli_client(client_name: str) -> None:
+    info = _client_registry()[client_name]
+    cli_name = str(info["cli"])
+    cli_bin = shutil.which(cli_name)
+    if not cli_bin:
+        print(f"  '{cli_name}' CLI not found - skipping.")
+        print(f"  Run: {cli_name} {' '.join(list(info['remove_cmd']))} {SERVER_NAME}")
+        return
+    result = subprocess.run(
+        [cli_bin, *list(info["remove_cmd"]), SERVER_NAME],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        print(f"  Removed {SERVER_NAME} from {cli_name}.")
+    else:
+        err = (result.stderr or result.stdout or "").strip()
+        print(f"  Not configured in {cli_name}: {err}")
+
+
 # ── Plugin installation ────────────────────────────────────────────────────
 
 
@@ -269,18 +380,8 @@ def configure_client(client_name: str, remote: bool) -> None:
     registry = _client_registry()
     info = registry[client_name]
 
-    # Claude Code: print command only
-    if info.get("print_only"):
-        if remote:
-            cmd = f'claude mcp add qgis-workflows -- uvx --from "{GITHUB_URL}" qgis-mcp-workflows-server'
-        elif shutil.which("uv"):
-            cmd = "claude mcp add qgis-workflows -- uv run --no-sync src/qgis_mcp_workflows/server.py"
-            print(f"  Run this from {REPO_DIR}:")
-        else:
-            python = str(_venv_python())
-            server = str(REPO_DIR / "src" / "qgis_mcp_workflows" / "server.py")
-            cmd = f'claude mcp add qgis-workflows -- "{python}" "{server}"'
-        print(f"  {cmd}")
+    if info.get("cli"):
+        _configure_cli_client(client_name, remote)
         return
 
     path = Path(info["path"])
@@ -301,8 +402,8 @@ def unconfigure_client(client_name: str) -> None:
     registry = _client_registry()
     info = registry[client_name]
 
-    if info.get("print_only"):
-        print("  Run: claude mcp remove qgis")
+    if info.get("cli"):
+        _unconfigure_cli_client(client_name)
         return
 
     path = Path(info["path"])
@@ -322,14 +423,23 @@ def unconfigure_client(client_name: str) -> None:
 
 # ── Interactive menu ────────────────────────────────────────────────────────
 
-ALL_CLIENTS = ["claude-desktop", "cursor", "vscode", "windsurf", "zed", "claude-code"]
+ALL_CLIENTS = [
+    "claude-desktop",
+    "claude-code",
+    "codex",
+    "grok",
+    "cursor",
+    "vscode",
+    "windsurf",
+    "zed",
+]
 
 
 def interactive_menu() -> list[str]:
     print("\nAvailable MCP clients:")
     for i, name in enumerate(ALL_CLIENTS, 1):
         tag = " (project-local)" if name == "vscode" else ""
-        tag = " (prints command)" if name == "claude-code" else tag
+        tag = " (CLI mcp add)" if name in {"claude-code", "codex", "grok"} else tag
         print(f"  {i}. {name}{tag}")
     print("  a. All")
     print("  q. Skip client configuration")

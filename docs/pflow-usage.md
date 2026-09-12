@@ -1,9 +1,11 @@
 # Using qgis-mcp-workflows for PFLOW figures
 
-Concrete recipes for the canonical PFLOW (and GUFM) figure types. All paths in this
-guide reference files that exist only on the user's local machine — the synthetic
-fixtures committed in `tests/fixtures/` are for testing the tool surface, not for
-publication-ready figures.
+**GUFM is the primary figure pipeline now** — see [`gufm-usage.md`](gufm-usage.md).
+This page keeps the older PFLOW W17 recipes.
+
+Concrete recipes for PFLOW figure types. All paths in this guide reference files
+that exist only on the user's local machine — the synthetic fixtures committed in
+`tests/fixtures/` are for testing the tool surface, not for publication-ready figures.
 
 ## Setup
 

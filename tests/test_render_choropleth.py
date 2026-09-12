@@ -73,6 +73,24 @@ def test_csv_parsed_to_dict_then_dispatched(fake_executor, tmp_path: Path):
     assert result.join.field == "zone_id"
 
 
+def test_title_and_legend_are_dispatched(fake_executor, tmp_path: Path):
+    fake_executor.responses["render_choropleth"] = _ok_response()
+    qgis_render_choropleth(
+        zones_path="/zones.shp",
+        value_field="population",
+        output_png="/out.png",
+        title="GUFM home-zone persons",
+        legend=True,
+        scale_bar=True,
+        north_arrow=True,
+    )
+    params = fake_executor.calls[0][1]
+    assert params["title"] == "GUFM home-zone persons"
+    assert params["legend"] is True
+    assert params["scale_bar"] is True
+    assert params["north_arrow"] is True
+
+
 def test_no_csv_passes_value_dict_none(fake_executor, tmp_path: Path):
     """Direct mode: value_field is already a column on zones — no join."""
     fake_executor.responses["render_choropleth"] = _ok_response()
@@ -193,6 +211,17 @@ def test_diverging_response_fields_echoed(fake_executor):
     assert result.diverging is True
     assert result.center == 0.0
     assert result.diverging_one_sided is False
+
+
+def test_scale_bar_threads_to_plugin(fake_executor):
+    fake_executor.responses["render_choropleth"] = _ok_response()
+    qgis_render_choropleth(
+        zones_path="/z.shp", value_field="total_trips", output_png="/o.png",
+        scale_bar=True, north_arrow=True,
+    )
+    params = fake_executor.calls[0][1]
+    assert params["scale_bar"] is True
+    assert params["north_arrow"] is True
 
 
 def test_label_field_threads_to_plugin(fake_executor):

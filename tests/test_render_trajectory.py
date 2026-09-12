@@ -211,6 +211,25 @@ def test_movingpandas_attaches_speed_when_available(fake_executor):
     assert all("speed_kmh" in feat for feat in params["features"])
 
 
+def test_tile_basemap_spec_forwarded(fake_executor):
+    fake_executor.responses["render_trajectory"] = _ok_response(
+        basemap_source="light (live xyz)",
+        basemap_attribution="Esri",
+    )
+    result = qgis_render_trajectory(
+        input_path=str(TINY_TRAJ),
+        output_png="/tmp/traj.png",
+        basemap="light",
+        basemap_opacity=0.7,
+    )
+    params = fake_executor.calls[0][1]
+    spec = params["basemap_spec"]
+    assert spec["kind"] == "xyz"
+    assert spec["name"] == "light"
+    assert spec["opacity"] == pytest.approx(0.7)
+    assert result.basemap_source == "light (live xyz)"
+
+
 def test_paths_resolved_to_absolute(fake_executor, tmp_path: Path):
     fake_executor.responses["render_trajectory"] = _ok_response()
     # Use the fixture but pass an absolute path for output_png + relative basemap

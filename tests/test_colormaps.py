@@ -11,7 +11,7 @@ import pytest
 
 from qgis_mcp_workflows_plugin.colormaps import COLORMAPS, DIVERGING, diverging_breaks
 
-EXPECTED_SEQUENTIAL = {"viridis", "cividis", "magma", "batlow"}
+EXPECTED_SEQUENTIAL = {"viridis", "cividis", "magma", "batlow", "gufm"}
 EXPECTED_DIVERGING = {"vik", "roma", "balance", "RdBu", "BrBG"}
 
 
