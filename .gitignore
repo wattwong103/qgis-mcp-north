@@ -30,3 +30,17 @@ tmp/
 assets/drm_network.gpkg
 assets/drm_network.gpkg-shm
 assets/drm_network.gpkg-wal
+# Claude Code / openspec scaffolding. .mcp.json stays tracked (documented setup);
+# settings.local.json and skills/commands are per-machine scratch.
+.claude/
+openspec/
+.grok/
+.mavis/
+.harness/
+.cursor/
+.aider*
+
+# ai-sdlc:runtime-gitignore
+.ai-sdlc/state.db
+.ai-sdlc/state/
+.ai-sdlc/audit.jsonl
