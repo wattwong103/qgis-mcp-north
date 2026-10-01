@@ -108,6 +108,54 @@ def test_uninstall_plugin_when_not_installed(install_mod, capsys):
     assert "Not installed" in out
 
 
+# ── QGIS 4 profiles ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+def test_qgis_plugins_dir_qgis4(install_mod, monkeypatch, platform):
+    monkeypatch.setattr(sys, "platform", platform)
+    p = install_mod.qgis_plugins_dir("default", major="QGIS4")
+    assert "QGIS4" in p.parts and "QGIS3" not in p.parts
+
+
+def _make_qgis4_base(install_mod, monkeypatch, tmp_path):
+    """Pretend QGIS 4 Desktop has run once: only its QGIS/QGIS4 dir exists.
+
+    Built from literal segments, not from install.py's own path helpers, so an
+    off-by-one in those helpers cannot make this test agree with itself.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+    base = tmp_path / "home" / "Library" / "Application Support" / "QGIS" / "QGIS4"
+    base.mkdir(parents=True)
+    return base / "profiles" / "default" / "python" / "plugins" / "qgis_mcp_workflows_plugin"
+
+
+def test_install_plugin_links_qgis4_when_present(install_mod, monkeypatch, tmp_path):
+    """QGIS 4 Desktop reads QGIS/QGIS4/profiles/<p>; linking only QGIS3 left
+    the plugin invisible there (found 2026-10-02 on QGIS 4.2.2)."""
+    q4_target = _make_qgis4_base(install_mod, monkeypatch, tmp_path)
+    q3_target = install_mod.install_plugin("default")
+    assert q3_target.exists()
+    assert q4_target.exists()
+    if q4_target.is_symlink():
+        assert q4_target.resolve() == install_mod.PLUGIN_SRC.resolve()
+
+
+def test_install_plugin_skips_qgis4_when_absent(install_mod, monkeypatch):
+    """No QGIS 4 on the machine: don't invent a QGIS4 settings tree."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    install_mod.install_plugin("default")
+    support = install_mod._home() / "Library" / "Application Support" / "QGIS"
+    assert not (support / "QGIS4").exists()
+
+
+def test_uninstall_plugin_removes_qgis4_link(install_mod, monkeypatch, tmp_path):
+    q4_target = _make_qgis4_base(install_mod, monkeypatch, tmp_path)
+    install_mod.install_plugin("default")
+    install_mod.uninstall_plugin("default")
+    assert not q4_target.exists()
+
+
 # ── configure_client ────────────────────────────────────────────────────────
 
 

@@ -105,6 +105,26 @@ class HeadlessUnavailableError(QgisMcpWorkflowsError):
         self.detail = detail
 
 
+class TransportUnavailableError(QgisMcpWorkflowsError):
+    """``transport=auto`` found neither the plugin socket nor a headless launcher.
+
+    Raised per tool call (the server starts degraded rather than exiting), so
+    the client sees this message instead of a closed MCP connection.
+    """
+
+    def __init__(self, host: str, port: int, headless_detail: str) -> None:
+        super().__init__(
+            f"No QGIS backend: the plugin is not listening at {host}:{port}, and "
+            f"headless is unavailable ({headless_detail}). "
+            f"Open QGIS Desktop and start the 'QGIS MCP Workflows' plugin, or set "
+            f"QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER and restart the MCP server. "
+            f"Next: qgis_ping() once QGIS is open."
+        )
+        self.host = host
+        self.port = port
+        self.headless_detail = headless_detail
+
+
 class CrsMismatchError(QgisMcpWorkflowsError):
     """A requested CRS override could not be applied to the loaded layer."""
 

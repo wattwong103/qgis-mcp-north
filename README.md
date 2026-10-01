@@ -173,6 +173,10 @@ QGIS_MCP_WORKFLOWS_TRANSPORT=headless uv run --no-sync qgis-mcp-workflows-server
 open for the MCP session lifetime. `initQgis` costs ~1-2s per cold start; never
 restart per call.
 
+With no plugin listening and no headless launcher found, `--transport=auto` (the
+default) still starts: tools return a "No QGIS backend" error until QGIS is
+reachable, instead of the MCP connection closing at startup.
+
 ## Platform support
 
 - **Windows** — supported since v1.0. Tested with OSGeo4W LTR.
@@ -205,14 +209,10 @@ handled automatically — they matter only if you set the env vars yourself:
 QGIS-LTR bundles **Python 3.9**, so everything under `qgis_mcp_workflows_plugin/`
 (which runs in QGIS's interpreter, not the server's 3.12) must stay 3.9-compatible.
 
-**QGIS 4 plugin.** QGIS 4 Desktop reads its own profile (`.../QGIS/QGIS4/profiles/default`),
-and `install.py` still links only the QGIS3 one. Until it does, link the plugin by hand,
-then enable it in *Plugins → Manage and Install Plugins* (restart QGIS if it is not listed):
-
-```bash
-mkdir -p ~/Library/Application\ Support/QGIS/QGIS4/profiles/default/python/plugins
-ln -s "$(pwd)/qgis_mcp_workflows_plugin" ~/Library/Application\ Support/QGIS/QGIS4/profiles/default/python/plugins/
-```
+**QGIS 4 plugin.** QGIS 4 Desktop reads its own profile (`.../QGIS/QGIS4/profiles/default`).
+`python install.py` links the plugin into the QGIS3 profile and, once QGIS 4 has been
+started at least once (so `.../QGIS/QGIS4` exists), into the QGIS4 profile too. Then
+enable it in *Plugins → Manage and Install Plugins* (restart QGIS if it is not listed).
 
 ## Development
 
