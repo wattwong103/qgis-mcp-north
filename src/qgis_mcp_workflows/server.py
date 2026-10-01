@@ -2973,12 +2973,51 @@ def _plugin_reachable(host: str, port: int, timeout_s: float = 0.5) -> bool:
         return False
 
 
+class UnavailableExecutor:
+    """``auto`` mode with no backend at startup: start anyway, fail per call.
+
+    Raising from ``_build_executor`` exits the process before the MCP
+    handshake, so the client only reports "connection closed". Instead every
+    dispatch re-probes the plugin port: once QGIS Desktop is up with the plugin
+    started, this swaps a ``PluginExecutor`` in as the active executor (no MCP
+    restart); until then it raises ``TransportUnavailableError`` carrying both
+    reasons.
+    """
+
+    def __init__(self, host: str, port: int, headless_detail: str) -> None:
+        self.host = host
+        self.port = port
+        # The headless detail may end with its own "Next:" hint; the combined
+        # error supplies the one that applies here.
+        self.headless_detail = headless_detail.split(" Next:")[0].rstrip(". ")
+        self._delegate = None  # PluginExecutor once the plugin was reached
+
+    def dispatch(self, command: str, params: dict | None = None, timeout: int | None = None) -> dict:
+        # Tools that hold this executor in a local keep calling it after the
+        # swap; forward those straight to the plugin instead of re-probing.
+        if self._delegate is not None:
+            return self._delegate.dispatch(command, params, timeout=timeout)
+
+        from qgis_mcp_workflows import executors
+        from qgis_mcp_workflows.errors import TransportUnavailableError
+        from qgis_mcp_workflows.executors.plugin import PluginExecutor
+
+        if not _plugin_reachable(self.host, self.port):
+            raise TransportUnavailableError(self.host, self.port, self.headless_detail)
+        self._delegate = PluginExecutor(host=self.host, port=self.port)
+        executors.set_executor(self._delegate)
+        logger.info("plugin came up at %s:%d; switched transport to plugin", self.host, self.port)
+        return self._delegate.dispatch(command, params, timeout=timeout)
+
+
 def _build_executor(transport: str):
     """Construct the executor for the chosen transport.
 
     ``auto`` first probes the plugin port; falls back to headless if the plugin
-    is not reachable. Errors from headless construction propagate so the user
-    sees a single clear ``HeadlessUnavailableError`` rather than a silent fall.
+    is not reachable. If headless is unavailable too, ``auto`` starts degraded
+    (``UnavailableExecutor``) so tools return an actionable error instead of the
+    server exiting. An explicit ``headless`` still raises
+    ``HeadlessUnavailableError`` at startup.
     """
     from qgis_mcp_workflows.executors.plugin import PluginExecutor
     from qgis_mcp_workflows.helpers import DEFAULT_HOST, DEFAULT_PORT
@@ -2995,9 +3034,18 @@ def _build_executor(transport: str):
     if transport == "auto":
         if _plugin_reachable(host, port):
             return PluginExecutor(host=host, port=port), "plugin"
+        from qgis_mcp_workflows.errors import HeadlessUnavailableError
         from qgis_mcp_workflows.executors.headless import HeadlessExecutor
 
-        return HeadlessExecutor(), "headless"
+        try:
+            return HeadlessExecutor(), "headless"
+        except HeadlessUnavailableError as exc:
+            logger.warning(
+                "no QGIS backend at startup (plugin %s:%d closed; headless: %s); "
+                "starting degraded, tools will error until QGIS is reachable",
+                host, port, exc.detail,
+            )
+            return UnavailableExecutor(host, port, exc.detail), "unavailable"
     raise ValueError(f"Unknown transport: {transport!r}. Use plugin / headless / auto.")
 
 
