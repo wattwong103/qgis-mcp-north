@@ -17,6 +17,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   installed (its `QGIS/QGIS4` settings tree exists); uninstall removes both.
 - Map furniture (scale bar, title, legend, north arrow) no longer fails under
   PyQt6: scoped enums and `horizontalAdvance()` in `_overlay_map_furniture`.
+- Render tools no longer report a validation error after a successful render.
+  The PNG preview wrapper returned a bare `[text, image]` list while the tool
+  kept its model return type, so FastMCP rejected it (`validation error for
+  ChoroplethResult`) whenever a real PNG under 1.5 MB existed. It now returns a
+  `CallToolResult` with the image block and the structured result (wrapped as
+  `{"result": ...}` for the compound tools, whose return type is a Union).
 
 ### Changed
 

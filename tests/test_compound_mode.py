@@ -232,3 +232,30 @@ def test_reimport_restores_original_module_object(monkeypatch):
         assert reimported is not before
     # ...but the original object is restored on exit.
     assert sys.modules["qgis_mcp_workflows.server"] is before
+
+
+async def test_compound_render_with_real_png_returns_preview(compound_module, fake_executor, tmp_path):
+    """Compound tools return a Union of models, so FastMCP wraps their
+    structured output as {"result": ...}. The PNG preview must follow that, or
+    every compound render with a real PNG errors although the file was written."""
+    from mcp.types import CallToolResult, ImageContent
+
+    server_module, _ = compound_module
+    png = tmp_path / "choropleth.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+    fake_executor.responses["render_choropleth"] = {
+        "output_path": str(png),
+        "width": 800, "height": 600, "dpi": 150,
+        "extent": [139.5, 35.5, 140.0, 35.9], "crs": "EPSG:4326", "n_layers": 1,
+        "field": "fid", "n_classes": 5,
+        "breaks": [1.0, 5.4, 9.8, 14.2, 18.6, 23.0], "mode": "quantile",
+        "min_value": 1.0, "max_value": 23.0,
+        "n_features": 23, "n_matched": 23, "n_unmatched": 0,
+    }
+    out = await server_module.mcp.call_tool(
+        "qgis_render",
+        {"mode": "choropleth", "zones_path": "/zones.gpkg", "value_field": "fid", "output_png": str(png)},
+    )
+    assert isinstance(out, CallToolResult)
+    assert any(isinstance(b, ImageContent) for b in out.content)
+    assert out.structuredContent["result"]["output_path"] == str(png)
