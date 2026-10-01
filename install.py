@@ -37,15 +37,35 @@ def _appdata() -> Path:
     return Path(os.environ.get("APPDATA", _home() / "AppData" / "Roaming"))
 
 
-def qgis_plugins_dir(profile: str) -> Path:
-    base = {
-        "linux": _home() / ".local" / "share" / "QGIS" / "QGIS3",
-        "darwin": _home() / "Library" / "Application Support" / "QGIS" / "QGIS3",
-        "win32": _appdata() / "QGIS" / "QGIS3",
+# QGIS keeps one settings tree per major version (QGIS/QGIS3, QGIS/QGIS4); a
+# plugin linked into one is invisible to the other.
+QGIS_MAJORS = ("QGIS3", "QGIS4")
+
+
+def _qgis_base(major: str) -> Path:
+    """Per-major settings tree, e.g. ~/Library/Application Support/QGIS/QGIS4."""
+    root = {
+        "linux": _home() / ".local" / "share" / "QGIS",
+        "darwin": _home() / "Library" / "Application Support" / "QGIS",
+        "win32": _appdata() / "QGIS",
     }.get(sys.platform)
-    if base is None:
+    if root is None:
         sys.exit(f"Unsupported platform: {sys.platform}")
-    return base / "profiles" / profile / "python" / "plugins"
+    return root / major
+
+
+def qgis_plugins_dir(profile: str, major: str = "QGIS3") -> Path:
+    return _qgis_base(major) / "profiles" / profile / "python" / "plugins"
+
+
+def _plugin_targets(profile: str) -> list[Path]:
+    """QGIS3 always (the historical default); other majors only once their
+    Desktop has created its settings tree, so no empty QGIS4 tree is invented."""
+    targets = []
+    for major in QGIS_MAJORS:
+        if major == "QGIS3" or _qgis_base(major).is_dir():
+            targets.append(qgis_plugins_dir(profile, major) / "qgis_mcp_workflows_plugin")
+    return targets
 
 
 # ── Client config paths ────────────────────────────────────────────────────
@@ -314,8 +334,13 @@ def _unconfigure_cli_client(client_name: str) -> None:
 
 
 def install_plugin(profile: str) -> Path:
-    plugins_dir = qgis_plugins_dir(profile)
-    target = plugins_dir / "qgis_mcp_workflows_plugin"
+    """Link the plugin into every installed QGIS major; returns the QGIS3 link."""
+    targets = [_link_plugin(t) for t in _plugin_targets(profile)]
+    return targets[0]
+
+
+def _link_plugin(target: Path) -> Path:
+    plugins_dir = target.parent
 
     if target.is_symlink() or target.exists():
         if target.is_symlink() and target.resolve() == PLUGIN_SRC.resolve():
@@ -343,15 +368,15 @@ def install_plugin(profile: str) -> Path:
 
 
 def uninstall_plugin(profile: str) -> None:
-    target = qgis_plugins_dir(profile) / "qgis_mcp_workflows_plugin"
-    if target.is_symlink() or target.exists():
-        if target.is_symlink() or target.is_file():
-            target.unlink()
+    for target in _plugin_targets(profile):
+        if target.is_symlink() or target.exists():
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            else:
+                shutil.rmtree(target)
+            print(f"  Removed: {target}")
         else:
-            shutil.rmtree(target)
-        print(f"  Removed: {target}")
-    else:
-        print(f"  Not installed: {target}")
+            print(f"  Not installed: {target}")
 
 
 # ── Client configuration ───────────────────────────────────────────────────
