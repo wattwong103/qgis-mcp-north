@@ -3,6 +3,17 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased — render results
+
+### Fixed
+
+- Render tools no longer report a validation error after a successful render.
+  The PNG preview wrapper returned a bare `[text, image]` list while the tool
+  kept its model return type, so FastMCP rejected it (`validation error for
+  ChoroplethResult`) whenever a real PNG under 1.5 MB existed. It now returns a
+  `CallToolResult` with the image block and the structured result (wrapped as
+  `{"result": ...}` for the compound tools, whose return type is a Union).
+
 ## v1.14.0 — 2026-09-13 — GUFM DRM routing
 
 GUFM already routed in matplotlib (`scripts/figures/routing.py`). This fork only

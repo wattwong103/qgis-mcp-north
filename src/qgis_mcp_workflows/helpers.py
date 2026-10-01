@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import functools
 import importlib.metadata
+import inspect
 import json
 import os
 import struct
@@ -15,7 +16,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from mcp.types import Annotations, ImageContent, ResourceLink, TextContent
+from mcp.types import Annotations, CallToolResult, ImageContent, ResourceLink, TextContent
+from pydantic import BaseModel
 
 # Skip attaching a preview when the PNG is missing, empty, or larger than this.
 # No resampling (no Pillow dep): oversize files stay path-only.
@@ -134,27 +136,53 @@ def png_preview_content(path: str | None) -> ImageContent | None:
     )
 
 
-def maybe_preview(result: Any) -> Any:
+def maybe_preview(result: Any, wrap_structured: bool = False) -> Any:
     """Attach ``ImageContent`` when ``result.output_path`` is a real PNG.
 
     Otherwise return ``result`` unchanged (the Python/test contract).
+
+    Returns a ``CallToolResult``, not a bare ``[text, image]`` list: the wrapped
+    tools keep their model return annotation (``functools.wraps``), so FastMCP
+    validates the return value against that model, and a list failed every
+    render whose PNG existed ("validation error for ChoroplethResult") even
+    though the file was written. FastMCP validates ``structuredContent``
+    against the model and passes the result through unchanged.
+
+    ``wrap_structured``: FastMCP wraps the structured output of tools whose
+    return type is not a single model (the compound tools return a Union) as
+    ``{"result": ...}``; the payload must match that schema.
     """
     img = png_preview_content(getattr(result, "output_path", None))
     if img is None:
         return result
-    payload = result.model_dump() if hasattr(result, "model_dump") else result
-    return [
-        TextContent(type="text", text=json.dumps(payload)),
-        img,
-    ]
+    payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(payload)), img],
+        structuredContent={"result": payload} if wrap_structured else payload,
+    )
+
+
+def _returns_single_model(fn: Callable) -> bool:
+    """True when ``fn``'s return annotation is one pydantic model class.
+
+    Mirrors FastMCP's rule for unwrapped structured output; anything else
+    (Union, list, dict, unresolvable) is wrapped as ``{"result": ...}``.
+    """
+    try:
+        ann = inspect.signature(fn, eval_str=True).return_annotation
+    except Exception:
+        return False
+    return isinstance(ann, type) and issubclass(ann, BaseModel)
 
 
 def with_png_preview(fn: Callable) -> Callable:
     """Decorator: wrap a tool that returns a model with ``output_path``."""
 
+    wrap_structured = not _returns_single_model(fn)
+
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return maybe_preview(fn(*args, **kwargs))
+        return maybe_preview(fn(*args, **kwargs), wrap_structured=wrap_structured)
 
     return wrapper
 
