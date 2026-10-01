@@ -48,7 +48,7 @@ Out of scope: replacing upstream as a general-purpose QGIS MCP. We intentionally
 
 **Two transports, one tool surface.** The MCP server exposes the same tools regardless of transport. A thin executor abstraction (`src/qgis_mcp_workflows/executors/{plugin,headless}.py`) hides the difference. Tools are written against the executor interface; they never directly speak socket or PyQGIS.
 
-**Transport selection.** CLI flag `--transport={plugin,headless,auto}`. `auto` (default) checks for a running plugin on port 9877 and falls back to headless. Config file in `~/.config/qgis-mcp-workflows/config.toml` can override per-machine.
+**Transport selection.** CLI flag `--transport={plugin,headless,auto}`. `auto` (default) checks for a running plugin on port 9877 and falls back to headless. If headless is unavailable too, `auto` still starts (degraded): every tool call re-probes the plugin port, switches to the plugin once QGIS Desktop is up, and otherwise raises `TransportUnavailableError` naming both reasons. Exiting at startup instead would close the MCP connection before the client could show any error. An explicit `--transport=headless` keeps failing at startup with `HeadlessUnavailableError`. Config file in `~/.config/qgis-mcp-workflows/config.toml` can override per-machine.
 
 **Headless runtime.** Standalone PyQGIS via `qgis_process` (CLI) for simple ops, with a long-lived Python subprocess holding `QgsApplication` for complex ops. Headless mode forces `QT_QPA_PLATFORM=offscreen` and disables any GUI calls. Render only — no project save, no plugin install, no UI mutation.
 

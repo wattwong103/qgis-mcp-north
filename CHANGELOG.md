@@ -18,6 +18,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Map furniture (scale bar, title, legend, north arrow) no longer fails under
   PyQt6: scoped enums and `horizontalAdvance()` in `_overlay_map_furniture`.
 
+### Changed
+
+- `--transport=auto` with no plugin and no headless launcher starts degraded
+  instead of exiting: tools raise `TransportUnavailableError` and re-probe the
+  plugin port on each call. Explicit `--transport=headless` still exits.
+
 ## v1.14.0 — 2026-09-13 — GUFM DRM routing
 
 GUFM already routed in matplotlib (`scripts/figures/routing.py`). This fork only

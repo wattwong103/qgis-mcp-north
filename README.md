@@ -173,6 +173,10 @@ QGIS_MCP_WORKFLOWS_TRANSPORT=headless uv run --no-sync qgis-mcp-workflows-server
 open for the MCP session lifetime. `initQgis` costs ~1-2s per cold start; never
 restart per call.
 
+With no plugin listening and no headless launcher found, `--transport=auto` (the
+default) still starts: tools return a "No QGIS backend" error until QGIS is
+reachable, instead of the MCP connection closing at startup.
+
 ## Platform support
 
 - **Windows** — supported since v1.0. Tested with OSGeo4W LTR.
