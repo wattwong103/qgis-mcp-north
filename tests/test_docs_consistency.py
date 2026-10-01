@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 
 ESCAPE_HATCH = "qgis_eval"
@@ -40,11 +42,36 @@ def test_readme_tool_count():
     assert f"## Tools ({total} standalone" in text
 
 
-def test_agents_md_workflow_count():
-    total = len(_registered_tools())
-    text = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+def _check_agents_md(path: Path, total: int) -> None:
+    """AGENTS.md has been gitignored since 2026-08-31, so CI never has it.
+
+    Ruling (North, 2026-10-02): check it when it exists, skip with a clear
+    reason when it is absent. Local drift is still caught, and CI stays green.
+    """
+    if not path.exists():
+        pytest.skip(f"{path.name} is absent (gitignored, so not in CI checkouts)")
+    text = path.read_text(encoding="utf-8")
     assert f"- {total - 1} workflow tools + 1 escape hatch" in text
     assert f"## MCP Tools ({total} total" in text
+
+
+def test_agents_md_workflow_count():
+    _check_agents_md(REPO / "AGENTS.md", len(_registered_tools()))
+
+
+def test_agents_md_check_skips_when_absent(tmp_path):
+    with pytest.raises(pytest.skip.Exception, match="absent"):
+        _check_agents_md(tmp_path / "AGENTS.md", 26)
+
+
+def test_agents_md_check_still_catches_drift(tmp_path):
+    stale = tmp_path / "AGENTS.md"
+    stale.write_text("- 24 workflow tools + 1 escape hatch\n## MCP Tools (25 total\n", encoding="utf-8")
+    with pytest.raises(AssertionError):
+        _check_agents_md(stale, 26)
+    current = tmp_path / "AGENTS.md"
+    current.write_text("- 25 workflow tools + 1 escape hatch\n## MCP Tools (26 total\n", encoding="utf-8")
+    _check_agents_md(current, 26)
 
 
 def test_server_docstring_does_not_hardcode_stale_count():

@@ -1,9 +1,10 @@
 ---
 id: TASK-2
 title: 'Fix CI: test_agents_md_workflow_count reads the gitignored AGENTS.md'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-09-13 18:42'
+updated_date: '2026-10-01 23:46'
 labels:
   - ci
 dependencies: []
