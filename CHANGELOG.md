@@ -13,6 +13,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   from `Resources/qgis/`, `QGIS_PREFIX_PATH` = the `.app` (the QGIS 3 value broke
   `pkgDataPath`). A user value in either PROJ variable now leaves both alone.
 - The headless runner uses the `QGIS4` profile under QGIS 4.x (was always `QGIS3`).
+- `install.py` also links the plugin into the QGIS4 profile when QGIS 4 is
+  installed (its `QGIS/QGIS4` settings tree exists); uninstall removes both.
 - Map furniture (scale bar, title, legend, north arrow) no longer fails under
   PyQt6: scoped enums and `horizontalAdvance()` in `_overlay_map_furniture`.
 

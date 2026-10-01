@@ -131,7 +131,7 @@ The QGIS plugin repository rejects re-uploads at the same version, so always bum
 
 ## Plugin Installation
 
-`python install.py` symlinks `qgis_mcp_workflows_plugin/` into the active QGIS profile and configures MCP clients. After QGIS restart, enable via the Plugins menu.
+`python install.py` symlinks `qgis_mcp_workflows_plugin/` into the QGIS3 profile, plus the QGIS4 profile when `QGIS/QGIS4` exists (QGIS 4 Desktop has run once), and configures MCP clients. After QGIS restart, enable via the Plugins menu.
 
 ## Co-existence with upstream `nkarasiak/qgis-mcp`
 
