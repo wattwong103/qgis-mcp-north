@@ -57,22 +57,24 @@ Out of scope: replacing upstream as a general-purpose QGIS MCP. We intentionally
 | Platform | Probed, in order |
 |---|---|
 | Windows | `M:\QGIS LTR\bin\python-qgis-ltr.bat`, `C:\OSGeo4W[64]\bin\python-qgis[-ltr].bat`, then glob `C:\Program Files\QGIS *\bin\python-qgis*.bat` |
-| macOS | `/Applications/QGIS-LTR.app`, then `QGIS.app`, then glob `QGIS*.app` — each resolving to `Contents/MacOS/bin/python3` |
+| macOS | `/Applications/QGIS-LTR.app`, then `QGIS.app`, then glob `QGIS*.app` — each resolving to `Contents/MacOS/bin/python3` (QGIS 3); then glob `QGIS*.app/Contents/MacOS/python` (QGIS 4) |
 | Linux | `sys.executable` (apt/conda PyQGIS is usually importable there) |
 
 LTR is probed first on both Windows and macOS: it is the version this fork targets, so a machine with both installed must not silently fall through to the current release. Homebrew's `python3` is never used on macOS — it has no PyQGIS.
 
-**Bundle environment (macOS).** QGIS.app sets its own environment when launched normally; a subprocess spawned from outside the bundle inherits none of it. `HeadlessExecutor._bundle_env()` derives three variables from the resolved launcher and injects them, skipping any the caller already set:
+QGIS 4 bundles (vcpkg builds, e.g. `QGIS-final-4_2_2.app`) have no `bin/python3`. `Contents/MacOS/python` is a symlink to a wrapper script that sets `PYTHONHOME=<bundle>/Contents/Frameworks` and execs `Contents/MacOS/python3.12`. The raw `python3.12` is never used: its `sys.prefix` points at the CI build tree, so it fails with "Could not find platform independent libraries". Nor is the wrapper `realpath`ed, because it locates the bundle from its own `$0`.
+
+**Bundle environment (macOS).** QGIS.app sets its own environment when launched normally; a subprocess spawned from outside the bundle inherits none of it. `HeadlessExecutor._bundle_env()` derives these variables from the resolved launcher and injects them, skipping any the caller already set (a user value in either `PROJ_LIB` or `PROJ_DATA` leaves both alone, since PROJ 9.1+ prefers `PROJ_DATA`). The data root is `<bundle>/Contents/Resources` on QGIS 3 and `<bundle>/Contents/Resources/qgis` on QGIS 4:
 
 | Variable | Value | Without it |
 |---|---|---|
-| `PROJ_LIB` | `<bundle>/Contents/Resources/proj` | PROJ cannot open `proj.db`; **every** CRS is invalid (`QgsCoordinateReferenceSystem("EPSG:4326").isValid()` is `False`) and renders reproject wrong rather than failing |
-| `GDAL_DATA` | `<bundle>/Contents/Resources/gdal` | GDAL loses its data dictionary |
-| `QGIS_PREFIX_PATH` | `<bundle>/Contents/MacOS` | `pkgDataPath` misresolves |
+| `PROJ_LIB`, `PROJ_DATA` | `<data root>/proj` | PROJ cannot open `proj.db`; **every** CRS is invalid (`QgsCoordinateReferenceSystem("EPSG:4326").isValid()` is `False`) and renders reproject wrong rather than failing |
+| `GDAL_DATA` | `<data root>/gdal` | GDAL loses its data dictionary |
+| `QGIS_PREFIX_PATH` | QGIS 3: `<bundle>/Contents/MacOS`; QGIS 4: the `.app` itself | `pkgDataPath` misresolves. The QGIS 3 value under QGIS 4 gives `.../MacOS/Contents/Resources/qgis`, which does not exist |
 
-Separately, `headless_runner.py` must set Qt's organization/application name (`QGIS` / `qgis.org` / `QGIS3`) *before* constructing `QgsApplication`. QGIS derives the user profile directory from those names, and the profile holds `symbology-style.db`. Left unset the profile resolves to a path that does not exist, `QgsStyle.defaultStyle()` returns **zero** color ramps, and every graduated render collapses to one flat colour for all classes — a choropleth that looks plausible and encodes nothing.
+Separately, `headless_runner.py` must set Qt's organization/application name (`QGIS` / `qgis.org` / `QGIS3`, or `QGIS4` when `Qgis.versionInt() >= 40000`, matching what each Desktop major writes) *before* constructing `QgsApplication`. QGIS derives the user profile directory from those names, and the profile holds `symbology-style.db`. Left unset the profile resolves to a path that does not exist, `QgsStyle.defaultStyle()` returns **zero** color ramps, and every graduated render collapses to one flat colour for all classes — a choropleth that looks plausible and encodes nothing.
 
-**Interpreter split.** Two Pythons are in play and they are not the same version. `src/qgis_mcp_workflows/` runs under the MCP server's interpreter (3.12+, per `requires-python`). `qgis_mcp_workflows_plugin/` and `executors/headless_runner.py` run under **QGIS's bundled interpreter** — Python 3.9 on QGIS-LTR for macOS. Anything in the plugin package must therefore stay 3.9-compatible; `tests/test_macos_support.py` guards the specific trap already hit (`datetime.UTC`, 3.11+).
+**Interpreter split.** Two Pythons are in play and they are not the same version. `src/qgis_mcp_workflows/` runs under the MCP server's interpreter (3.12+, per `requires-python`). `qgis_mcp_workflows_plugin/` and `executors/headless_runner.py` run under **QGIS's bundled interpreter** — Python 3.9 on QGIS-LTR for macOS. Anything in the plugin package must therefore stay 3.9-compatible; `tests/test_macos_support.py` guards the specific trap already hit (`datetime.UTC`, 3.11+). The plugin must also run under QGIS 4's PyQt6, which removed unscoped Qt5 enums: write `QPainter.RenderHint.Antialiasing`, `QFont.Weight.Bold`, `Qt.AlignmentFlag.AlignTop`, `QFontMetrics.horizontalAdvance()` (these should also be valid on the PyQt5 5.15 that QGIS 3.28+ ships; not yet run on a QGIS 3 build). `test_plugin_avoids_qt5_only_enums` guards the spellings already hit; `compat.py` holds the try-new-then-old shims.
 
 **Co-existence with upstream.** To run side-by-side with `nkarasiak/qgis-mcp`:
 - Plugin folder: `qgis_mcp_workflows_plugin/` (vs upstream `qgis_mcp_plugin/`)

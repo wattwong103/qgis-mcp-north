@@ -146,7 +146,7 @@ GUFM recipes: [`docs/gufm-usage.md`](docs/gufm-usage.md). PFLOW (historical): [`
 | `QGIS_MCP_WORKFLOWS_TOOL_MODE` | `full` | `full` (standalone tools) / `compound` (5 grouped tools) |
 | `QGIS_MCP_WORKFLOWS_HOST` | `localhost` | Plugin socket host |
 | `QGIS_MCP_WORKFLOWS_PORT` | `9877` | Plugin socket port (upstream uses 9876) |
-| `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER` | (auto-detected) | Headless: Windows `python-qgis(-ltr).bat`, or macOS `<QGIS.app>/Contents/MacOS/bin/python3` |
+| `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER` | (auto-detected) | Headless: Windows `python-qgis(-ltr).bat`, or macOS `<QGIS.app>/Contents/MacOS/bin/python3` (QGIS 3) / `<QGIS.app>/Contents/MacOS/python` (QGIS 4) |
 | `QGIS_MCP_WORKFLOWS_LOG_FILE` | `~/.local/share/qgis-mcp-workflows/server.log` | Rotating log (5MB × 3); empty disables |
 | `QGIS_MCP_WORKFLOWS_LOG_LEVEL` | `INFO` | File log level (console always WARNING+) |
 
@@ -183,6 +183,8 @@ restart per call.
   `/Applications/QGIS-LTR.app` (then `QGIS.app`, then any `QGIS*.app`), and the
   subprocess inherits `PROJ_LIB`, `GDAL_DATA` and `QGIS_PREFIX_PATH` derived from
   that bundle. Homebrew's `python3` is deliberately *not* used — it has no PyQGIS.
+  QGIS 4 bundles (e.g. `QGIS-final-4_2_2.app`) are found too, via their
+  `Contents/MacOS/python` wrapper; headless verified against QGIS 4.2.2 (Qt 6.11).
 - **Linux** — should work via PyQGIS-on-PATH (apt/conda installs put it on
   `sys.executable`); set `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER` if not. Unverified.
 
@@ -202,6 +204,15 @@ handled automatically — they matter only if you set the env vars yourself:
 
 QGIS-LTR bundles **Python 3.9**, so everything under `qgis_mcp_workflows_plugin/`
 (which runs in QGIS's interpreter, not the server's 3.12) must stay 3.9-compatible.
+
+**QGIS 4 plugin.** QGIS 4 Desktop reads its own profile (`.../QGIS/QGIS4/profiles/default`),
+and `install.py` still links only the QGIS3 one. Until it does, link the plugin by hand,
+then enable it in *Plugins → Manage and Install Plugins* (restart QGIS if it is not listed):
+
+```bash
+mkdir -p ~/Library/Application\ Support/QGIS/QGIS4/profiles/default/python/plugins
+ln -s "$(pwd)/qgis_mcp_workflows_plugin" ~/Library/Application\ Support/QGIS/QGIS4/profiles/default/python/plugins/
+```
 
 ## Development
 

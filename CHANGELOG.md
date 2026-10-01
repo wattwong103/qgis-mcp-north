@@ -3,6 +3,19 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased — macOS QGIS 4
+
+### Fixed
+
+- Headless on macOS finds QGIS 4 bundles (`<QGIS*.app>/Contents/MacOS/python`,
+  the wrapper that sets `PYTHONHOME`). QGIS 3 `bin/python3` stays preferred.
+- `_bundle_env` handles the QGIS 4 layout: `PROJ_LIB`/`PROJ_DATA`/`GDAL_DATA`
+  from `Resources/qgis/`, `QGIS_PREFIX_PATH` = the `.app` (the QGIS 3 value broke
+  `pkgDataPath`). A user value in either PROJ variable now leaves both alone.
+- The headless runner uses the `QGIS4` profile under QGIS 4.x (was always `QGIS3`).
+- Map furniture (scale bar, title, legend, north arrow) no longer fails under
+  PyQt6: scoped enums and `horizontalAdvance()` in `_overlay_map_furniture`.
+
 ## v1.14.0 — 2026-09-13 — GUFM DRM routing
 
 GUFM already routed in matplotlib (`scripts/figures/routing.py`). This fork only

@@ -98,7 +98,8 @@ class HeadlessUnavailableError(QgisMcpWorkflowsError):
         super().__init__(
             f"Headless transport unavailable: {detail}. "
             f"Install OSGeo4W (Windows) or QGIS standalone Python with PyQGIS, then set "
-            f"QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER to its python-qgis(-ltr).bat / qgis_python wrapper. "
+            f"QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER to its python-qgis(-ltr).bat / qgis_python wrapper "
+            f"(macOS: the python inside QGIS.app). "
             f"Next: re-run with --transport=plugin if QGIS Desktop is open instead."
         )
         self.detail = detail

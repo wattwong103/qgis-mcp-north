@@ -1737,7 +1737,7 @@ class QgisMCPServer(QObject):
 
         painter = QPainter(img)
         try:
-            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             margin = max(12, int(img.width() * 0.015))
             if scale_bar:
                 extent = ms.extent()
@@ -1773,14 +1773,14 @@ class QgisMCPServer(QObject):
                     painter.setFont(QFont("sans-serif", 9))
                     painter.drawText(x0, y0 - 10, label)
             if title:
-                painter.setFont(QFont("sans-serif", 13, QFont.Bold))
+                painter.setFont(QFont("sans-serif", 13, QFont.Weight.Bold))
                 painter.setPen(QPen(QColor(255, 255, 255), 3))
                 painter.drawText(
-                    0, 6, img.width(), 28, int(Qt.AlignHCenter | Qt.AlignTop), str(title)
+                    0, 6, img.width(), 28, int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), str(title)
                 )
                 painter.setPen(QPen(QColor(20, 20, 20)))
                 painter.drawText(
-                    0, 6, img.width(), 28, int(Qt.AlignHCenter | Qt.AlignTop), str(title)
+                    0, 6, img.width(), 28, int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), str(title)
                 )
             if legend_items:
                 painter.setFont(QFont("sans-serif", 9))
@@ -1788,7 +1788,7 @@ class QgisMCPServer(QObject):
                 swatch = 12
                 pad = 8
                 row_h = max(16, fm.height() + 2)
-                text_w = max(fm.width(str(lab)) for lab, _col in legend_items)
+                text_w = max(fm.horizontalAdvance(str(lab)) for lab, _col in legend_items)
                 box_w = pad * 2 + swatch + 6 + text_w
                 box_h = pad * 2 + row_h * len(legend_items)
                 bx = img.width() - margin - box_w
@@ -1808,7 +1808,7 @@ class QgisMCPServer(QObject):
                         yy,
                         text_w,
                         row_h,
-                        int(Qt.AlignVCenter | Qt.AlignLeft),
+                        int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
                         str(lab),
                     )
             if north_arrow:
@@ -1823,7 +1823,7 @@ class QgisMCPServer(QObject):
                     QPoint(cx, cy - size // 6),
                     QPoint(cx + size // 3, cy + size // 3),
                 ]))
-                painter.setFont(QFont("sans-serif", 9, QFont.Bold))
+                painter.setFont(QFont("sans-serif", 9, QFont.Weight.Bold))
                 painter.drawText(cx - 4, cy - size - 2, "N")
             if attribution:
                 painter.setPen(QPen(QColor(40, 40, 40)))
@@ -1833,7 +1833,7 @@ class QgisMCPServer(QObject):
                     img.height() - 6,
                     img.width() - 2 * margin,
                     14,
-                    int(Qt.AlignRight | Qt.AlignVCenter),
+                    int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
                     str(attribution),
                 )
         finally:

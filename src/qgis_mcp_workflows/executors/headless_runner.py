@@ -130,12 +130,23 @@ def _write_message(stream, msg: dict) -> None:
     stream.flush()
 
 
+def _application_name(version_int):
+    """Qt application name QGIS Desktop uses for this major version.
+
+    The profile directory is ``<org>/<app name>/profiles/default``: QGIS 3
+    Desktop writes ``QGIS/QGIS3``, QGIS 4 Desktop writes ``QGIS/QGIS4``.
+    ``version_int`` is ``Qgis.versionInt()`` (e.g. 34099, 40202), or None when
+    it could not be read — then QGIS3, the name this runner always used.
+    """
+    return "QGIS4" if version_int is not None and version_int >= 40000 else "QGIS3"
+
+
 def main() -> int:
     _put_repo_root_on_path()
 
     # Lazy imports — must happen after sys.path is set up and after
     # QT_QPA_PLATFORM is forced to offscreen.
-    from qgis.core import QgsApplication
+    from qgis.core import Qgis, QgsApplication
     from qgis.PyQt.QtCore import QCoreApplication
 
     # Must precede the QgsApplication constructor: QGIS derives the user
@@ -146,10 +157,14 @@ def main() -> int:
     # QgsStyle.defaultStyle() comes back with ZERO color ramps, and every
     # graduated render silently falls back to one flat colour for all classes
     # — a choropleth that looks plausible but encodes nothing. These are the
-    # same values QGIS Desktop sets.
+    # same values QGIS Desktop sets (QGIS4 under QGIS 4.x).
     QCoreApplication.setOrganizationName("QGIS")
     QCoreApplication.setOrganizationDomain("qgis.org")
-    QCoreApplication.setApplicationName("QGIS3")
+    try:
+        version_int = Qgis.versionInt()
+    except AttributeError:  # pre-3.12 spelling
+        version_int = getattr(Qgis, "QGIS_VERSION_INT", None)
+    QCoreApplication.setApplicationName(_application_name(version_int))
 
     qgs = QgsApplication([], False)
     # Use the prefix path the launcher exported; fall back to QGIS_PREFIX_PATH

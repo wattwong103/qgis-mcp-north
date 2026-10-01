@@ -16,13 +16,15 @@ Launcher detection (in priority order):
        ``C:\\OSGeo4W\\bin\\python-qgis-ltr.bat``, ``C:\\Program Files\\QGIS *\\bin\\python-qgis*.bat``.
     3. macOS: the Python bundled inside QGIS.app —
        ``/Applications/QGIS-LTR.app/Contents/MacOS/bin/python3`` (LTR preferred),
-       then ``QGIS.app``, then any ``/Applications/QGIS*.app``. Homebrew's
+       then ``QGIS.app``, then any ``/Applications/QGIS*.app``; QGIS 4 bundles
+       last, via their ``Contents/MacOS/python`` wrapper. Homebrew's
        ``/opt/homebrew/bin/python3`` is *not* used: it has no PyQGIS.
     4. Linux: assume ``sys.executable`` already has PyQGIS importable
        (apt/conda installs usually do).
 
 macOS also needs ``PROJ_LIB`` and ``GDAL_DATA`` pointed into the app bundle's
-``Contents/Resources``. QGIS.app sets these itself when launched normally, but a
+``Contents/Resources`` (QGIS 3) or ``Contents/Resources/qgis`` (QGIS 4).
+QGIS.app sets these itself when launched normally, but a
 subprocess spawned from outside the bundle inherits nothing — and without them
 PROJ cannot open ``proj.db``, so *every* CRS silently comes back invalid
 (``QgsCoordinateReferenceSystem("EPSG:4326").isValid()`` is ``False``) and
@@ -70,10 +72,15 @@ class HeadlessExecutor:
     )
     # macOS: QGIS ships its own Python inside the .app bundle. Order matters —
     # LTR first (the version this project targets), then current, then any.
+    # QGIS 4 bundles (vcpkg builds) have no bin/python3; their ``python`` is a
+    # wrapper that sets PYTHONHOME before exec'ing the raw python3.12, which
+    # cannot find its stdlib on its own. Never resolve (or realpath) past the
+    # wrapper: it locates the bundle from its own $0.
     _MACOS_LAUNCHER_GLOBS: ClassVar[tuple[str, ...]] = (
         "/Applications/QGIS-LTR.app/Contents/MacOS/bin/python3",
         "/Applications/QGIS.app/Contents/MacOS/bin/python3",
         "/Applications/QGIS*.app/Contents/MacOS/bin/python3",
+        "/Applications/QGIS*.app/Contents/MacOS/python",
     )
 
     def __init__(self, launcher: str | None = None) -> None:
@@ -116,8 +123,9 @@ class HeadlessExecutor:
             raise HeadlessUnavailableError(
                 "no QGIS.app found under /Applications. Install QGIS from "
                 "qgis.org, or set QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER to the "
-                "python3 inside its bundle "
-                "(<QGIS.app>/Contents/MacOS/bin/python3). "
+                "python inside its bundle "
+                "(<QGIS.app>/Contents/MacOS/bin/python3 for QGIS 3, "
+                "<QGIS.app>/Contents/MacOS/python for QGIS 4). "
                 "Next: qgis_render_map(..., transport='plugin') if QGIS Desktop is already running."
             )
 
@@ -185,31 +193,54 @@ class HeadlessExecutor:
         inside an app bundle — Windows OSGeo4W and Linux packages set these up
         themselves. Existing values in the environment are respected: a user who
         has deliberately pointed PROJ_LIB at a custom grid directory keeps it.
+
+        Two bundle layouts:
+
+        - QGIS 3: launcher ``Contents/MacOS/bin/python3``, data in
+          ``Contents/Resources/{proj,gdal}``, prefix ``Contents/MacOS``
+          (QGIS resolves pkgDataPath as ``<prefix>/../Resources``).
+        - QGIS 4: launcher ``Contents/MacOS/python``, data in
+          ``Contents/Resources/qgis/{proj,gdal}``, prefix = the ``.app``
+          itself (pkgDataPath is ``<prefix>/Contents/Resources/qgis``; the
+          QGIS 3 prefix would point it at a directory that does not exist).
         """
         if platform.system() != "Darwin":
             return {}
-        # <bundle>/Contents/MacOS/bin/python3 → <bundle>/Contents/Resources
-        macos_bin = os.path.dirname(os.path.abspath(launcher))
-        contents = os.path.dirname(os.path.dirname(macos_bin))
+        contents = _bundle_contents_dir(launcher)
+        if contents is None:
+            return {}
         resources = os.path.join(contents, "Resources")
-        if not os.path.isdir(resources):
+        qgis4_data = os.path.join(resources, "qgis")
+        # A QGIS 3 data tree wins outright: misreading a QGIS 3 bundle as QGIS 4
+        # would drop PROJ_LIB and silently invalidate every CRS.
+        is_qgis4 = not os.path.exists(os.path.join(resources, "proj", "proj.db")) and any(
+            os.path.exists(os.path.join(qgis4_data, *marker))
+            for marker in (("resources", "qgis.db"), ("proj", "proj.db"))
+        )
+        data_root = qgis4_data if is_qgis4 else resources
+        if not os.path.isdir(data_root):
             return {}
 
         out: dict[str, str] = {}
-        for var, subdir, marker in (
-            ("PROJ_LIB", "proj", "proj.db"),
-            ("GDAL_DATA", "gdal", "gdalvrt.xsd"),
+        proj_dir = os.path.join(data_root, "proj")
+        # PROJ 9.1+ reads PROJ_DATA before PROJ_LIB, so a user value in either
+        # one means hands off both.
+        if not (os.environ.get("PROJ_LIB") or os.environ.get("PROJ_DATA")) and os.path.exists(
+            os.path.join(proj_dir, "proj.db")
         ):
-            if os.environ.get(var):
-                continue  # caller knows better than we do
-            candidate = os.path.join(resources, subdir)
-            if os.path.exists(os.path.join(candidate, marker)):
-                out[var] = candidate
+            out["PROJ_LIB"] = proj_dir
+            out["PROJ_DATA"] = proj_dir
+        gdal_dir = os.path.join(data_root, "gdal")
+        if not os.environ.get("GDAL_DATA") and os.path.exists(
+            os.path.join(gdal_dir, "gdalvrt.xsd")
+        ):
+            out["GDAL_DATA"] = gdal_dir
 
-        # QGIS_PREFIX_PATH is <bundle>/Contents/MacOS; QGIS resolves
-        # pkgDataPath as <prefix>/../Resources from there.
-        if not os.environ.get("QGIS_PREFIX_PATH") and os.path.isdir(macos_bin):
-            out["QGIS_PREFIX_PATH"] = os.path.dirname(macos_bin)
+        if not os.environ.get("QGIS_PREFIX_PATH"):
+            if is_qgis4:
+                out["QGIS_PREFIX_PATH"] = os.path.dirname(contents)
+            elif os.path.isdir(os.path.join(contents, "MacOS")):
+                out["QGIS_PREFIX_PATH"] = os.path.join(contents, "MacOS")
         return out
 
     def _repo_root(self) -> str:
@@ -299,6 +330,23 @@ class HeadlessExecutor:
     def __del__(self) -> None:
         with contextlib.suppress(Exception):
             self.shutdown()
+
+
+def _bundle_contents_dir(launcher: str) -> str | None:
+    """``<X>.app/Contents`` for a launcher inside a macOS app bundle, else None.
+
+    Walks up from the launcher instead of counting levels: QGIS 3 launchers sit
+    one directory deeper (``MacOS/bin/python3``) than QGIS 4's (``MacOS/python``).
+    ``abspath``, not ``realpath``: the QGIS 4 wrapper is a symlink into
+    ``Resources/scripts`` and the bundle is defined by where it is invoked from.
+    """
+    path = os.path.dirname(os.path.abspath(launcher))
+    for _ in range(3):
+        parent = os.path.dirname(path)
+        if os.path.basename(path) == "Contents" and parent.endswith(".app"):
+            return path
+        path = parent
+    return None
 
 
 def _map_error(command: str, message: str) -> Exception:
