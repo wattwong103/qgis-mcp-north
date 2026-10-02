@@ -26,6 +26,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Minimum `mcp` raised to 1.21.1 (was 1.20.0). The server does not import on
+  1.20.0 or 1.21.0 (FastMCP `InvalidSignature` on the tools' `Annotated`
+  forward references); 1.21.1 through 1.30.0 pass the suite. `uv.lock` also
+  picks up the package's own version (1.14.0), which it had left at 1.13.0.
 - `--transport=auto` with no plugin and no headless launcher starts degraded
   instead of exiting: tools raise `TransportUnavailableError` and re-probe the
   plugin port on each call. Explicit `--transport=headless` still exits.
