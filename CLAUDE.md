@@ -113,7 +113,7 @@ uv tool run ruff check src/ tests/
 ## Key Details
 
 - **Python**: 3.12. Package manager: `uv` (pyproject.toml). Recreate `.venv` with `uv sync` on each machine — a Dropbox-synced venv is often missing package sources and the MCP handshake then dies on import.
-- **Main deps**: `mcp[cli]>=1.20.0,<3`, `pydantic>=2.7`. Optional: `python-pptx` (`pptx` extra), `movingpandas` (`trajectory` extra), `networkx` (`network` extra).
+- **Main deps**: `mcp[cli]>=1.21.1,<3` (1.20.0 and 1.21.0 cannot import the server: FastMCP `InvalidSignature` on the `Annotated` forward refs; `tests/test_dependency_floor.py`), `pydantic>=2.7`. Optional: `python-pptx` (`pptx` extra), `movingpandas` (`trajectory` extra), `networkx` (`network` extra).
 - **Tools are sync `def`** (not async — the v0.4 dispatch path is synchronous; FastMCP supports both).
 - **All response paths return `output_path` (absolute)**. PNG renders also attach MCP image content when the file exists and is under 1.5 MB. No tool returns relative paths.
 - **Errors must be actionable.** Every typed exception in `src/qgis_mcp_workflows/errors.py` ends with `Next: <suggested tool call>`. Add new error classes when a recovery hint changes.
