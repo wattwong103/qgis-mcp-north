@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from qgis_mcp_workflows.errors import InvalidArgumentError
 from qgis_mcp_workflows.server import (
     AtlasExportResult,
     BasemapCatalogResult,
@@ -58,6 +59,10 @@ from qgis_mcp_workflows.server import (
     qgis_style_graduated,
 )
 
+# FastMCP validates the Literal discriminators first, so this only reaches
+# direct Python callers.
+_VALID_HINT = "use one of the values this tool's schema lists for that argument"
+
 # ---------------------------------------------------------------------------
 # qgis_inspect — replaces qgis_layer_inspect / qgis_load_layer / qgis_project_load
 # ---------------------------------------------------------------------------
@@ -86,17 +91,17 @@ def qgis_inspect(
     """
     if kind == "layer":
         if not path:
-            raise ValueError('qgis_inspect(kind="layer") requires path.')
+            raise InvalidArgumentError('qgis_inspect(kind="layer") requires path.')
         if register:
             return qgis_load_layer(path=path, name=name, crs=crs)
         return qgis_layer_inspect(path=path)
     if kind == "project":
         if not path:
-            raise ValueError('qgis_inspect(kind="project") requires path.')
+            raise InvalidArgumentError('qgis_inspect(kind="project") requires path.')
         return qgis_project_load(qgz_path=path)
     if kind == "basemaps":
         return qgis_list_basemaps()
-    raise ValueError(f"Unknown kind: {kind!r}")
+    raise InvalidArgumentError(f"Unknown kind: {kind!r}.", _VALID_HINT)
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +140,7 @@ def qgis_style(
             layer_id=layer_id, field=field, n_classes=n_classes, mode=mode, palette=palette,
             diverging=diverging, center=center,
         )
-    raise ValueError(f"Unknown type: {type!r}")
+    raise InvalidArgumentError(f"Unknown type: {type!r}.", _VALID_HINT)
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +218,7 @@ def qgis_render(
     """Render any figure type — compound replacement for the standalone render tools."""
     if mode == "map":
         if not layer_ids:
-            raise ValueError('qgis_render(mode="map") requires layer_ids.')
+            raise InvalidArgumentError('qgis_render(mode="map") requires layer_ids.')
         return qgis_render_map(
             layer_ids=layer_ids, output_png=output_png, width=width, height=height,
             dpi=dpi, extent=extent, background=background,
@@ -221,7 +226,7 @@ def qgis_render(
         )
     if mode == "choropleth":
         if not zones_path or not value_field:
-            raise ValueError('qgis_render(mode="choropleth") requires zones_path and value_field.')
+            raise InvalidArgumentError('qgis_render(mode="choropleth") requires zones_path and value_field.')
         return qgis_render_choropleth(
             zones_path=zones_path, value_field=value_field, output_png=output_png,
             value_csv=value_csv, join_field=join_field, n_classes=n_classes,
@@ -233,7 +238,7 @@ def qgis_render(
         )
     if mode == "trajectory":
         if not input_path:
-            raise ValueError('qgis_render(mode="trajectory") requires input_path.')
+            raise InvalidArgumentError('qgis_render(mode="trajectory") requires input_path.')
         return qgis_render_trajectory(
             input_path=input_path, output_png=output_png, lon_col=lon_col,
             lat_col=lat_col, time_col=time_col, id_col=id_col, mode_col=mode_col,
@@ -244,7 +249,7 @@ def qgis_render(
         )
     if mode == "od_flows":
         if not od_csv or not zones_path:
-            raise ValueError('qgis_render(mode="od_flows") requires od_csv and zones_path.')
+            raise InvalidArgumentError('qgis_render(mode="od_flows") requires od_csv and zones_path.')
         return qgis_render_od_flows(
             od_csv=od_csv, zones_layer_path=zones_path, output_png=output_png,
             origin_col=origin_col, dest_col=dest_col, value_col=value_col,
@@ -256,7 +261,7 @@ def qgis_render(
         )
     if mode == "link_density":
         if not drm_network_path or not (trajectory_csvs or load_csv):
-            raise ValueError(
+            raise InvalidArgumentError(
                 'qgis_render(mode="link_density") requires drm_network_path and '
                 "trajectory_csvs or load_csv."
             )
@@ -274,7 +279,7 @@ def qgis_render(
         )
     if mode == "diagram_map":
         if not layer_path or not value_fields:
-            raise ValueError('qgis_render(mode="diagram_map") requires layer_path and value_fields.')
+            raise InvalidArgumentError('qgis_render(mode="diagram_map") requires layer_path and value_fields.')
         return qgis_render_diagram_map(
             layer_path=layer_path, value_fields=value_fields, output_png=output_png,
             diagram_type=diagram_type, size=size, palette=palette, extent=extent,
@@ -283,7 +288,7 @@ def qgis_render(
         )
     if mode == "catchment":
         if not points_path:
-            raise ValueError('qgis_render(mode="catchment") requires points_path.')
+            raise InvalidArgumentError('qgis_render(mode="catchment") requires points_path.')
         return qgis_render_catchment(
             points_path=points_path, output_png=output_png, method=method, extent=extent,
             basemap=basemap, basemap_opacity=basemap_opacity,
@@ -291,7 +296,7 @@ def qgis_render(
         )
     if mode == "duckdb":
         if not db_path or not query:
-            raise ValueError('qgis_render(mode="duckdb") requires db_path and query.')
+            raise InvalidArgumentError('qgis_render(mode="duckdb") requires db_path and query.')
         return qgis_render_from_duckdb(
             db_path=db_path, query=query, output_png=output_png,
             geometry_column=geometry_column, lon_column=lon_column, lat_column=lat_column,
@@ -300,7 +305,7 @@ def qgis_render(
             basemap=basemap, basemap_opacity=basemap_opacity,
             width=width, height=height, dpi=dpi,
         )
-    raise ValueError(f"Unknown mode: {mode!r}")
+    raise InvalidArgumentError(f"Unknown mode: {mode!r}.", _VALID_HINT)
 
 
 # ---------------------------------------------------------------------------
@@ -340,14 +345,14 @@ def qgis_export(
     """Export / batch-render / compose / deliver-as-pptx."""
     if kind == "layout":
         if not qgz_path or not layout_name or not output_path:
-            raise ValueError('qgis_export(kind="layout") requires qgz_path, layout_name, output_path.')
+            raise InvalidArgumentError('qgis_export(kind="layout") requires qgz_path, layout_name, output_path.')
         return qgis_export_layout(
             qgz_path=qgz_path, layout_name=layout_name, output_path=output_path,
             format=format, dpi=dpi,
         )
     if kind == "batch":
         if not template_qgz or not attribute or values is None or not output_dir:
-            raise ValueError('qgis_export(kind="batch") requires template_qgz, attribute, values, output_dir.')
+            raise InvalidArgumentError('qgis_export(kind="batch") requires template_qgz, attribute, values, output_dir.')
         return qgis_batch_render(
             template_qgz=template_qgz, attribute=attribute, values=values,
             output_dir=output_dir, layout_name=layout_name,
@@ -355,14 +360,14 @@ def qgis_export(
         )
     if kind == "pptx":
         if not figure_paths or not output_path:
-            raise ValueError('qgis_export(kind="pptx") requires figure_paths and output_path.')
+            raise InvalidArgumentError('qgis_export(kind="pptx") requires figure_paths and output_path.')
         return qgis_figures_to_pptx(
             figure_paths=figure_paths, pptx_path=output_path, layout=layout,
             captions=captions, template_pptx=template_pptx,
         )
     if kind == "compose_layout":
         if not layer_paths or not output_path:
-            raise ValueError(
+            raise InvalidArgumentError(
                 'qgis_export(kind="compose_layout") requires layer_paths and output_path.'
             )
         return qgis_compose_layout(
@@ -371,11 +376,11 @@ def qgis_export(
         )
     if kind == "atlas":
         if not qgz_path or not layout_name or not output_dir:
-            raise ValueError(
+            raise InvalidArgumentError(
                 'qgis_export(kind="atlas") requires qgz_path, layout_name, output_dir.'
             )
         return qgis_export_atlas(
             qgz_path=qgz_path, layout_name=layout_name, output_dir=output_dir,
             format=format if format in ("png", "pdf", "jpg") else "png", dpi=dpi,
         )
-    raise ValueError(f"Unknown kind: {kind!r}")
+    raise InvalidArgumentError(f"Unknown kind: {kind!r}.", _VALID_HINT)

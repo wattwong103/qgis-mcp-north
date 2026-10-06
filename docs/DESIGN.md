@@ -528,6 +528,8 @@ database cursor, an API — renders through the same path.
 
 The mcp-builder skill emphasizes "actionable error messages." Every error message ends with one suggested next tool call.
 
+Every typed error derives from `QgisMcpWorkflowsError`, which subclasses the SDK's `ToolError`. mcp >= 2.1 replaces the message of any other exception with "Error executing tool <name>", so a plain `ValueError` or `RuntimeError` raised from a tool loses its hint there. Argument checks raise `InvalidArgumentError` (also a `ValueError`) instead.
+
 **Idempotency annotations.** All `render_*`, `export_*`, `figures_to_pptx`, and `batch_render` are non-idempotent (they write files). Annotate accordingly. `layer_inspect`, `style_*` (in headless mode, where styling is in-memory) are read-only or idempotent.
 
 **Output discipline.** Every tool that writes a file returns the absolute path in `output_path`. The path is canonical. When the written file is an existing PNG under 1.5 MB, the MCP result also includes `ImageContent` so the model can see the figure in the same turn. Oversize / missing / non-PNG outputs stay path-only. Tools do not return a parallel `render_map_base64` payload.

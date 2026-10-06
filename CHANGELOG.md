@@ -3,6 +3,28 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased — tool errors on mcp 2.x
+
+### Fixed
+
+- Tool errors keep their message and `Next:` hint on mcp >= 2.1, which shows
+  clients only "Error executing tool <name>" for any exception that is not the
+  SDK's `ToolError`. `QgisMcpWorkflowsError` now subclasses `ToolError` (import
+  shim for 1.x/2.x), and the 25 bare `ValueError` argument checks in the
+  compound tools, `qgis_render_link_density`, `qgis_figures_to_pptx` and the
+  network router raise `InvalidArgumentError` (still a `ValueError`) with a
+  `Next:` hint. Missing input files (CSV, figure, template, network) raise
+  `InputFileNotFoundError` (still a `FileNotFoundError`) before anything opens
+  them, and a plugin socket that drops mid-command raises
+  `PluginUnavailableError` instead of a bare `ConnectionError`. Installs from
+  `install.py --remote` resolve mcp 2.x; the locked 1.26 was unaffected.
+
+### Tests
+
+- The suite passes on mcp 2.3 as well as the locked 1.26: result fields are
+  read through `tests/mcp_compat.py` (2.x renamed `mimeType` / `structuredContent`
+  / `isError` to snake_case).
+
 ## Unreleased — macOS QGIS 4
 
 ### Fixed

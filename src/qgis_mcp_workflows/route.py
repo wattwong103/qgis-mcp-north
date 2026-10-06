@@ -20,6 +20,7 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
+from qgis_mcp_workflows.errors import InvalidArgumentError
 from qgis_mcp_workflows.section_load import _require_networkx, load_network, snap_to_nodes
 
 # Tokyo-ish cosine for KD-tree scaling (same constant GUFM routing.py uses).
@@ -82,7 +83,10 @@ def load_tsv_network(path: str) -> tuple[Any, dict[str, tuple[float, float]]]:
                 coords=coords,
             )
     if graph.number_of_edges() == 0:
-        raise ValueError(f"{path}: no LINESTRING rows ({n_rows} lines)")
+        raise InvalidArgumentError(
+            f"{path}: no LINESTRING rows ({n_rows} lines).",
+            "pass network_path as a GUFM DRM/rail TSV or a line GeoJSON/GeoPackage",
+        )
     return graph, node_xy
 
 

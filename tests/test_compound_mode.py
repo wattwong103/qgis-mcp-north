@@ -12,6 +12,8 @@ import sys
 
 import pytest
 
+from tests.mcp_compat import field
+
 
 def _is_reloadable(name: str) -> bool:
     return name.startswith("qgis_mcp_workflows.server") or name == "qgis_mcp_workflows.compound"
@@ -258,4 +260,4 @@ async def test_compound_render_with_real_png_returns_preview(compound_module, fa
     )
     assert isinstance(out, CallToolResult)
     assert any(isinstance(b, ImageContent) for b in out.content)
-    assert out.structuredContent["result"]["output_path"] == str(png)
+    assert field(out, "structuredContent")["result"]["output_path"] == str(png)
