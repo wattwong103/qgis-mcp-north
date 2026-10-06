@@ -197,7 +197,7 @@ Chains into: `qgis_render_choropleth(zones_path=output_path, value_field=...)`.
 
 #### `qgis_style_categorized(layer_id: str, field: str, palette: str = "Set2", classes: list[str] | None = None) → StyleResult`
 
-Categorical symbology — one color per unique value of `field`. `palette` is a colorbrewer name. `classes` optionally restricts to a subset/order.
+Categorical symbology — one color per unique value of `field`. `palette` is a colorbrewer name. `classes` optionally restricts to a subset/order: the listed values take palette colors in the given order (matched on their string form, so `"3"` matches an integer 3), and every other value plus NULL shares one grey `"all other values"` class, reported last in `classes`. The catch-all is omitted when the subset covers every feature. A listed value the layer lacks stays as a 0-feature class, so weekly batches keep one legend and one color per value; a repeated value keeps its first position. NULL cannot be listed by name — it always falls in the catch-all.
 
 ```python
 StyleResult = {

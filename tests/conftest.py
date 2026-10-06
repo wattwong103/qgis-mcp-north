@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from qgis_mcp_workflows.helpers import DEFAULT_HOST, DEFAULT_PORT
+from tests import plugin_contract
 
 
 def _plugin_reachable(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> bool:
@@ -87,6 +88,8 @@ class FakeExecutor:
         self.calls: list[tuple[str, dict | None]] = []
 
     def dispatch(self, command: str, params: dict | None = None, timeout: int | None = None) -> Any:
+        # Every FakeExecutor test is also a contract test against plugin.py.
+        plugin_contract.check_dispatch(command, params)
         self.calls.append((command, params))
         if command not in self.responses:
             raise AssertionError(

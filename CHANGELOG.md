@@ -3,6 +3,39 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased — upstream review fixes
+
+### Fixed
+
+- `qgis_export_atlas` with `format="pdf"` no longer fails after writing the PDF.
+  The static `QgsLayoutExporter.exportToPdf(atlas, ...)` returns `(result,
+  error)`; the handler compared the tuple and then crashed formatting its own
+  message. A PDF atlas now reports `n_pages` as its page count (was 1, the
+  file count), and the instance-export fallback that could write a single
+  non-atlas page is gone. PNG atlases are exported one page at a time (each
+  page once, from `atlas.first()`) and the result lists exactly the files this
+  run wrote; the old path exported every page twice and returned an extra one.
+  Page names that differ only in case get a suffix instead of overwriting each
+  other on NTFS / default APFS.
+- `qgis_style_categorized(classes=[...])` now applies the subset: listed values
+  in the given order, every other value and NULL in one grey "all other values"
+  class. The plugin used to swallow `classes_subset` and render every value.
+- `qgis_render_od_flows` no longer sends the unused `od_csv` to the plugin;
+  `scripts/weekly_figures.py` demo mode sends `render_link_density` the
+  aggregated `density` dict it takes instead of pre-v1.2 trajectory params.
+
+### Tests
+
+- `FakeExecutor` checks every dispatch against `plugin.py`'s command table
+  (read from the AST): unknown commands, missing required params, and keys a
+  handler would swallow in `**kwargs` now fail the test. The violation is a
+  `BaseException`, so a tool's `except Exception` cannot hide it. That check
+  found the three dispatch bugs above.
+- Live headless regression tests for the atlas and categorized-subset fixes
+  (`tests/test_plugin_live_fixes.py`, skipped without a QGIS launcher). They
+  read the colour each feature actually draws with from the renderer, and
+  count the PDF's pages.
+
 ## Unreleased — macOS QGIS 4
 
 ### Fixed

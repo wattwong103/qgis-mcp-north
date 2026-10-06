@@ -1064,7 +1064,7 @@ def qgis_style_categorized(
     layer_id: Annotated[str, Field(description="layer_id from qgis_load_layer or qgis_project_load.")],
     field: Annotated[str, Field(description="Field name to categorize on (string-typed).")],
     palette: Annotated[str, Field(description='ColorBrewer palette name, e.g. "Set2", "Paired", "Dark2".')] = "Set2",
-    classes: Annotated[list[str] | None, Field(description="Optional subset/order of category values to render; others get a default 'no data' style.")] = None,
+    classes: Annotated[list[str] | None, Field(description="Optional subset/order of category values to render; every other value (and NULL) shares one grey 'all other values' class.")] = None,
 ) -> StyleResult:
     """Apply categorical (one-color-per-value) symbology to a vector layer.
 
@@ -2020,7 +2020,6 @@ def qgis_render_od_flows(
         flows = flows[:top_n]
 
     params = {
-        "od_csv": abs_od,
         "zones_path": abs_zones,
         "output_png": abs_output,
         "flows": flows,
