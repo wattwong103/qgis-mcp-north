@@ -7,9 +7,46 @@ FastMCP turns them into MCP error responses.
 
 from __future__ import annotations
 
+try:  # mcp >= 2.0 renamed fastmcp -> mcpserver (same shim as server.py)
+    from mcp.server.mcpserver.exceptions import ToolError
+except ModuleNotFoundError:
+    from mcp.server.fastmcp.exceptions import ToolError
 
-class QgisMcpWorkflowsError(Exception):
-    """Base class for all qgis-mcp-workflows tool errors."""
+
+class QgisMcpWorkflowsError(ToolError):
+    """Base class for all qgis-mcp-workflows tool errors.
+
+    Subclasses the SDK's ``ToolError`` because mcp >= 2.1 hides the message of
+    any other exception ("Error executing tool <name>"), which would drop every
+    ``Next:`` hint below.
+    """
+
+
+class InvalidArgumentError(QgisMcpWorkflowsError, ValueError):
+    """The call is missing an argument or combines arguments that conflict.
+
+    Also a ``ValueError``, which these checks raised before they were typed.
+    """
+
+    def __init__(
+        self, message: str, next_step: str = "retry the same call with the arguments named above"
+    ) -> None:
+        super().__init__(f"{message} Next: {next_step}.")
+
+
+class InputFileNotFoundError(QgisMcpWorkflowsError, FileNotFoundError):
+    """An input file argument (CSV, figure, template) does not exist.
+
+    Also a ``FileNotFoundError``, which ``open()`` raised before this was typed.
+    """
+
+    def __init__(self, argument: str, path: str) -> None:
+        super().__init__(
+            f"{argument} not found: {path!r}. "
+            f"Next: pass an absolute path that exists on this machine, then retry."
+        )
+        self.argument = argument
+        self.path = path
 
 
 class PluginUnavailableError(QgisMcpWorkflowsError):
