@@ -321,10 +321,11 @@ def qgis_export(
     format: Annotated[Literal["png", "pdf", "svg"], Field(description='kind="layout" only: output format.')] = "png",
     dpi: Annotated[int, Field(description="Export DPI.", ge=72, le=600)] = 300,
     template_qgz: Annotated[str | None, Field(description='kind="batch": template project.')] = None,
-    attribute: Annotated[str | None, Field(description='kind="batch": field on the active layer to filter by.')] = None,
+    attribute: Annotated[str | None, Field(description='kind="batch": field on the filtered layer to filter by.')] = None,
     values: Annotated[list[str] | None, Field(description='kind="batch": filter values to iterate.')] = None,
     output_dir: Annotated[str | None, Field(description='kind="batch": output directory.')] = None,
     filename_template: Annotated[str, Field(description='kind="batch" filename template.')] = "{value}.png",
+    layer: Annotated[str | None, Field(description='kind="batch": name or id of the layer to filter; default the top-most visible vector layer.')] = None,
     figure_paths: Annotated[list[str] | None, Field(description='kind="pptx": PNG/JPG paths to add as slides.')] = None,
     layout: Annotated[Literal["title_and_image", "image_only", "two_column", "title_image_caption"], Field(description='kind="pptx": per-slide layout.')] = "title_and_image",
     captions: Annotated[list[str] | None, Field(description='kind="pptx": per-slide captions.')] = None,
@@ -351,7 +352,7 @@ def qgis_export(
         return qgis_batch_render(
             template_qgz=template_qgz, attribute=attribute, values=values,
             output_dir=output_dir, layout_name=layout_name,
-            filename_template=filename_template,
+            filename_template=filename_template, layer=layer,
         )
     if kind == "pptx":
         if not figure_paths or not output_path:

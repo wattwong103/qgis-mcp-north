@@ -3,6 +3,34 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased — batch render and project reads
+
+### Fixed
+
+- `qgis_batch_render` filters the right layer: `layer=` (name or id), else the
+  top-most visible vector layer in the template's layer tree, named in the new
+  `target_layer` field. The old "saved active layer" step could never apply
+  (QGIS does not save the active layer), so it fell back to registry order —
+  layer ids sorted by name — and could filter a hidden or unrelated layer.
+- Without a layout, `qgis_batch_render` draws the template's visible layers in
+  layer-tree order; it used to draw every layer, hidden ones included.
+- A filter the provider refuses is now an error for that value. The ignored
+  `False` used to leave the layer unfiltered and save the whole map under the
+  value's file name. The field is quoted with `QgsExpression.quotedColumnRef`,
+  the value as an SQL literal (OGR subset strings are SQL).
+- An unavailable top-most layer is no longer skipped in favour of the next one
+  down: without `layer=`, `qgis_batch_render` stops with `LAYER_UNAVAILABLE`.
+- Values name files inside `output_dir` only: path separators and characters
+  Windows forbids become `_` in the file name (`ko	o` -> `ko_to.png`); a
+  value such as `../x` used to write outside `output_dir`.
+- The template's own filter on the filtered layer is restored after the batch;
+  it used to be cleared for the rest of the session.
+- Project reads (`qgis_project_load`, `qgis_export_layout`, `qgis_export_atlas`,
+  `qgis_batch_render`) no longer block on QGIS Desktop's modal "Handle
+  Unavailable Layers" dialog (upstream 44ae681); the missing layers are kept as
+  unavailable and reported in a new `unavailable_layers` field. A failed read
+  now carries QGIS's own error text.
+
 ## Unreleased — macOS QGIS 4
 
 ### Fixed

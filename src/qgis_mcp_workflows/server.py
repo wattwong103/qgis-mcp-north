@@ -365,6 +365,7 @@ class ProjectInfo(BaseModel):
     extent: list[float]
     layers: list[LayerSummary]
     layouts: list[LayoutSummary]
+    unavailable_layers: Annotated[list[str], Field(description="Layers in the project whose data source is missing (kept as unavailable, not drawn).")] = []
 
 
 class ClassEntry(BaseModel):
@@ -565,6 +566,7 @@ class ExportResult(BaseModel):
     format: str
     n_pages: int
     layout_name: str
+    unavailable_layers: Annotated[list[str], Field(description="Layers in the project whose data source is missing (kept as unavailable, not drawn).")] = []
 
 
 class ComposeLayoutResult(BaseModel):
@@ -603,6 +605,8 @@ class BatchRenderResult(BaseModel):
     n_rendered: int
     manifest: list[BatchManifestEntry]
     errors: list[BatchError]
+    target_layer: Annotated[str | None, Field(description="Name of the layer that was filtered per value.")] = None
+    unavailable_layers: Annotated[list[str], Field(description="Layers in the project whose data source is missing (kept as unavailable, not drawn).")] = []
 
 
 class PptxResult(BaseModel):
@@ -1047,6 +1051,7 @@ def qgis_project_load(
             for la in result.get("layers", [])
         ],
         layouts=[LayoutSummary(name=lo["name"]) for lo in result.get("layouts", [])],
+        unavailable_layers=result.get("unavailable_layers", []),
     )
 
 
@@ -2550,6 +2555,7 @@ def qgis_export_layout(
         format=result["format"],
         n_pages=result["n_pages"],
         layout_name=result["layout_name"],
+        unavailable_layers=result.get("unavailable_layers", []),
     )
 
 
@@ -2560,6 +2566,7 @@ class AtlasExportResult(BaseModel):
     n_pages: int
     layout_name: str
     files: list[str]
+    unavailable_layers: Annotated[list[str], Field(description="Layers in the project whose data source is missing (kept as unavailable, not drawn).")] = []
 
 
 @_maybe_tool(
@@ -2612,6 +2619,7 @@ def qgis_export_atlas(
         n_pages=int(result.get("n_pages") or len(files)),
         layout_name=result.get("layout_name", layout_name),
         files=files,
+        unavailable_layers=result.get("unavailable_layers", []),
     )
 
 
@@ -2674,12 +2682,13 @@ def qgis_compose_layout(
     )
 )
 def qgis_batch_render(
-    template_qgz: Annotated[str, Field(description="Absolute path to a template project. Must contain a single 'active' layer to filter and (optionally) a layout to export.")],
-    attribute: Annotated[str, Field(description="Field on the active layer to filter by.")],
+    template_qgz: Annotated[str, Field(description="Absolute path to a template project with the layer to filter and (optionally) a layout to export.")],
+    attribute: Annotated[str, Field(description="Field on the filtered layer to filter by.")],
     values: Annotated[list[str], Field(description="Filter values to iterate. One render per value.")],
     output_dir: Annotated[str, Field(description="Absolute path to a directory where renders are written.")],
     layout_name: Annotated[str | None, Field(description="If given, exports the layout with this name; otherwise renders the map canvas.")] = None,
     filename_template: Annotated[str, Field(description="Filename template, e.g. '{value}.png' or 'choropleth_{value}.png'.")] = "{value}.png",
+    layer: Annotated[str | None, Field(description="Name or id of the vector layer to filter. Default: the top-most visible vector layer in the template's layer tree.")] = None,
 ) -> BatchRenderResult:
     """Fan-out: render the same template per filter value. Workflow tool.
 
@@ -2714,6 +2723,7 @@ def qgis_batch_render(
         "output_dir": abs_output_dir,
         "layout_name": layout_name,
         "filename_template": filename_template,
+        "layer": layer,
     }
     try:
         result = get_executor().dispatch("batch_render", params, timeout=300)
@@ -2747,6 +2757,8 @@ def qgis_batch_render(
             BatchError(value=e["value"], error=e["error"])
             for e in result.get("errors", [])
         ],
+        target_layer=result.get("target_layer"),
+        unavailable_layers=result.get("unavailable_layers", []),
     )
 
 

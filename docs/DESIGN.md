@@ -152,6 +152,7 @@ ProjectInfo = {
     "extent": [xmin, ymin, xmax, ymax],
     "layers": [{"layer_id": str, "name": str, "geometry_type": str, "visible": bool}],
     "layouts": [{"name": str}],   # print composer layouts available for export
+    "unavailable_layers": [str],  # layers whose data source is missing; kept, not drawn
 }
 ```
 
@@ -363,9 +364,15 @@ ExportResult = {
 }
 ```
 
-#### `qgis_batch_render(template_qgz: str, attribute: str, values: list[str], output_dir: str, layout_name: str | None = None, filename_template: str = "{value}.png") → BatchRenderResult`
+#### `qgis_batch_render(template_qgz: str, attribute: str, values: list[str], output_dir: str, layout_name: str | None = None, filename_template: str = "{value}.png", layer: str | None = None) → BatchRenderResult`
 
-**Workflow tool.** Fan-out: open the template project, iterate `values`, filter the active layer by `attribute = value`, render to `output_dir`. Used for "render the OD map for each scenario" or "render the choropleth for each timestep."
+**Workflow tool.** Fan-out: open the template project, iterate `values`, filter one layer by `attribute = value`, render to `output_dir`. Used for "render the OD map for each scenario" or "render the choropleth for each timestep."
+
+- **Filtered layer:** `layer` (name or id) if given, else the top-most visible vector layer in the layer tree; the response names it in `target_layer`. (QGIS does not save the active layer in a project, so there is no "active layer" convention.)
+- **Without a layout**, the render draws the template's visible layers in layer-tree order (custom layer order if set), plus the filtered layer — never hidden layers.
+- If the top-most visible vector layer is unavailable (missing data source) and `layer` is not given, the call fails with `LAYER_UNAVAILABLE` rather than filtering the next layer down.
+- The filter quotes the field with `QgsExpression.quotedColumnRef` and the value as an SQL literal. A filter the provider refuses is reported in `errors` for that value; nothing is written for it. The template's own filter on that layer is replaced while rendering and restored afterwards.
+- `filename_template` receives the value with path separators and Windows-reserved characters replaced by `_`, so every file stays inside `output_dir`.
 
 ```python
 BatchRenderResult = {
@@ -373,6 +380,8 @@ BatchRenderResult = {
     "n_rendered": int,
     "manifest": [{"value": str, "output_path": str, "extent": [...]}],
     "errors": [{"value": str, "error": str}],
+    "target_layer": str,
+    "unavailable_layers": [str],   # layers whose data source is missing
 }
 ```
 
@@ -527,6 +536,8 @@ database cursor, an API — renders through the same path.
 - `HeadlessUnavailableError` → suggest installing PyQGIS or switching transport
 
 The mcp-builder skill emphasizes "actionable error messages." Every error message ends with one suggested next tool call.
+
+**Project reads.** They never block on QGIS Desktop's modal "Handle Unavailable Layers" dialog: it is dismissed as it opens (keeping the layers as unavailable), and `qgis_project_load`, `qgis_export_layout`, `qgis_export_atlas` and `qgis_batch_render` report those layers in `unavailable_layers`.
 
 **Idempotency annotations.** All `render_*`, `export_*`, `figures_to_pptx`, and `batch_render` are non-idempotent (they write files). Annotate accordingly. `layer_inspect`, `style_*` (in headless mode, where styling is in-memory) are read-only or idempotent.
 

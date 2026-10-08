@@ -99,3 +99,11 @@ def test_dpi_passed_through(fake_executor):
     )
     params = fake_executor.calls[0][1]
     assert params["dpi"] == 200
+
+
+def test_export_layout_reports_unavailable_layers(fake_executor):
+    fake_executor.responses["export_layout"] = _ok_response(unavailable_layers=["aerial"])
+    result = qgis_export_layout(
+        qgz_path="/tmp/proj.qgz", layout_name="Main", output_path="/tmp/out.png", format="png"
+    )
+    assert result.unavailable_layers == ["aerial"]
