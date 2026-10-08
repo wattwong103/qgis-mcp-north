@@ -53,3 +53,14 @@ def test_invalid_qgz_raises_project_load_error(fake_executor):
 
     with pytest.raises(ProjectLoadError, match=r"proj\.qgz"):
         qgis_project_load(qgz_path="/tmp/proj.qgz")
+
+
+def test_unavailable_layers_surface(fake_executor):
+    fake_executor.responses["project_load"] = _ok_response(unavailable_layers=["gone"])
+    result = qgis_project_load(qgz_path="/tmp/proj.qgz")
+    assert result.unavailable_layers == ["gone"]
+
+
+def test_unavailable_layers_default_empty(fake_executor):
+    fake_executor.responses["project_load"] = _ok_response()
+    assert qgis_project_load(qgz_path="/tmp/proj.qgz").unavailable_layers == []
