@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -256,3 +257,41 @@ def test_notes_are_cleaned_and_capped():
     step["unrecorded_state"] = ['bad' + chr(10) + '"""' + chr(27) + 'y' * 500]
     [note] = [n for n in replay.notes_for([step]) if n.startswith("step 1")]
     assert chr(10) not in note and chr(27) not in note and len(note) <= 260
+
+
+def _choropleth(seq=1, out="${DROPBOX_ROOT}/fig.png", zones="${DROPBOX_ROOT}/z.gpkg"):
+    return _record(seq, [out], zones_path=zones, value_field="n", output_png=out, mode="quantile")
+
+
+def test_build_script_compiles_and_calls_the_tool():
+    step = _choropleth()
+    source = replay.build_script([step], [{"path": "${DROPBOX_ROOT}/z.gpkg", "sha256": "h", "bytes": 1}],
+                                 ["${DROPBOX_ROOT}/fig.png"], ["n"], "2026-10-09")
+    compile(source, "replay.py", "exec")
+    assert "server.qgis_render_choropleth(" in source
+    assert "zones_path=src('${DROPBOX_ROOT}/z.gpkg')" in source
+    assert "output_png=out('${DROPBOX_ROOT}/fig.png')" in source
+
+
+def test_intermediate_inputs_read_from_the_replayed_output():
+    producer = _record(1, ["${DROPBOX_ROOT}/route.csv"], tool="qgis_route_on_network",
+                       input_csv="/stops.csv", network_path="/net.tsv", output_csv="${DROPBOX_ROOT}/route.csv")
+    consumer = _record(2, ["${DROPBOX_ROOT}/t.png"], tool="qgis_render_trajectory",
+                       input_path="${DROPBOX_ROOT}/route.csv", output_png="${DROPBOX_ROOT}/t.png")
+    source = replay.build_script([producer, consumer], [], replay.outputs_of([producer, consumer]), [], "d")
+    assert "input_path=out('${DROPBOX_ROOT}/route.csv')" in source
+
+
+def test_output_dir_argument_is_remapped():
+    step = _record(1, ["${DROPBOX_ROOT}/b/x.png"], tool="qgis_batch_render", template_qgz="/t.qgz",
+                   attribute="name", values=["x"], output_dir="${DROPBOX_ROOT}/b")
+    assert "output_dir=out('${DROPBOX_ROOT}/b')" in replay.build_script([step], [], ["${DROPBOX_ROOT}/b/x.png"], [], "d")
+
+
+def test_hostile_values_stay_literal():
+    step = _choropleth()
+    step["call"]["arguments"]["value_field"] = '"); import os; os.system("calc'
+    source = replay.build_script([step], [], ["${DROPBOX_ROOT}/fig.png"], ['"""' + chr(10) + 'import os'], "d")
+    tree = ast.parse(source)
+    imports = [n for n in ast.walk(tree) if isinstance(n, ast.Import | ast.ImportFrom)]
+    assert [ast.unparse(n) for n in imports] == ["from qgis_mcp_workflows import compound, replay, server"]
