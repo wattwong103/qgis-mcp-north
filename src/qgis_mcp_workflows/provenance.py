@@ -8,8 +8,12 @@ function and record nothing.
 
 from __future__ import annotations
 
+import datetime as _dt
+import hashlib
 import logging
 import os
+import stat
+import threading
 
 logger = logging.getLogger("qgis_mcp_workflows.provenance")
 
@@ -60,3 +64,67 @@ def portable(path: str) -> tuple[str, str | None]:
             if rest is not None:
                 return (f"{ROOT_TOKEN}/{rest}" if rest else ROOT_TOKEN), None
     return norm, "outside DROPBOX_ROOT"
+
+
+_hash_cache: dict[tuple[str, int, int], str] = {}
+_cache_lock = threading.Lock()
+
+
+def hash_cap_bytes() -> int:
+    raw = os.environ.get("QGIS_MCP_WORKFLOWS_PROVENANCE_HASH_MAX_MB", "256")
+    try:
+        megabytes = float(raw)
+    except ValueError:
+        megabytes = 256.0
+    return int(megabytes * 1024 * 1024)
+
+
+def _utc(ts: float) -> str:
+    return _dt.datetime.fromtimestamp(ts, tz=_dt.UTC).isoformat().replace("+00:00", "Z")
+
+
+def _regular_stat(path: str) -> os.stat_result | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st if stat.S_ISREG(st.st_mode) else None
+
+
+def snapshot(path: str) -> tuple[int, int] | None:
+    st = _regular_stat(path)
+    return None if st is None else (st.st_size, st.st_mtime_ns)
+
+
+def _sha256(path: str, st: os.stat_result) -> str | None:
+    if st.st_size > hash_cap_bytes():
+        return None
+    key = (normalise(path), st.st_size, st.st_mtime_ns)
+    with _cache_lock:
+        cached = _hash_cache.get(key)
+    if cached is not None:
+        return cached
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    value = digest.hexdigest()
+    with _cache_lock:
+        _hash_cache[key] = value
+    return value
+
+
+def fingerprint(path: str) -> dict:
+    stored, _ = portable(path)
+    st = _regular_stat(path)
+    if st is None:
+        return {"path": stored, "bytes": None, "mtime": None, "sha256": None,
+                "hashed": False, "missing": True}
+    digest = _sha256(path, st)
+    return {"path": stored, "bytes": st.st_size, "mtime": _utc(st.st_mtime), "sha256": digest,
+            "hashed": digest is not None, "missing": False}
+
+
+def reset_for_tests() -> None:
+    with _cache_lock:
+        _hash_cache.clear()
