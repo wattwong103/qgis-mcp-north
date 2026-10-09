@@ -140,15 +140,42 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--in-place", action="store_true", help="write to the original paths instead")
     parser.add_argument("--yes", action="store_true", help="with --in-place: replace existing files")
     parser.add_argument("--force", action="store_true", help="replay even if source inputs changed")
+    parser.add_argument("--allow-eval", action="store_true",
+                        help="run the recorded qgis_eval code (read it first: it is printed when this flag is missing)")
     return parser.parse_args(argv)
 
 
+def reset_session() -> None:
+    """Continue in a fresh QGIS, so earlier steps' layers, styles and eval side effects do not carry over."""
+    from qgis_mcp_workflows import executors
+
+    old = executors._current
+    executors.set_executor(_new_executor())
+    shutdown = getattr(old, "shutdown", None)
+    if callable(shutdown):
+        shutdown()
+
+
+def _refuse_evals(evals: list[dict]) -> int:
+    print("this replay runs qgis_eval code recorded in the sidecars; read it, then re-run with --allow-eval:",
+          file=sys.stderr)
+    for item in evals:
+        figures = ", ".join(_clean(f) for f in item.get("figures") or [])
+        print(f"  sha256 {_clean(item.get('sha256'))} (used by {figures})", file=sys.stderr)
+        for line in (item.get("first_lines") or [])[:3]:
+            print(f"    | {_clean(line)}", file=sys.stderr)
+    return 3
+
+
 def main(script: str, inputs: list[dict], outputs: list[str], notes: list[str],
-         steps: Callable[[Callable, Callable], None], argv: list[str] | None = None) -> int:
+         steps: Callable[[Callable, Callable], None], argv: list[str] | None = None, *,
+         evals: list[dict] | None = None) -> int:
     """Entry point of a generated replay script. Returns the process exit code."""
     args = _parse(argv)
     for note in notes:
         print(f"note: {note}")
+    if evals and not args.allow_eval:
+        return _refuse_evals(evals)
     try:
         if args.in_place and args.force:
             raise ReplayError("--in-place cannot be combined with --force")
@@ -183,9 +210,12 @@ def main(script: str, inputs: list[dict], outputs: list[str], notes: list[str],
         print(f"replay: {err}", file=sys.stderr)
         return 1
     finally:
+        # A reset may have replaced the first executor: shut down whichever the run ended with, never the caller's.
+        current = executors._current
         executors.set_executor(previous)
-        shutdown = getattr(executor, "shutdown", None)
-        if callable(shutdown):
-            shutdown()
+        if executor is not None and current is not previous:
+            shutdown = getattr(current, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
     print(f"replayed {len(outputs)} file(s)" + ("" if args.in_place else f" into {out_dir}"))
     return 0

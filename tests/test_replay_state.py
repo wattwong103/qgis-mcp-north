@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 
@@ -124,3 +125,84 @@ def test_foreign_evals_need_trust(tmp_path):
     kept, warnings = session_export.keep_evals(records, include_evals=True, trust_foreign=True)
     assert [d["call"]["tool"] for d in kept[0]["depends_on"]] == ["qgis_eval", "qgis_load_layer"]
     assert warnings == []
+
+
+def _record(seq, deps=(), layer_ids=("L1",), session="s1", out=None):
+    out = out or f"${{DROPBOX_ROOT}}/m{seq}.png"
+    return {"session_id": session, "seq": seq, "figure": out, "figure_sha256": None,
+            "call": {"tool": "qgis_render_map", "module": "server",
+                     "arguments": {"layer_ids": list(layer_ids), "output_png": out}},
+            "depends_on": list(deps), "inputs": [], "implicit_inputs": [], "outputs": [out],
+            "unrecorded_state": [], "machine_specific": [], "remote": []}
+
+
+def _script(records):
+    steps = session_export.plan_steps(records)
+    return session_export.build_script(steps, session_export.source_inputs(steps),
+                                       session_export.outputs_of(steps), [], "d",
+                                       session_export.evals_of(steps))
+
+
+def _body(source):
+    tree = ast.parse(source)
+    [steps_fn] = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "steps"]
+    return [ast.unparse(s) for s in steps_fn.body]
+
+
+def test_layer_ids_are_rebound_to_the_replayed_load():
+    body = _body(_script([_record(10, deps=[_load(), _style(2, "a")])]))
+    assert body[0] == "layer_1 = server.qgis_load_layer(path=src('${DROPBOX_ROOT}/z.gpkg')).layer_id"
+    assert body[1] == "server.qgis_style_categorized(layer_id=layer_1, field='a')"
+    assert body[2].startswith("server.qgis_render_map(layer_ids=[layer_1], output_png=out(")
+
+
+def test_each_state_reading_figure_replays_its_own_snapshot():
+    first = _record(10, deps=[_load(), _style(2, "a")])
+    second = _record(20, deps=[_load(), _style(2, "a"), _style(11, "b")])
+    body = _body(_script([second, first]))
+    assert body.index("replay.reset_session()") > 0          # second block starts from a fresh QGIS
+    assert [line.split("field=")[1] for line in body if "field=" in line] == ["'a')", "'a')", "'b')"]
+
+
+def test_sessions_are_separated_by_a_reset():
+    body = _body(_script([_record(10, deps=[_load()], session="a"),
+                          _record(10, deps=[_load()], session="b", out="${DROPBOX_ROOT}/b.png")]))
+    assert body.count("replay.reset_session()") == 1
+
+
+def test_project_layers_keep_their_ids():
+    project = _dep(1, "qgis_project_load", inputs=[_in("qgz_path", "${DROPBOX_ROOT}/p.qgz")],
+                   qgz_path="${DROPBOX_ROOT}/p.qgz")
+    body = _body(_script([_record(10, deps=[project, _style(2, "a", layer="P1")], layer_ids=("P1",))]))
+    assert body[0] == "server.qgis_project_load(qgz_path=src('${DROPBOX_ROOT}/p.qgz'))"
+    assert body[1] == "server.qgis_style_categorized(layer_id='P1', field='a')"
+    assert "layer_ids=['P1']" in body[2]
+
+
+def test_dependency_inputs_are_checked_before_the_run():
+    steps = session_export.plan_steps([_record(10, deps=[_load()])])
+    assert [i["path"] for i in session_export.source_inputs(steps)] == ["${DROPBOX_ROOT}/z.gpkg"]
+
+
+def test_evals_are_listed_for_the_refusal():
+    code = "import os" + chr(10) + "x = 1" + chr(10) + "y = 2" + chr(10) + "z = 3"
+    steps = session_export.plan_steps([_record(10, deps=[_dep(1, "qgis_eval", code=code), _load(2)])])
+    [item] = session_export.evals_of(steps)
+    assert item["sha256"] == hashlib.sha256(code.encode("utf-8")).hexdigest()
+    assert item["first_lines"] == ["import os", "x = 1", "y = 2"]
+    assert item["figures"] == ["${DROPBOX_ROOT}/m10.png"]
+    source = _script([_record(10, deps=[_dep(1, "qgis_eval", code=code), _load(2)])])
+    assert "server.qgis_eval(code=" in source and "evals=EVALS" in source
+
+
+def test_a_block_with_evals_says_their_writes_are_not_remapped():
+    steps = session_export.plan_steps([_record(10, deps=[_dep(1, "qgis_eval", code="x = 1"), _load(2)])])
+    assert "step 1: files written inside replayed qgis_eval code are not remapped into --out-dir" \
+        in session_export.notes_for(steps)
+
+
+def test_hostile_dependency_values_stay_literal():
+    hostile = _dep(1, "qgis_eval", code='"); import os #' + chr(10) + 'os.system("calc")')
+    tree = ast.parse(_script([_record(10, deps=[hostile, _load(2)])]))
+    imports = [n for n in ast.walk(tree) if isinstance(n, ast.Import | ast.ImportFrom)]
+    assert [ast.unparse(n) for n in imports] == ["from qgis_mcp_workflows import compound, replay, server"]

@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import ast
 import datetime as _dt
+import hashlib
 import inspect
+import itertools
 import json
 import os
 import re
@@ -384,7 +386,8 @@ def plan_steps(records: list[dict]) -> list[dict]:
             if isinstance(e, dict) and e.get("sha256") and e.get("path") in made
             and made[e["path"]][1] == e["sha256"] and made[e["path"]][0] != key
         })
-        steps[key] = {**rec, "replayed_inputs": replayed}
+        steps[key] = {**rec, "replayed_inputs": replayed,
+                      "dependencies": sorted(rec.get("depends_on") or [], key=lambda d: d["seq"])}
         needs[key] = {made[p][0] for p in replayed}
     ordered: list[tuple[str, int]] = []
     while len(ordered) < len(steps):
@@ -410,7 +413,8 @@ def source_inputs(steps: list[dict]) -> list[dict]:
     found: dict[tuple, dict] = {}
     for step in steps:
         replayed = set(step.get("replayed_inputs") or [])
-        for entry in (step.get("inputs") or []) + (step.get("implicit_inputs") or []):
+        dependency_inputs = [i for d in step.get("dependencies") or [] for i in d.get("inputs") or []]
+        for entry in (step.get("inputs") or []) + (step.get("implicit_inputs") or []) + dependency_inputs:
             path = entry.get("path") if isinstance(entry, dict) else None
             if not isinstance(path, str) or path in replayed:
                 continue
@@ -424,8 +428,11 @@ def notes_for(steps: list[dict]) -> list[str]:
     for n, step in enumerate(steps, 1):
         tool = step["call"]["tool"]
         kind = step["call"]["arguments"].get("kind")
-        if tool in _PROJECT_TOOLS or (tool == "qgis_export" and kind in ("layout", "atlas", "batch")):
+        if not step.get("dependencies") and (
+                tool in _PROJECT_TOOLS or (tool == "qgis_export" and kind in ("layout", "atlas", "batch"))):
             notes.append(f"step {n}: reads its .qgz from disk; styling applied earlier in the session is not recorded")
+        if any(d["call"]["tool"] == "qgis_eval" for d in step.get("dependencies") or []):
+            notes.append(f"step {n}: files written inside replayed qgis_eval code are not remapped into --out-dir")
         for text in step.get("unrecorded_state") or []:
             notes.append(f"step {n}: {_clean(text)}")
         for entry in step.get("machine_specific") or []:
@@ -444,6 +451,7 @@ from qgis_mcp_workflows import compound, replay, server
 INPUTS = None
 OUTPUTS = None
 NOTES = None
+EVALS = None
 
 
 def steps(out, src):
@@ -451,7 +459,7 @@ def steps(out, src):
 
 
 if __name__ == "__main__":
-    raise SystemExit(replay.main(__file__, INPUTS, OUTPUTS, NOTES, steps))
+    raise SystemExit(replay.main(__file__, INPUTS, OUTPUTS, NOTES, steps, evals=EVALS))
 '''
 
 
@@ -465,14 +473,24 @@ def _literal(value: Any) -> ast.expr:
     return ast.Constant(str(value))
 
 
-def _argument(name: str, value: Any, replayed: set[str]) -> ast.expr:
-    """Outputs go through out(); an input through out() only if a replayed step re-makes it."""
+def _argument(name: str, value: Any, replayed: set[str], layers: dict[str, str]) -> ast.expr:
+    """Outputs go through out(); an input through out() only if a replayed step re-makes it.
+
+    A layer id a replayed load produced becomes that load's variable.
+    """
     def path(v: Any) -> ast.expr:
         if not isinstance(v, str):
             return _literal(v)
         func = "out" if name in OUTPUT_ARGS or v in replayed else "src"
         return ast.Call(ast.Name(func, ast.Load()), [ast.Constant(v)], [])
 
+    def layer(v: Any) -> ast.expr:
+        return ast.Name(layers[v], ast.Load()) if isinstance(v, str) and v in layers else _literal(v)
+
+    if name == "layer_id":
+        return layer(value)
+    if name == "layer_ids" and isinstance(value, list):
+        return ast.List([layer(v) for v in value], ast.Load())
     if name in OUTPUT_ARGS | INPUT_ARGS and value not in (None, ""):
         return path(value)
     if name in INPUT_LIST_ARGS and isinstance(value, list):
@@ -480,26 +498,73 @@ def _argument(name: str, value: Any, replayed: set[str]) -> ast.expr:
     return _literal(value)
 
 
-def _step_call(step: dict) -> ast.stmt:
-    call = step["call"]  # tool and argument names were validated by _tool_function
+def _call(step: dict, layers: dict[str, str]) -> ast.Call:
+    call = step["call"]  # tool and argument names were validated at collect time
     replayed = set(step.get("replayed_inputs") or [])
     func = ast.Attribute(ast.Name(call["module"], ast.Load()), call["tool"], ast.Load())
-    keywords = [ast.keyword(k, _argument(k, v, replayed)) for k, v in call["arguments"].items()]
-    return ast.Expr(ast.Call(func, [], keywords))
+    keywords = [ast.keyword(k, _argument(k, v, replayed, layers)) for k, v in call["arguments"].items()]
+    return ast.Call(func, [], keywords)
+
+
+def _step_call(step: dict, layers: dict[str, str]) -> ast.stmt:
+    return ast.Expr(_call(step, layers))
+
+
+def _dependency_call(dep: dict, layers: dict[str, str], names: Any) -> ast.stmt:
+    """A replayed load binds layer_N to the id it produces; later calls use the name."""
+    call = _call(dep, layers)
+    produced = dep.get("layer_id")
+    if ledger.kind(dep["call"]["tool"], dep["call"]["arguments"]) == "load" and produced:
+        name = f"layer_{next(names)}"
+        layers[produced] = name
+        return ast.Assign([ast.Name(name, ast.Store())], ast.Attribute(call, "layer_id", ast.Load()))
+    return ast.Expr(call)
+
+
+def _reset() -> ast.stmt:
+    return ast.Expr(ast.Call(ast.Attribute(ast.Name("replay", ast.Load()), "reset_session", ast.Load()), [], []))
+
+
+def evals_of(steps: list[dict]) -> list[dict]:
+    """What the script shows before it refuses to run without --allow-eval."""
+    found: dict[str, dict] = {}
+    for step in steps:
+        for dep in step.get("dependencies") or []:
+            if dep["call"]["tool"] != "qgis_eval":
+                continue
+            code = str(dep["call"]["arguments"].get("code", ""))
+            digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
+            item = found.setdefault(digest, {"sha256": digest, "first_lines": [], "figures": []})
+            item["first_lines"] = [_clean(line) for line in code.splitlines()[:3]]
+            item["figures"] += [_clean(o) for o in step.get("outputs") or [] if _clean(o) not in item["figures"]]
+    return list(found.values())
 
 
 def build_script(steps: list[dict], inputs: list[dict], outputs: list[str], notes: list[str],
-                 generated_on: str) -> str:
+                 generated_on: str, evals: Any = ()) -> str:
     tree = ast.parse(_SKELETON)
-    doc, _imports, inputs_node, outputs_node, notes_node, steps_def, _main = tree.body
+    doc, _imports, inputs_node, outputs_node, notes_node, evals_node, steps_def, _main = tree.body
     doc.value = ast.Constant(
         f"Replay of {len(outputs)} file(s) from {len(steps)} recorded call(s), "
         f"generated by qgis_export_session on {generated_on}.\n\n"
-        "Run:  uv run --no-sync python <this file> [--out-dir DIR | --in-place --yes] [--force]\n")
+        "Run:  uv run --no-sync python <this file> [--out-dir DIR | --in-place --yes] [--force] [--allow-eval]\n")
     inputs_node.value = _literal(inputs)
     outputs_node.value = _literal(outputs)
     notes_node.value = _literal(notes)
-    steps_def.body = [_step_call(s) for s in steps] or [ast.Pass()]
+    evals_node.value = _literal(list(evals))
+    body: list[ast.stmt] = []
+    names = itertools.count(1)
+    previous = None
+    for step in steps:
+        deps = step.get("dependencies") or []
+        session = step.get("session_id")
+        if previous is not None and (deps or session != previous):
+            body.append(_reset())  # rebuilt state must not inherit layers or eval side effects
+        layers: dict[str, str] = {}
+        body += [_dependency_call(d, layers, names) for d in deps]
+        body.append(_step_call(step, layers))
+        previous = session
+    steps_def.body = body or [ast.Pass()]
     return ast.unparse(ast.fix_missing_locations(tree)) + "\n"
 
 
@@ -533,8 +598,9 @@ def export_session(output_py: str, figures: list[str] | None = None, folder: str
         _fail(f"nothing to replay ({why}).",
               "pick figures written through MCP that still have their .provenance.json beside them")
     outputs = outputs_of(steps)
+    evals = evals_of(steps)
     source = build_script(steps, source_inputs(steps), outputs, notes_for(steps),
-                          _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d"))
+                          _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d"), evals)
     compile(source, str(target), "exec")  # the generator must never emit invalid code
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(source, encoding="utf-8")

@@ -504,3 +504,70 @@ def test_main_shuts_down_and_exits_1_when_a_step_fails(monkeypatch, tmp_path, ca
 
     code, ran = _run_main(tmp_path, monkeypatch, argv=["--out-dir", str(tmp_path / "o")], steps=failing)
     assert code == 1 and ran == ["shutdown"] and "render failed" in capsys.readouterr().err
+
+
+# --- TASK-15: --allow-eval gate and session reset ----------------------------------
+
+_EVAL = {"sha256": "ab" * 32, "first_lines": ["import os", "x = 1"], "figures": ["${DROPBOX_ROOT}/m.png"]}
+
+
+def test_main_refuses_evals_without_allow_eval(monkeypatch, tmp_path, capsys):
+    ran = []
+    monkeypatch.setattr(replay, "_new_executor", lambda: ran.append("spawned"))
+    code = replay.main(str(tmp_path / "r.py"), [], [], [], lambda out, src: ran.append("steps"),
+                       ["--out-dir", str(tmp_path / "o")], evals=[_EVAL])
+    err = capsys.readouterr().err
+    assert code == 3 and ran == []
+    assert "ab" * 32 in err and "import os" in err and "--allow-eval" in err
+
+
+def test_main_runs_evals_with_allow_eval(monkeypatch, tmp_path):
+    ran = []
+    monkeypatch.setattr(replay, "_new_executor", lambda: None)
+    code = replay.main(str(tmp_path / "r.py"), [], [], [], lambda out, src: ran.append("steps"),
+                       ["--out-dir", str(tmp_path / "o"), "--allow-eval"], evals=[_EVAL])
+    assert code == 0 and ran == ["steps"]
+
+
+def test_eval_preview_is_cleaned_and_short(monkeypatch, tmp_path, capsys):
+    item = {**_EVAL, "first_lines": ["a" + chr(27) + "]0;x" + chr(7) + "b"]}
+    replay.main(str(tmp_path / "r.py"), [], [], [], lambda out, src: None, [], evals=[item])
+    err = capsys.readouterr().err
+    assert chr(27) not in err and chr(7) not in err
+
+
+def test_reset_session_swaps_in_a_fresh_executor_and_shuts_the_old_one(monkeypatch):
+    from qgis_mcp_workflows import executors
+
+    events = []
+
+    class Old:
+        def shutdown(self):
+            events.append("old shut down")
+
+    fresh = object()
+    monkeypatch.setattr(executors, "_current", Old())
+    monkeypatch.setattr(replay, "_new_executor", lambda: fresh)
+    replay.reset_session()
+    assert executors._current is fresh and events == ["old shut down"]
+
+
+def test_main_shuts_down_the_executor_left_by_a_reset(monkeypatch, tmp_path):
+    from qgis_mcp_workflows import executors
+
+    shut = []
+
+    class Executor:
+        def __init__(self, name):
+            self.name = name
+
+        def shutdown(self):
+            shut.append(self.name)
+
+    names = iter(["first", "second"])
+    monkeypatch.setattr(replay, "_new_executor", lambda: Executor(next(names)))
+    before = object()
+    monkeypatch.setattr(executors, "_current", before)
+    code = replay.main(str(tmp_path / "r.py"), [], [], [], lambda out, src: replay.reset_session(),
+                       ["--out-dir", str(tmp_path / "o")])
+    assert code == 0 and shut == ["first", "second"] and executors._current is before
