@@ -14,8 +14,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   links verified by fingerprint, a result summary and the environment (package,
   git commit, extras, QGIS/plugin version when the call used QGIS). Paths under
   `$DROPBOX_ROOT` are portable across machines. Disable with
-  `QGIS_MCP_WORKFLOWS_PROVENANCE=0`. Replay (`qgis_export_session`) follows in
-  TASK-13.
+  `QGIS_MCP_WORKFLOWS_PROVENANCE=0`.
+- `qgis_export_session(output_py, figures=…|folder=…)` writes a standalone
+  replay script from those sidecars (TASK-13). It follows `made_by` chains back
+  to source data and runs one step per recorded call, producers first. The
+  script is built as an AST from a fixed skeleton, so sidecar values only ever
+  become literals; tool and argument names must exist. Before running, it
+  checks every source input (sha256, else size) and exits 2 on a mismatch
+  unless `--force`. Outputs go under `replay_<date>/` beside the script
+  (`--out-dir` to choose; `--in-place --yes` to overwrite, refused when an
+  output is also an input). Figures it cannot replay are listed with a fixed
+  reason (`no sidecar`, `stale sidecar: figure changed`, `unknown tool`,
+  `needs session state` for `qgis_render_map` until TASK-15).
 - `install.py` writes `DROPBOX_ROOT` into GUI MCP client configs (never into the
   tracked `.mcp.json`).
 

@@ -118,6 +118,7 @@ pipelines (PFLOW, GUFM). First call qgis_ping / qgis_diagnose. Then:
   qgis_render_link_density(load_csv=...) for network section loads.
 - qgis_compose_layout when you need a legend/scale bar as a print layout;
   qgis_figures_to_pptx to drop PNGs into a weekly deck.
+- qgis_export_session to write a replay script for figures that have .provenance.json sidecars.
 - qgis_eval only as an escape hatch.
 
 If you need feature editing, Processing algorithms, or layer-tree groups,

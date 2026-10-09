@@ -12,7 +12,7 @@ This document is the spec. Implementation follows. If a tool's signature, respon
 
 Three problems with upstream that the fork solves:
 
-**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **25 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
+**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **26 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
 
 **No headless mode.** Upstream requires QGIS Desktop running with the plugin enabled. That's incompatible with scheduled overnight runs, CI, or any automation. We add a **PyQGIS-subprocess transport** alongside the existing plugin transport. Same tools, two backends, selected by config or CLI flag.
 
@@ -96,7 +96,7 @@ Upstream's plugin and server stay untouched. If the user installs both, Claude D
 
 ---
 
-## 4. Tool surface (25 workflow + 1 escape hatch)
+## 4. Tool surface (26 workflow + 1 escape hatch)
 
 For each tool: signature, what it does, response shape, and the typical chain.
 
@@ -390,6 +390,15 @@ PptxResult = {
 ```
 
 Closes the W17 loop in one call.
+
+#### `qgis_export_session(output_py: str, figures: list[str] | None = None, folder: str | None = None, overwrite: bool = False) → SessionExportResult`
+
+**Delivery tool.** Writes a standalone replay script from provenance sidecars (spec `docs/superpowers/specs/2026-10-08-figure-provenance-design.md` §7): follows `made_by` chains to source data, one step per recorded call (producers first), source inputs checked before anything runs (exit 2 unless `--force`), outputs under `replay_<date>/` beside the script unless `--in-place --yes`. Built as an AST; tool and argument names must be real. Skipped figures carry fixed reasons. Until TASK-15, `qgis_render_map` figures are skipped (`needs session state`). Full mode only.
+
+```python
+SessionExportResult = {"output_path": str, "n_figures": int, "n_calls": int,
+                       "skipped": [{"figure": str, "reason": str}], "warnings": [str]}
+```
 
 ### Escape hatch (1)
 

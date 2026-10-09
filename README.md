@@ -46,7 +46,7 @@ The headless runner injects a stub `iface` that no-ops UI calls. Every command
 handler that doesn't touch the canvas / layer-tree-view works in both transports
 for free — a v0.4 architectural promise that v0.5+ tools inherit.
 
-## Tools (26 standalone — 25 workflow + `qgis_eval`; 5 grouped in compound mode)
+## Tools (27 standalone — 26 workflow + `qgis_eval`; 5 grouped in compound mode)
 
 | Tool | Purpose |
 |---|---|
@@ -71,6 +71,7 @@ for free — a v0.4 architectural promise that v0.5+ tools inherit.
 | `qgis_export_layout` | Print-composer → PNG/PDF/SVG |
 | `qgis_batch_render` | Fan-out per attribute value; manifest + per-value errors |
 | `qgis_figures_to_pptx` | Assemble PNGs into a PowerPoint deck (defaults to Sekimoto-lab blank) |
+| `qgis_export_session` | Write a replay script that re-makes figures from their `.provenance.json` sidecars |
 | `qgis_eval` | Arbitrary PyQGIS escape hatch with `return_vars` capture |
 
 Full input/output schemas, response shapes, and error taxonomy: [`docs/DESIGN.md`](docs/DESIGN.md).
