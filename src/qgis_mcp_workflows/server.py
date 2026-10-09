@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field
 
 from qgis_mcp_workflows.errors import InvalidArgumentError
 from qgis_mcp_workflows.helpers import with_png_preview
+from qgis_mcp_workflows.provenance import with_provenance
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -274,12 +275,13 @@ def _maybe_tool(*args, **kwargs):
     """Register with FastMCP in full mode; keep the original callable on the module.
 
     PNG preview is applied only to the registered copy so Python callers
-    (tests, ``scripts/demo_w17.py``) still get the Pydantic model.
+    (tests, ``scripts/demo_w17.py``) still get the Pydantic model. Provenance
+    sidecars likewise: only MCP calls are recorded.
     """
 
     def deco(f):
         if TOOL_MODE == "full":
-            mcp.tool(*args, **kwargs)(with_png_preview(f))
+            mcp.tool(*args, **kwargs)(with_png_preview(with_provenance(f)))
         return f
 
     return deco
@@ -290,7 +292,7 @@ def _maybe_compound_tool(*args, **kwargs):
 
     def deco(f):
         if TOOL_MODE == "compound":
-            mcp.tool(*args, **kwargs)(with_png_preview(f))
+            mcp.tool(*args, **kwargs)(with_png_preview(with_provenance(f)))
         return f
 
     return deco

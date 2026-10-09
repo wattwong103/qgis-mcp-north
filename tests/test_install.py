@@ -286,3 +286,39 @@ def test_unknown_client_exits(install_mod, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         install_mod.main()
     assert "Unknown clients" in str(exc.value) or exc.value.code is not None
+
+
+def test_client_config_carries_dropbox_root(install_mod, monkeypatch):
+    monkeypatch.setenv("DROPBOX_ROOT", "H:/Dropbox")
+    install_mod.configure_client("claude-desktop", remote=False)
+    cfg_path = install_mod._client_registry()["claude-desktop"]["path"]
+    entry = json.loads(Path(cfg_path).read_text(encoding="utf-8"))["mcpServers"]["qgis-workflows"]
+    assert entry["env"]["DROPBOX_ROOT"] == "H:/Dropbox"
+
+
+def test_client_config_without_dropbox_root_has_no_env(install_mod, monkeypatch):
+    monkeypatch.delenv("DROPBOX_ROOT", raising=False)
+    assert "env" not in install_mod._server_entry("claude-desktop", remote=False)
+
+
+def test_zed_entry_carries_dropbox_root(install_mod, monkeypatch):
+    monkeypatch.setenv("DROPBOX_ROOT", "/Users/north/Dropbox")
+    entry = install_mod._server_entry("zed", remote=False)
+    assert entry["command"]["env"]["DROPBOX_ROOT"] == "/Users/north/Dropbox"
+
+
+def test_tracked_mcp_json_never_gets_a_machine_path(install_mod, monkeypatch):
+    monkeypatch.setenv("DROPBOX_ROOT", "H:/Dropbox")
+    assert "env" not in install_mod._server_entry("cursor", remote=False, pass_env=False)
+
+
+def test_project_local_config_never_gets_dropbox_root(install_mod, monkeypatch, tmp_path):
+    # .vscode/mcp.json lives in the Dropbox-synced repo: another machine would
+    # inherit this machine's root.
+    monkeypatch.setenv("DROPBOX_ROOT", "H:/Dropbox")
+    cfg = tmp_path / "proj" / "mcp.json"
+    monkeypatch.setattr(install_mod, "_client_registry",
+                        lambda: {"vscode": {"path": cfg, "key": "mcpServers", "project_local": True}})
+    install_mod.configure_client("vscode", remote=False)
+    entry = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["qgis-workflows"]
+    assert "env" not in entry

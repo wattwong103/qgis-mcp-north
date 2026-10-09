@@ -3,6 +3,22 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased — figure provenance (sidecar core)
+
+### Added
+
+- Every file a tool writes through MCP gets `<file>.provenance.json`: the call
+  with all arguments, inputs fingerprinted before the call (sha256 up to 256 MB),
+  the file's own sha256 (a later overwrite shows as a stale sidecar; files above
+  the hash cap carry size + mtime only), `made_by`
+  links verified by fingerprint, a result summary and the environment (package,
+  git commit, extras, QGIS/plugin version when the call used QGIS). Paths under
+  `$DROPBOX_ROOT` are portable across machines. Disable with
+  `QGIS_MCP_WORKFLOWS_PROVENANCE=0`. Replay (`qgis_export_session`) follows in
+  TASK-13.
+- `install.py` writes `DROPBOX_ROOT` into GUI MCP client configs (never into the
+  tracked `.mcp.json`).
+
 ## Unreleased — batch render and project reads
 
 ### Fixed

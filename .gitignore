@@ -47,3 +47,6 @@ openspec/
 
 # ai-sdlc worktrees and the active-task sentinel are per clone (sh .githooks/setup.sh)
 .worktrees/
+
+# Figure provenance sidecars hold machine paths and query/eval text; keep them local.
+*.provenance.json
