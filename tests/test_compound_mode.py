@@ -290,3 +290,35 @@ async def test_compound_render_writes_a_sidecar(compound_module, fake_executor, 
     assert record["call"]["arguments"]["mode"] == "choropleth"
     zones = next(i for i in record["inputs"] if i["argument"] == "zones_path")
     assert zones["missing"] is True  # a path that does not exist
+
+
+async def test_compound_mode_feeds_the_ledger(compound_module, fake_executor, tmp_path, monkeypatch):
+    import json
+
+    from qgis_mcp_workflows import provenance
+
+    monkeypatch.setenv("DROPBOX_ROOT", str(tmp_path))
+    provenance.reset_for_tests()
+    server_module, _ = compound_module
+    png = tmp_path / "m.png"
+    fake_executor.responses["add_vector_layer"] = {"id": "L1", "name": "zones"}
+    fake_executor.responses["get_layer_info"] = {
+        "type": "vector_2", "crs": "EPSG:4326", "extent": {"xmin": 0, "ymin": 0, "xmax": 1, "ymax": 1},
+        "feature_count": 4, "fields": [{"name": "zone_id", "type": "String", "n_unique": 4}],
+    }
+    fake_executor.responses["set_layer_style"] = {"ok": True, "n_classes": 1, "classes": []}
+
+    def render(params):
+        png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+        return {"output_path": str(png), "width": 1, "height": 1, "dpi": 150,
+                "extent": [0, 0, 1, 1], "crs": "EPSG:4326", "n_layers": 1}
+
+    fake_executor.responses["render_layers_to_path"] = render
+    await server_module.mcp.call_tool("qgis_inspect", {"kind": "layer", "path": str(tmp_path / "z.geojson"),
+                                                       "register": True})
+    await server_module.mcp.call_tool("qgis_style", {"type": "categorized", "layer_id": "L1", "field": "zone_id"})
+    await server_module.mcp.call_tool("qgis_render", {"mode": "map", "layer_ids": ["L1"], "output_png": str(png)})
+    deps = json.loads((tmp_path / "m.png.provenance.json").read_text(encoding="utf-8"))["depends_on"]
+    assert [(d["call"]["module"], d["call"]["tool"]) for d in deps] == [("compound", "qgis_inspect"),
+                                                                       ("compound", "qgis_style")]
+    provenance.reset_for_tests()

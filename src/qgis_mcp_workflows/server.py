@@ -2989,11 +2989,6 @@ def qgis_export_session(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False, idempotentHint=False, destructiveHint=True, openWorldHint=True
-    )
-)
 def qgis_eval(
     code: Annotated[str, Field(description="PyQGIS source to execute.")],
     return_vars: Annotated[list[str] | None, Field(description="Local variable names to capture from the executed scope and return JSON-serialized.")] = None,
@@ -3030,6 +3025,15 @@ def qgis_eval(
         return_values=result.get("return_values") if return_vars is not None else None,
         exception=exception_text,
     )
+
+
+# Registered through the provenance hook so successful evals enter the state
+# ledger (spec §6); the module keeps the plain function for Python callers.
+mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=False, destructiveHint=True, openWorldHint=True
+    )
+)(with_provenance(qgis_eval))
 
 
 # Trigger compound-mode tool registration if env var requested it.
