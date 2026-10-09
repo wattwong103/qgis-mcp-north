@@ -14,6 +14,8 @@ import logging
 import os
 import stat
 import threading
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger("qgis_mcp_workflows.provenance")
 
@@ -128,3 +130,94 @@ def fingerprint(path: str) -> dict:
 def reset_for_tests() -> None:
     with _cache_lock:
         _hash_cache.clear()
+
+
+INPUT_ARGS = frozenset({
+    "path", "zones_path", "zones_layer_path", "value_csv", "input_path", "input_csv", "od_csv",
+    "load_csv", "drm_network_path", "network_path", "rail_network_path", "db_path", "layer_path",
+    "points_path", "join_path", "target_path", "raster_path", "qgz_path", "template_qgz",
+    "template_pptx",
+})
+INPUT_LIST_ARGS = frozenset({"trajectory_csvs", "layer_paths", "figure_paths", "basemap_paths"})
+OUTPUT_ARGS = frozenset({"output_png", "output_path", "output_csv", "output_dir", "pptx_path"})
+NOT_PATH_ARGS = frozenset({"basemap", "query", "filename_template", "basemap_opacity"})
+# A tool parameter whose name contains one of these must be in one of the sets
+# above (drift guard in tests/test_provenance.py).
+PATH_HINTS = ("path", "csv", "png", "dir", "qgz", "pptx", "db", "file", "basemap")
+
+# Written files come from the result model (an atlas writes files its arguments
+# never name; AtlasExportResult.output_path can be the directory itself).
+# Looked up along the class MRO, so RenderResult covers every render result.
+WRITTEN_BY_MODEL: dict[str, Callable[[Any], list[str]]] = {
+    "AtlasExportResult": lambda r: list(r.files),
+    "BatchRenderResult": lambda r: [m.output_path for m in r.manifest],
+    "PptxResult": lambda r: [r.pptx_path],
+    "RouteResult": lambda r: [r.output_csv],
+    "SectionLoadResult": lambda r: [r.output_csv],
+    "RenderResult": lambda r: [r.output_path],
+    "ExportResult": lambda r: [r.output_path],
+    "ComposeLayoutResult": lambda r: [r.output_path],
+    "SpatialJoinResult": lambda r: [r.output_path],
+    "ZonalStatsResult": lambda r: [r.output_path],
+}
+_SUMMARY_SKIP = frozenset({"output_path", "output_csv", "output_dir", "pptx_path", "files", "manifest"})
+_SUMMARY_MAX_LIST = 50
+
+
+def input_paths(args: dict) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    for name, value in args.items():
+        if value is None or value == "" or value == []:
+            continue
+        if name in INPUT_ARGS:
+            found.append((name, normalise(str(value))))
+        elif name in INPUT_LIST_ARGS:
+            found.extend((name, normalise(str(v))) for v in value)
+    return found
+
+
+def implicit_input_paths(tool: str, args: dict) -> list[tuple[str, str]]:
+    """Files a tool reads without an argument naming them."""
+    from qgis_mcp_workflows.helpers import bundled_asset
+
+    deck_call = tool == "qgis_figures_to_pptx" or (tool == "qgis_export" and args.get("kind") == "pptx")
+    if deck_call and not args.get("template_pptx"):
+        bundled = bundled_asset("assets", "sekilab_blank.pptx")
+        if bundled:
+            return [("template_pptx (bundled)", normalise(bundled))]
+    return []
+
+
+def written_files(result: Any) -> list[str]:
+    for cls in type(result).__mro__:
+        extract = WRITTEN_BY_MODEL.get(cls.__name__)
+        if extract is None:
+            continue
+        seen: list[str] = []
+        for path in extract(result):
+            if path and snapshot(path) is not None:
+                norm = normalise(path)
+                if norm not in seen:
+                    seen.append(norm)
+        return seen
+    return []
+
+
+def _scalar(value: Any) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _summarisable(value: Any) -> bool:
+    """A scalar, or a short list of scalars (breaks, colours) — never nested data."""
+    if isinstance(value, list):
+        return len(value) <= _SUMMARY_MAX_LIST and all(map(_scalar, value))
+    return _scalar(value)
+
+
+def result_summary(result: Any) -> dict:
+    """Decision fields of the result (breaks, counts, flags) for replay diffs."""
+    return {
+        key: value
+        for key, value in result.model_dump(mode="json").items()
+        if key not in _SUMMARY_SKIP and not key.endswith("_path") and _summarisable(value)
+    }
