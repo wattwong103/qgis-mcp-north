@@ -13,6 +13,7 @@ import pytest
 
 from qgis_mcp_workflows import provenance, replay
 from qgis_mcp_workflows.errors import QgisMcpWorkflowsError
+from tests.mcp_compat import field
 
 
 def _png() -> bytes:
@@ -145,4 +146,4 @@ def test_export_fails_when_nothing_can_be_replayed(server, root):
 
 async def test_export_session_is_marked_destructive(server):
     [tool] = [t for t in await server.mcp.list_tools() if t.name == "qgis_export_session"]
-    assert tool.annotations.destructiveHint is True   # overwrite=True replaces a file
+    assert field(tool.annotations, "destructiveHint") is True   # overwrite=True replaces a file
