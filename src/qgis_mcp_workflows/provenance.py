@@ -190,6 +190,8 @@ WRITTEN_BY_MODEL: dict[str, Callable[[Any], list[str]]] = {
     "SpatialJoinResult": lambda r: [r.output_path],
     "ZonalStatsResult": lambda r: [r.output_path],
 }
+# Results that name a file which is not a figure: the replay script itself.
+NOT_RECORDED_MODELS = frozenset({"SessionExportResult"})
 _SUMMARY_SKIP = frozenset({"output_path", "output_csv", "output_dir", "pptx_path", "files", "manifest"})
 _SUMMARY_MAX_LIST = 50
 

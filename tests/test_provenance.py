@@ -149,6 +149,7 @@ def test_every_result_model_with_a_path_field_has_an_extractor():
     uncovered = sorted({
         cls.__name__ for cls in _result_models()
         if path_fields & set(cls.model_fields)
+        and cls.__name__ not in provenance.NOT_RECORDED_MODELS
         and not any(c.__name__ in provenance.WRITTEN_BY_MODEL for c in cls.__mro__)
     })
     assert uncovered == []

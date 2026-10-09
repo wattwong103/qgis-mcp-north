@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `qgis-mcp-workflows` (v1.14.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
 
 Key differences from upstream:
-- 25 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
+- 26 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
 - Two transports: `plugin` (TCP socket → running QGIS) and `headless` (PyQGIS subprocess), selected via `--transport=auto|plugin|headless`.
 - Plugin folder: `qgis_mcp_workflows_plugin/`. Python package: `qgis-mcp-workflows` (importable as `qgis_mcp_workflows`). Default socket port: **9877** (vs upstream 9876). Both servers can run side-by-side.
 
@@ -82,7 +82,7 @@ uv tool run ruff check src/ tests/
 | `QGIS_MCP_WORKFLOWS_PROVENANCE_HASH_MAX_MB` | `256` | Inputs above this get size + mtime instead of sha256 |
 | `DROPBOX_ROOT` | (per machine) | Provenance stores paths under it as `${DROPBOX_ROOT}/…`; `install.py` passes it into GUI client configs |
 
-## MCP Tools (26 total as of v1.14; 5 grouped tools in compound mode. See `docs/DESIGN.md` §4 for full signatures.)
+## MCP Tools (27 total as of v1.14; 5 grouped tools in compound mode. See `docs/DESIGN.md` §4 for full signatures.)
 
 | Tool | Status | Notes |
 |---|---|---|
@@ -104,6 +104,7 @@ uv tool run ruff check src/ tests/
 | `qgis_compose_layout` | ✅ v1.4 | Programmatic `QgsPrintLayout`: titled map panel + linked legend / scale bar / north arrow, export PNG/PDF/SVG. Complements `export_layout` (which only exports pre-authored `.qgz`). |
 | `qgis_batch_render` | ✅ v0.5 | Fan-out per attribute value; filters `layer=` or the top-most visible vector layer (named in `target_layer`); draws only visible layers; refused filters reported per value; template filter restored in `finally` |
 | `qgis_figures_to_pptx` | ✅ v0.3 / v1.8 | Pure python-pptx. `two_column` pairs figures; `title_image_caption` splits a newline in the caption into title vs body. |
+| `qgis_export_session` | ✅ v1.15 | Replay script from provenance sidecars (AST-built; input check; `--out-dir`/`--in-place`); follows `made_by` chains; full mode only |
 | `qgis_list_basemaps` | ✅ v1.5 | Discovery for `basemap=`: built-in presets + every usable QuickMapServices source in the QGIS profile, plus `qms_rejected` explaining what was filtered (non-3857 CRS, licence-restricted providers) and why. |
 | `qgis_render_from_duckdb` | ✅ v1.6 | Query a DuckDB file and render the result — no CSV intermediate. Geometry via `geometry_column` (WKT text) or `lon_column`/`lat_column`. Connection is READ-ONLY and the query is LIMIT-wrapped, so a mistaken `SELECT *` against a multi-GB store (e.g. `output/viz/kichijoji.duckdb`, ~10M waypoints) can neither mutate nor OOM. Plugin handler: `render_wkt_features`. |
 | `qgis_export_atlas` | ✅ v1.11 | Export every page of a print-layout atlas (PNG per feature or one PDF). |
