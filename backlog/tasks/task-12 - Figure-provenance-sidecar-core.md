@@ -26,5 +26,5 @@ First of four PRs for figure provenance (`docs/superpowers/specs/2026-10-08-figu
 - [x] #3 Portable paths per spec §8 (component match, realpath, no ~/Dropbox fallback); install.py writes DROPBOX_ROOT into client config env
 - [x] #4 Atomic write (mkstemp + fsync + replace with retry); a failed write deletes the stale sidecar; tool results and schemas unchanged
 - [x] #5 Environment never spawns headless for pure-Python tools and never caches a failure
-- [ ] #6 pytest + ruff green; DESIGN §5, .gitignore, CHANGELOG updated
+- [x] #6 pytest + ruff green; DESIGN §5, .gitignore, CHANGELOG updated
 <!-- AC:END -->
