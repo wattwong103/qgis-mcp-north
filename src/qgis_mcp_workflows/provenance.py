@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import contextlib
 import datetime as _dt
+import functools
 import hashlib
 import importlib.metadata
 import importlib.util
+import inspect
+import itertools
 import json
 import logging
 import os
@@ -22,10 +25,13 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from qgis_mcp_workflows.executors import executor_requests
 
 logger = logging.getLogger("qgis_mcp_workflows.provenance")
 
@@ -355,3 +361,131 @@ def write_sidecar(figure: str, record: dict) -> bool:
         if tmp is not None:
             with contextlib.suppress(OSError):
                 os.remove(tmp)
+
+
+SESSION_ID = uuid.uuid4().hex
+_seq_counter = itertools.count(1)
+_seq_lock = threading.Lock()
+
+
+def enabled() -> bool:
+    return os.environ.get("QGIS_MCP_WORKFLOWS_PROVENANCE", "1").strip() != "0"
+
+
+def _next_seq() -> int:
+    with _seq_lock:
+        return next(_seq_counter)
+
+
+def _portable_arguments(args: dict) -> dict:
+    out: dict = {}
+    for name, value in args.items():
+        if name in INPUT_ARGS | OUTPUT_ARGS and value not in (None, ""):
+            out[name] = portable(str(value))[0]
+        elif name in INPUT_LIST_ARGS and value:
+            out[name] = [portable(str(v))[0] for v in value]
+        else:
+            out[name] = value
+    return json.loads(json.dumps(out, default=str))
+
+
+def _flag(machine_specific: list[dict], path: str) -> None:
+    stored, reason = portable(path)
+    entry = {"path": stored, "reason": reason}
+    if reason and entry not in machine_specific:
+        machine_specific.append(entry)
+
+
+def _made_by(path: str, digest: str | None) -> str | None:
+    """The producer's sidecar, only if it vouches for exactly these bytes."""
+    if digest is None:
+        return None
+    side = sidecar_path(path)
+    try:
+        with open(side, encoding="utf-8") as fh:
+            producer = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return portable(side)[0] if producer.get("figure_sha256") == digest else None
+
+
+def _remote(args: dict, machine_specific: list[dict]) -> list[dict]:
+    basemap = args.get("basemap")
+    if not basemap:
+        return []
+    if str(basemap).startswith("qms:"):
+        machine_specific.append({"path": str(basemap),
+                                 "reason": "QuickMapServices source from the local QGIS profile"})
+    return [{"argument": "basemap", "value": basemap, "note": "tiles are fetched live and not pinned"}]
+
+
+def _record(tool: str, module: str, call_args: dict, before: dict, prints: list[dict],
+            implicit: list[dict], seq: int, requests_before: int, result: Any, elapsed: float) -> None:
+    figures = written_files(result)
+    if not figures:
+        return
+    machine_specific: list[dict] = []
+    for entry in prints + implicit:
+        path = entry.pop("_path")
+        entry["changed_during_call"] = snapshot(path) != before[path]
+        entry["made_by"] = _made_by(path, entry["sha256"])
+        _flag(machine_specific, path)
+    written = {portable(f)[0] for f in figures}
+    unrecorded = [f"input overwritten by this call: {e['argument']}" for e in prints if e["path"] in written]
+    for figure in figures:
+        _flag(machine_specific, figure)
+    shared = {
+        "session_id": SESSION_ID,
+        "seq": seq,
+        "created": _utc(time.time()),
+        "call": {"tool": tool, "module": module, "arguments": _portable_arguments(call_args)},
+        "result_summary": result_summary(result),
+        "depends_on": [],
+        "inputs": prints,
+        "implicit_inputs": implicit,
+        "remote": _remote(call_args, machine_specific),
+        "unrecorded_state": unrecorded,
+        "machine_specific": machine_specific,
+        "outputs": [portable(f)[0] for f in figures],
+        "environment": environment(executor_requests() > requests_before),
+        "elapsed_s": round(elapsed, 3),
+    }
+    for figure in figures:
+        fp = fingerprint(figure)
+        write_sidecar(figure, {"schema": SCHEMA, "figure": fp["path"], "figure_sha256": fp["sha256"],
+                               "figure_bytes": fp["bytes"], **shared})
+
+
+def with_provenance(fn: Callable) -> Callable:
+    """Wrap a tool so each successful MCP call leaves a sidecar per written file."""
+    signature = inspect.signature(fn)
+    module = "compound" if fn.__module__.endswith(".compound") else "server"
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if not enabled():
+            return fn(*args, **kwargs)
+        try:
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            call_args = dict(bound.arguments)
+            explicit = input_paths(call_args)
+            hidden = implicit_input_paths(fn.__name__, call_args)
+            before = {path: snapshot(path) for _, path in explicit + hidden}
+            prints = [{"argument": name, **fingerprint(path), "_path": path} for name, path in explicit]
+            implicit = [{"argument": name, **fingerprint(path), "_path": path} for name, path in hidden]
+            seq = _next_seq()
+            requests_before = executor_requests()
+        except Exception:
+            logger.warning("provenance: could not prepare a record for %s", fn.__name__, exc_info=True)
+            return fn(*args, **kwargs)
+        started = time.monotonic()
+        result = fn(*args, **kwargs)  # a failing call records nothing
+        try:
+            _record(fn.__name__, module, call_args, before, prints, implicit, seq,
+                    requests_before, result, time.monotonic() - started)
+        except Exception:
+            logger.warning("provenance: recording failed for %s", fn.__name__, exc_info=True)
+        return result
+
+    return wrapper

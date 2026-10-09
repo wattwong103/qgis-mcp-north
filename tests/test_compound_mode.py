@@ -259,3 +259,32 @@ async def test_compound_render_with_real_png_returns_preview(compound_module, fa
     assert isinstance(out, CallToolResult)
     assert any(isinstance(b, ImageContent) for b in out.content)
     assert out.structuredContent["result"]["output_path"] == str(png)
+
+
+async def test_compound_render_writes_a_sidecar(compound_module, fake_executor, tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("DROPBOX_ROOT", str(tmp_path))
+    server_module, _ = compound_module
+    png = tmp_path / "c.png"
+
+    def respond(params):
+        png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+        return {
+            "output_path": str(png), "width": 800, "height": 600, "dpi": 150,
+            "extent": [139.5, 35.5, 140.0, 35.9], "crs": "EPSG:4326", "n_layers": 1,
+            "field": "fid", "n_classes": 5, "breaks": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "mode": "quantile", "min_value": 1.0, "max_value": 6.0,
+            "n_features": 23, "n_matched": 23, "n_unmatched": 0,
+        }
+
+    fake_executor.responses["render_choropleth"] = respond
+    await server_module.mcp.call_tool(
+        "qgis_render",
+        {"mode": "choropleth", "zones_path": "/zones.gpkg", "value_field": "fid", "output_png": str(png)},
+    )
+    record = json.loads((tmp_path / "c.png.provenance.json").read_text(encoding="utf-8"))
+    assert record["call"]["tool"] == "qgis_render" and record["call"]["module"] == "compound"
+    assert record["call"]["arguments"]["mode"] == "choropleth"
+    zones = next(i for i in record["inputs"] if i["argument"] == "zones_path")
+    assert zones["missing"] is True  # a path that does not exist

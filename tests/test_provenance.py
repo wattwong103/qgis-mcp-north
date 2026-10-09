@@ -6,7 +6,9 @@ import hashlib
 import inspect
 import json
 import os
+import threading
 import typing
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
@@ -265,3 +267,38 @@ def test_write_sidecar_mkstemp_failure(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provenance.tempfile, "mkstemp", no_space)
     assert provenance.write_sidecar(str(fig), {"schema": "x"}) is False
+
+
+# --- Task 7: decorator helpers ----------------------------------------------------
+
+
+def test_enabled_reads_env_per_call(monkeypatch):
+    monkeypatch.setenv("QGIS_MCP_WORKFLOWS_PROVENANCE", "0")
+    assert provenance.enabled() is False
+    monkeypatch.setenv("QGIS_MCP_WORKFLOWS_PROVENANCE", "1")
+    assert provenance.enabled() is True
+
+
+def test_seq_unique_across_threads():
+    seen: list[int] = []
+    lock = threading.Lock()
+
+    def take():
+        for _ in range(200):
+            value = provenance._next_seq()
+            with lock:
+                seen.append(value)
+
+    threads = [threading.Thread(target=take) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(seen) == len(set(seen)) == 1600
+
+
+def test_portable_arguments_serialises_tuples_and_paths(monkeypatch, tmp_path):
+    monkeypatch.setenv("DROPBOX_ROOT", str(tmp_path))
+    out = provenance._portable_arguments(
+        {"extent": (1, 2, 3, 4), "zones_path": Path(tmp_path / "z.gpkg"), "palette": "gufm"})
+    assert out == {"extent": [1, 2, 3, 4], "zones_path": "${DROPBOX_ROOT}/z.gpkg", "palette": "gufm"}
