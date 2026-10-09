@@ -37,4 +37,7 @@ Plan: docs/superpowers/plans/2026-10-09-export-session.md (11 tasks). Deviations
 - #3: mtime is not compared at all (no warning row) - Dropbox sync rewrites mtimes, so the row would fire on every synced file.
 - #5: the live replay test renders a trajectory (tests/fixtures/tiny_trajectory.csv), not a choropleth; same record -> export -> fresh-process replay path.
 - #6: this repo has no AGENTS.md; counts bumped in CLAUDE.md, README, DESIGN, SERVER_INSTRUCTIONS.
+- Spec §7 "project reset between sessions" is not emitted: state-reading calls are skipped until TASK-15, so no replayed step reads project state.
+
+Review fix pass (code/python/security reviewers, 2026-10-09): replayable tools limited to those that record sidecars (a planted sidecar could emit qgis_eval); arguments must agree with recorded inputs/outputs; hash-verified made_by and intermediates; per-fingerprint source checks; batch file-name, network-path, malformed/oversized-sidecar gates; cross-OS out-dir mapping; DuckDB queries not replayed.
 <!-- SECTION:NOTES:END -->

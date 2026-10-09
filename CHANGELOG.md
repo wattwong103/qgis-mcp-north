@@ -19,12 +19,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   replay script from those sidecars (TASK-13). It follows `made_by` chains back
   to source data and runs one step per recorded call, producers first. The
   script is built as an AST from a fixed skeleton, so sidecar values only ever
-  become literals; tool and argument names must exist. Before running, it
-  checks every source input (sha256, else size) and exits 2 on a mismatch
-  unless `--force`. Outputs go under `replay_<date>/` beside the script
-  (`--out-dir` to choose; `--in-place --yes` to overwrite, refused when an
-  output is also an input). Figures it cannot replay are listed with a fixed
-  reason (`no sidecar`, `stale sidecar: figure changed`, `unknown tool`,
+  become literals. A sidecar is untrusted, so only tools that record sidecars
+  are replayed (never `qgis_eval`; recorded DuckDB queries neither), and a
+  call's path arguments must match its recorded inputs and outputs. An input
+  counts as re-made by an earlier step only when the hashes match. Before
+  running, the script checks every source input (sha256, else size) and exits 2
+  on a mismatch unless `--force`. Outputs go under `replay_<date>/` beside the
+  script (`--out-dir` to choose; `--in-place --yes` to overwrite, refused when
+  an output is also an input, and limited to the declared outputs). Figures it
+  cannot replay are listed with a fixed reason (`no sidecar`, `malformed
+  sidecar`, `unknown tool`, `network path`, `runs a recorded query`, `arguments
+  disagree with sidecar`, `unsafe file name`, `stale sidecar: figure changed`,
   `needs session state` for `qgis_render_map` until TASK-15).
 - `install.py` writes `DROPBOX_ROOT` into GUI MCP client configs (never into the
   tracked `.mcp.json`).
