@@ -2979,7 +2979,7 @@ def qgis_export_session(
     and skipped figures with fixed reasons (no sidecar, stale sidecar, unknown
     tool, needs session state, ...).
     """
-    from qgis_mcp_workflows.replay import export_session
+    from qgis_mcp_workflows.session_export import export_session
 
     return SessionExportResult(**export_session(output_py, figures=figures, folder=folder, overwrite=overwrite))
 
