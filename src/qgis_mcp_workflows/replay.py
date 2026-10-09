@@ -19,9 +19,11 @@ import datetime as _dt
 import inspect
 import json
 import os
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from qgis_mcp_workflows.provenance import (
     ROOT_TOKEN,
@@ -258,3 +260,72 @@ def collect(figures: list[str] | None, folder: str | None) -> tuple[list[dict], 
             if isinstance(link, str):
                 queue.append(_local(link))
     return records, skipped, warnings
+
+
+_TEXT_MAX = 200
+_PROJECT_TOOLS = frozenset({"qgis_export_layout", "qgis_export_atlas", "qgis_batch_render"})
+
+
+def _clean(text: Any) -> str:
+    return re.sub(r"[\x00-\x1f\x7f]", " ", str(text))[:_TEXT_MAX]
+
+
+def _call_key(record: dict) -> tuple[str, int]:
+    seq = record.get("seq")
+    return str(record.get("session_id")), seq if isinstance(seq, int) else 0
+
+
+def plan_steps(records: list[dict]) -> list[dict]:
+    """One step per (session_id, seq), producers before consumers, then by key."""
+    by_key: dict[tuple[str, int], dict] = {}
+    for record in records:
+        by_key.setdefault(_call_key(record), record)
+    produced = {out: key for key, rec in by_key.items() for out in rec.get("outputs") or []}
+    needs = {
+        key: {produced[i["path"]] for i in rec.get("inputs") or []
+              if isinstance(i, dict) and produced.get(i.get("path")) not in (None, key)}
+        for key, rec in by_key.items()
+    }
+    ordered: list[tuple[str, int]] = []
+    while len(ordered) < len(by_key):
+        waiting = sorted(k for k in by_key if k not in ordered)
+        ready = [k for k in waiting if needs[k] <= set(ordered)]
+        ordered.append((ready or waiting)[0])  # a cycle falls back to key order
+    return [by_key[k] for k in ordered]
+
+
+def outputs_of(steps: list[dict]) -> list[str]:
+    seen: list[str] = []
+    for step in steps:
+        seen.extend(o for o in step.get("outputs") or [] if o not in seen)
+    return seen
+
+
+def source_inputs(steps: list[dict]) -> list[dict]:
+    """Inputs the script checks: everything not produced by one of its own steps."""
+    produced = set(outputs_of(steps))
+    found: dict[str, dict] = {}
+    for step in steps:
+        for entry in (step.get("inputs") or []) + (step.get("implicit_inputs") or []):
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if isinstance(path, str) and path not in produced and path not in found:
+                found[path] = {"path": path, "sha256": entry.get("sha256"), "bytes": entry.get("bytes")}
+    return list(found.values())
+
+
+def notes_for(steps: list[dict]) -> list[str]:
+    notes: list[str] = []
+    for n, step in enumerate(steps, 1):
+        tool = step["call"]["tool"]
+        kind = step["call"]["arguments"].get("kind")
+        if tool in _PROJECT_TOOLS or (tool == "qgis_export" and kind in ("layout", "atlas", "batch")):
+            notes.append(f"step {n}: reads its .qgz from disk; styling applied earlier in the session is not recorded")
+        for text in step.get("unrecorded_state") or []:
+            notes.append(f"step {n}: {_clean(text)}")
+        for entry in step.get("machine_specific") or []:
+            if isinstance(entry, dict):
+                notes.append(f"step {n}: machine-specific {_clean(entry.get('path'))}")
+        for entry in step.get("remote") or []:
+            if isinstance(entry, dict):
+                notes.append(f"step {n}: {_clean(entry.get('argument'))} tiles are fetched live and not pinned")
+    return notes

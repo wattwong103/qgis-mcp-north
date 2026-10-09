@@ -216,3 +216,43 @@ def test_collect_rejects_non_object_sidecars(tmp_path):
     (tmp_path / "x.png.provenance.json").write_text("[]", encoding="utf-8")
     _, skipped, _ = replay.collect([str(fig)], None)
     assert _reasons(skipped) == ["no sidecar"]
+
+
+# --- Task 6: plan_steps, inputs, outputs, notes ----------------------------------------
+
+
+def _record(seq, outputs, inputs=(), tool="qgis_render_choropleth", session="s1", **call):
+    return {"session_id": session, "seq": seq, "outputs": list(outputs), "inputs": list(inputs),
+            "implicit_inputs": [], "unrecorded_state": [], "machine_specific": [], "remote": [],
+            "call": {"tool": tool, "module": "server", "arguments": call}}
+
+
+def test_sibling_outputs_share_one_step():
+    pages = [_record(5, ["a.png", "b.png"]), _record(5, ["a.png", "b.png"])]
+    assert len(replay.plan_steps(pages)) == 1
+
+
+def test_identical_calls_stay_two_steps():
+    assert len(replay.plan_steps([_record(1, ["x.png"]), _record(2, ["x.png"])])) == 2
+
+
+def test_producers_come_first():
+    consumer = _record(1, ["fig.png"], inputs=[{"path": "route.csv", "sha256": "h", "bytes": 1}])
+    producer = _record(9, ["route.csv"], tool="qgis_route_on_network")
+    assert [s["seq"] for s in replay.plan_steps([consumer, producer])] == [9, 1]
+
+
+def test_source_inputs_exclude_intermediates():
+    steps = replay.plan_steps([
+        _record(1, ["route.csv"], inputs=[{"path": "stops.csv", "sha256": "a", "bytes": 1}]),
+        _record(2, ["fig.png"], inputs=[{"path": "route.csv", "sha256": "b", "bytes": 1}]),
+    ])
+    assert [i["path"] for i in replay.source_inputs(steps)] == ["stops.csv"]
+    assert replay.outputs_of(steps) == ["route.csv", "fig.png"]
+
+
+def test_notes_are_cleaned_and_capped():
+    step = _record(1, ["x.png"])
+    step["unrecorded_state"] = ['bad' + chr(10) + '"""' + chr(27) + 'y' * 500]
+    [note] = [n for n in replay.notes_for([step]) if n.startswith("step 1")]
+    assert chr(10) not in note and chr(27) not in note and len(note) <= 260
