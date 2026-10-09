@@ -229,3 +229,32 @@ def test_atlas_pdf_failure_raises_with_the_export_code(headless, tmp_path):
     (out_dir / "atlas.pdf").mkdir(parents=True)  # a directory where the PDF must go
     with pytest.raises(ExecutorError, match="Atlas PDF export failed with code"):
         _export(headless, _atlas_qgz(headless, tmp_path), out_dir, "pdf")
+
+
+ZONES = os.path.join(os.path.dirname(__file__), "fixtures", "tiny_zones.geojson")
+
+
+def test_export_of_the_loaded_project_keeps_its_session_styles(headless, tmp_path):
+    """TASK-15: an export of the project that is already open reuses it (with its
+    session styles) instead of re-reading the file. On Windows the plugin compared
+    QGIS's forward-slash fileName() with the server's backslash path and re-read
+    every time, so restyled exports lost their styles."""
+    qgz = os.path.abspath(str(tmp_path / "reuse.qgz"))
+    build = (
+        "from qgis.core import QgsProject, QgsVectorLayer\n"
+        "p = QgsProject.instance(); p.clear()\n"
+        "lyr = QgsVectorLayer(zones, 'zones', 'ogr'); p.addMapLayer(lyr)\n"
+        "result = [lyr.id(), p.write(qgz)]\n"
+    )
+    layer_id, written = _run(headless, build, zones=ZONES, qgz=qgz)
+    assert written
+    headless.dispatch("project_load", {"qgz_path": qgz}, timeout=60)
+    headless.dispatch("set_layer_style", {"layer_id": layer_id, "style_type": "categorized", "field": "zone_id"},
+                      timeout=60)
+    with pytest.raises(Exception, match=r"(?i)layout"):  # no such layout; the project is opened first
+        headless.dispatch("export_layout", {"qgz_path": qgz, "layout_name": "nope",
+                                            "output_path": str(tmp_path / "x.png"), "format": "png", "dpi": 72},
+                          timeout=60)
+    probe = ("from qgis.core import QgsProject\n"
+             "result = QgsProject.instance().mapLayer(layer_id).renderer().type()\n")
+    assert _run(headless, probe, layer_id=layer_id) == "categorizedSymbol"

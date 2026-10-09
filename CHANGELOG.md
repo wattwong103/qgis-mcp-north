@@ -17,6 +17,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `DROPBOX_ROOT` need `trust_foreign=True`. The result reports `n_evals`. Any
   figure made after an eval, and state-reading figures recorded over the plugin
   transport, say so in `unrecorded_state`.
+- Replay scripts print each eval's size and a "N more lines not shown" marker,
+  `--show-evals` prints the full numbered code, and sidecar notes are printed only
+  after that decision. A replayed eval that fails stops the run (exit 1).
+  `trust_foreign` is decided from where a sidecar was found, not what it claims;
+  sidecars in shared folders inside `DROPBOX_ROOT` still count as local.
+
+### Fixed
+
+- On Windows, an export of the project that is already open now reuses it, with
+  its session styles, as documented; the plugin compared QGIS's forward-slash
+  `fileName()` with the server's backslash path and re-read the file every time.
+- Replay export refuses every Windows network spelling (`\/host`, `/\host`,
+  `\??\UNC\`, `\\?\UNC\`) and GDAL `/vsi…` paths, so neither the export nor
+  the script contacts another host.
 
 ## Unreleased — figure provenance (sidecar core)
 

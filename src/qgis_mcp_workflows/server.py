@@ -2967,7 +2967,7 @@ def qgis_export_session(
     figures: Annotated[list[str] | None, Field(description="Figure files (or their .provenance.json sidecars) to replay. Exactly one of figures / folder.")] = None,
     folder: Annotated[str | None, Field(description="Replay every figure with a sidecar in this folder (not recursive).")] = None,
     include_evals: Annotated[bool, Field(description="Replay recorded qgis_eval calls (the script still refuses to run them without --allow-eval).")] = True,
-    trust_foreign: Annotated[bool, Field(description="Keep evals from figures outside DROPBOX_ROOT (shared or other-machine sidecars).")] = False,
+    trust_foreign: Annotated[bool, Field(description="Keep evals from sidecars found outside DROPBOX_ROOT or not where they claim to be. A sidecar in a shared folder inside DROPBOX_ROOT counts as local: read the evals (--show-evals) before --allow-eval.")] = False,
     overwrite: Annotated[bool, Field(description="Replace an existing output_py.")] = False,
 ) -> SessionExportResult:
     """Write a script that re-makes figures from their provenance sidecars. Delivery tool.

@@ -4201,7 +4201,11 @@ class QgisMCPServer(QObject):
         returned so every caller can report them.
         """
         project = QgsProject.instance()
-        if force or project.fileName() != path:
+        # Compare as files, not strings: QGIS reports fileName() with forward
+        # slashes, the server sends Windows paths with backslashes.
+        current = project.fileName()
+        same = bool(current) and os.path.normcase(os.path.abspath(current)) == os.path.normcase(os.path.abspath(path))
+        if force or not same:
             project.clear()
             # Only a widget application can show the dialog (headless runs an
             # offscreen QApplication, where the timer simply never finds one).

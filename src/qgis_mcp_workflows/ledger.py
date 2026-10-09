@@ -40,6 +40,14 @@ def reset() -> None:
         _project = None
 
 
+def forget_project() -> None:
+    """A project load or export failed after the plugin may have switched projects."""
+    global _project
+    with _lock:
+        _layers.clear()
+        _project = None
+
+
 def kind(tool: str, args: dict) -> str | None:
     """What a call does to session state (full and compound tool names)."""
     if tool == "qgis_load_layer" or (tool == "qgis_inspect" and args.get("kind") == "layer"

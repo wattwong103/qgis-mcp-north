@@ -35,9 +35,10 @@ from qgis_mcp_workflows.provenance import (
     _writes_files,
     fingerprint,
     normalise,
+    portable,
     sidecar_path,
 )
-from qgis_mcp_workflows.replay import ReplayError, _clean, resolve
+from qgis_mcp_workflows.replay import ReplayError, _clean, _same, resolve
 
 MAX_SIDECARS = 200
 _SIDECAR_MAX_BYTES = 2 * 1024 * 1024
@@ -47,7 +48,6 @@ _QUERY_TOOLS = frozenset({"qgis_render_from_duckdb"})
 _MAX_DEPTH = 16
 _MAX_ITEMS = 10_000
 _NAME_BREAKERS = re.compile(r"[/\\:]")
-_GDAL_NETWORK = re.compile(r"/vsi[a-z0-9_]*/")
 
 
 def _load_sidecar(path: str) -> dict | None:
@@ -191,9 +191,15 @@ def _safe_file_names(arguments: dict) -> bool:
 
 
 def _network(path: Any) -> bool:
-    """UNC, URL or GDAL network path: opening it would contact another host."""
-    return isinstance(path, str) and (
-        path.startswith(("//", "\\\\")) or "://" in path or _GDAL_NETWORK.match(path) is not None)
+    """UNC, NT-namespace, URL or GDAL virtual path: opening it could contact another host.
+
+    Judged on the path with both separators unified, so Windows spellings such as
+    \\/host, /\\host, \\\\?\\UNC\\ and \\??\\UNC\\ cannot slip past.
+    """
+    if not isinstance(path, str):
+        return False
+    unified = path.replace("\\", "/")
+    return (unified.startswith(("//", "/??/")) or unified.lower().startswith("/vsi") or "://" in path)
 
 
 def _record_paths(record: dict) -> list:
@@ -218,6 +224,16 @@ _DEPENDENCY_TOOLS = frozenset({
 })
 
 
+def _utf8_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:  # a lone surrogate from a hand-made sidecar
+        return False
+    return True
+
+
 def _dependency_ok(entry: Any) -> bool:
     """A depends_on entry is a real ledger call whose paths are its recorded inputs."""
     from qgis_mcp_workflows import compound, server
@@ -226,8 +242,12 @@ def _dependency_ok(entry: Any) -> bool:
         return False
     call, seq, layer = entry["call"], entry.get("seq"), entry.get("layer_id")
     args = call.get("arguments")
-    key = (call.get("module"), call.get("tool"))
+    if not (isinstance(call.get("module"), str) and isinstance(call.get("tool"), str)):
+        return False
+    key = (call["module"], call["tool"])
     if key not in _DEPENDENCY_TOOLS or not isinstance(args, dict) or not _size_ok(args):
+        return False
+    if key[1] == "qgis_eval" and not _utf8_text(args.get("code")):
         return False
     if not (isinstance(seq, int) and not isinstance(seq, bool) and isinstance(layer, str | None)
             and _file_entries(entry.get("inputs", []))):
@@ -262,6 +282,25 @@ def _covers_state(record: dict) -> bool:
     return any(_qgz(d["call"]["tool"], d["call"]["arguments"]) == target for d in projects)
 
 
+def _foreign(record: dict) -> bool:
+    """Not under this machine's DROPBOX_ROOT, or not found where it claims to be.
+
+    Decided from where collect() actually read the sidecar (``located_at``), not
+    from the sidecar's own unsigned ``figure`` claim. A sidecar in a shared folder
+    inside DROPBOX_ROOT still counts as local: --allow-eval is the real gate.
+    """
+    located = record.get("located_at")
+    if not located:
+        return not record["figure"].startswith(ROOT_TOKEN)
+    if portable(located)[1] is not None:
+        return True
+    try:
+        claimed = resolve(record["figure"])
+    except ReplayError:
+        return True
+    return _same(claimed) != _same(located)
+
+
 def keep_evals(records: list[dict], include_evals: bool, trust_foreign: bool) -> tuple[list[dict], list[str]]:
     """Drop recorded evals the caller did not ask for, or does not trust (spec §7 Trust)."""
     kept: list[dict] = []
@@ -269,10 +308,11 @@ def keep_evals(records: list[dict], include_evals: bool, trust_foreign: bool) ->
     for record in records:
         deps = record.get("depends_on") or []
         evals = [d for d in deps if d["call"]["tool"] == "qgis_eval"]
-        foreign = not record["figure"].startswith(ROOT_TOKEN)
+        foreign = _foreign(record)
         if evals and (not include_evals or (foreign and not trust_foreign)):
             why = ("include_evals=False" if not include_evals
-                   else "the figure is outside DROPBOX_ROOT; pass trust_foreign=True to keep them")
+                   else "the sidecar is outside DROPBOX_ROOT or not where it says; "
+                        "pass trust_foreign=True to keep them")
             warnings.append(f"{_clean(record['figure'])}: {len(evals)} qgis_eval call(s) left out ({why})")
             record = {**record, "depends_on": [d for d in deps if d["call"]["tool"] != "qgis_eval"]}
         kept.append(record)
@@ -293,6 +333,8 @@ def _skip_reason(record: dict, figure: str) -> str | None:
     if not all(_dependency_ok(d) for d in deps):
         return "invalid depends_on"
     state_kind = ledger.kind(tool, args)
+    if state_kind == "map" and not _str_list(args.get("layer_ids") or []):
+        return "malformed sidecar"
     if deps and state_kind not in ("map", "export"):
         return "invalid depends_on"
     if (state_kind == "map" or deps) and not _covers_state(record):
@@ -350,7 +392,7 @@ def collect(figures: list[str] | None, folder: str | None) -> tuple[list[dict], 
         if reason:
             skipped.append({"figure": figure, "reason": reason})
             continue
-        records.append(record)
+        records.append({**record, "located_at": figure})  # where it was read, for _foreign
         for entry in record.get("inputs", []):
             link, digest = entry.get("made_by"), entry.get("sha256")
             if link and digest and link.endswith(SIDECAR_SUFFIX):
@@ -512,12 +554,16 @@ def _step_call(step: dict, layers: dict[str, str]) -> ast.stmt:
 
 def _dependency_call(dep: dict, layers: dict[str, str], names: Any) -> ast.stmt:
     """A replayed load binds layer_N to the id it produces; later calls use the name."""
-    call = _call(dep, layers)
+    call = _call({**dep, "replayed_inputs": []}, layers)  # a dependency reads only checked source inputs
+    kind = ledger.kind(dep["call"]["tool"], dep["call"]["arguments"])
     produced = dep.get("layer_id")
-    if ledger.kind(dep["call"]["tool"], dep["call"]["arguments"]) == "load" and produced:
+    if kind == "load" and produced:
         name = f"layer_{next(names)}"
         layers[produced] = name
         return ast.Assign([ast.Name(name, ast.Store())], ast.Attribute(call, "layer_id", ast.Load()))
+    if kind == "eval":  # only evals that succeeded were recorded: a failure at replay must stop it
+        check = ast.Attribute(ast.Name("replay", ast.Load()), "require_ok", ast.Load())
+        return ast.Expr(ast.Call(check, [call], []))
     return ast.Expr(call)
 
 
@@ -534,8 +580,10 @@ def evals_of(steps: list[dict]) -> list[dict]:
                 continue
             code = str(dep["call"]["arguments"].get("code", ""))
             digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
-            item = found.setdefault(digest, {"sha256": digest, "first_lines": [], "figures": []})
-            item["first_lines"] = [_clean(line) for line in code.splitlines()[:3]]
+            lines = code.splitlines()
+            item = found.setdefault(digest, {"sha256": digest, "first_lines": [], "figures": [],
+                                             "lines": len(lines), "bytes": len(code.encode("utf-8")), "code": code})
+            item["first_lines"] = [_clean(line) for line in lines[:3]]
             item["figures"] += [_clean(o) for o in step.get("outputs") or [] if _clean(o) not in item["figures"]]
     return list(found.values())
 
@@ -555,15 +603,16 @@ def build_script(steps: list[dict], inputs: list[dict], outputs: list[str], note
     body: list[ast.stmt] = []
     names = itertools.count(1)
     previous = None
+    previous_deps: list = []
     for step in steps:
         deps = step.get("dependencies") or []
         session = step.get("session_id")
-        if previous is not None and (deps or session != previous):
-            body.append(_reset())  # rebuilt state must not inherit layers or eval side effects
+        if previous is not None and (deps or previous_deps or session != previous):
+            body.append(_reset())  # neither side may inherit the other's layers, styles or eval side effects
         layers: dict[str, str] = {}
         body += [_dependency_call(d, layers, names) for d in deps]
         body.append(_step_call(step, layers))
-        previous = session
+        previous, previous_deps = session, deps
     steps_def.body = body or [ast.Pass()]
     return ast.unparse(ast.fix_missing_locations(tree)) + "\n"
 

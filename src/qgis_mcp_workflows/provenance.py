@@ -584,7 +584,14 @@ def with_provenance(fn: Callable) -> Callable:
             logger.warning("provenance: could not prepare a record for %s", fn.__name__, exc_info=True)
             return fn(*args, **kwargs)
         started = time.monotonic()
-        result = fn(*args, **kwargs)  # a failing call records nothing
+        try:
+            result = fn(*args, **kwargs)  # a failing call records nothing
+        except Exception:
+            # The plugin opens a project before it can fail (no such layout, bad file):
+            # QGIS may now hold another project, so the ledger stops vouching for one.
+            if ledger.kind(fn.__name__, call_args) in ("project", "export"):
+                ledger.forget_project()
+            raise
         if writes:
             try:
                 _record(fn.__name__, module, call_args, before, prints, implicit, seq,

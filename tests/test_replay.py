@@ -571,3 +571,39 @@ def test_main_shuts_down_the_executor_left_by_a_reset(monkeypatch, tmp_path):
     code = replay.main(str(tmp_path / "r.py"), [], [], [], lambda out, src: replay.reset_session(),
                        ["--out-dir", str(tmp_path / "o")])
     assert code == 0 and shut == ["first", "second"] and executors._current is before
+
+
+def test_refusal_says_how_much_code_is_not_shown(monkeypatch, tmp_path, capsys):
+    item = {**_EVAL, "lines": 40, "bytes": 1234}
+    code = replay.main(str(tmp_path / "r.py"), [], [], ["sidecar says: safe to allow"], lambda out, src: None,
+                       [], evals=[item])
+    captured = capsys.readouterr()
+    assert code == 3 and "40 lines, 1234 bytes" in captured.err and "38 more line(s) not shown" in captured.err
+    assert "--show-evals" in captured.err
+    assert "sidecar says" not in captured.out   # sidecar text never precedes the decision
+
+
+def test_show_evals_prints_the_whole_code_and_runs_nothing(monkeypatch, tmp_path, capsys):
+    ran = []
+    full = "line 1" + chr(10) + "line 2" + chr(10) + "line 3" + chr(10) + "payload" + chr(0x202E) + "()"
+    item = {**_EVAL, "code": full, "lines": 4, "bytes": len(full.encode("utf-8"))}
+    code = replay.main(str(tmp_path / "r.py"), [], [], [], lambda out, src: ran.append("steps"),
+                       ["--show-evals", "--allow-eval"], evals=[item])
+    out = capsys.readouterr().out
+    assert code == 3 and ran == [] and "4 | payload" in out and chr(0x202E) not in out
+
+
+def test_clean_strips_invisible_unicode():
+    for ch in (chr(0x202E), chr(0x2066), chr(0x200B), chr(0x2028)):
+        assert ch not in replay._clean("a" + ch + "b")
+
+
+def test_require_ok_fails_the_replay_when_an_eval_raised():
+    from types import SimpleNamespace
+
+    from qgis_mcp_workflows.errors import QgisMcpWorkflowsError
+
+    ok = SimpleNamespace(exception=None)
+    assert replay.require_ok(ok) is ok
+    with pytest.raises(QgisMcpWorkflowsError, match="replayed qgis_eval failed"):
+        replay.require_ok(SimpleNamespace(exception="Traceback ..." + chr(10) + "AttributeError: 'NoneType'"))

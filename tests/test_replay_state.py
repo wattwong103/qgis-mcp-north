@@ -206,3 +206,80 @@ def test_hostile_dependency_values_stay_literal():
     tree = ast.parse(_script([_record(10, deps=[hostile, _load(2)])]))
     imports = [n for n in ast.walk(tree) if isinstance(n, ast.Import | ast.ImportFrom)]
     assert [ast.unparse(n) for n in imports] == ["from qgis_mcp_workflows import compound, replay, server"]
+
+
+# --- final-review fixes ------------------------------------------------------------
+
+
+def test_a_step_after_a_rebuilt_block_starts_fresh():
+    atomic = {"session_id": "s1", "seq": 30, "figure": "${DROPBOX_ROOT}/c.png", "figure_sha256": None,
+              "call": {"tool": "qgis_render_choropleth", "module": "server",
+                       "arguments": {"zones_path": "${DROPBOX_ROOT}/z.gpkg", "value_field": "n",
+                                     "output_png": "${DROPBOX_ROOT}/c.png"}},
+              "depends_on": [], "inputs": [_in("zones_path", "${DROPBOX_ROOT}/z.gpkg")], "implicit_inputs": [],
+              "outputs": ["${DROPBOX_ROOT}/c.png"], "unrecorded_state": [], "machine_specific": [], "remote": []}
+    body = _body(_script([_record(10, deps=[_load(), _style(2, "a")]), atomic]))
+    assert body[-2] == "replay.reset_session()" and body[-1].startswith("server.qgis_render_choropleth(")
+
+
+@pytest.mark.parametrize("bad", [
+    {"seq": 1, "call": {"tool": ["qgis_eval"], "module": "server", "arguments": {"code": "x"}}},
+    {"seq": 1, "call": {"tool": "qgis_eval", "module": {}, "arguments": {"code": "x"}}},
+    _dep(1, "qgis_eval", code=["x = 1"]),
+    _dep(1, "qgis_eval", code="x = " + chr(0xD800)),
+])
+def test_malformed_dependencies_are_skipped_not_fatal(tmp_path, bad):
+    fig = _map_sidecar(tmp_path, deps=[_load(), bad])
+    ok = _map_sidecar(tmp_path, name="ok.png", deps=[_load()])
+    records, skipped, _ = session_export.collect([str(fig), str(ok)], None)
+    assert len(records) == 1 and _reasons(skipped) == ["invalid depends_on"]
+
+
+@pytest.mark.parametrize("layer_ids", [5, [["x"]], [{"a": 1}]])
+def test_malformed_layer_ids_are_skipped_not_fatal(tmp_path, layer_ids):
+    fig = _map_sidecar(tmp_path, deps=[_load()])
+    side = tmp_path / "m.png.provenance.json"
+    record = json.loads(side.read_text(encoding="utf-8"))
+    record["call"]["arguments"]["layer_ids"] = layer_ids
+    side.write_text(json.dumps(record), encoding="utf-8")
+    _, skipped, _ = session_export.collect([str(fig)], None)
+    assert _reasons(skipped) == ["malformed sidecar"]
+
+
+@pytest.mark.parametrize("path", [
+    "/" + chr(92) + "attacker.invalid/share/z.gpkg",
+    chr(92) + "/attacker.invalid/share/z.gpkg",
+    chr(92) + "??" + chr(92) + "UNC" + chr(92) + "attacker.invalid" + chr(92) + "share" + chr(92) + "z.gpkg",
+    chr(92) * 2 + "?" + chr(92) + "UNC" + chr(92) + "host" + chr(92) + "z.gpkg",
+    "/vsicurl?url=https%3A%2F%2Fattacker.invalid%2Fz.gpkg",
+])
+def test_every_network_spelling_is_refused(tmp_path, path):
+    fig = _map_sidecar(tmp_path, deps=[_load(path=path)])
+    _, skipped, _ = session_export.collect([str(fig)], None)
+    assert _reasons(skipped) == ["network path"]
+
+
+def test_a_sidecar_found_outside_dropbox_root_is_foreign_whatever_it_claims(tmp_path, monkeypatch):
+    root = tmp_path / "dropbox"
+    root.mkdir()
+    monkeypatch.setenv("DROPBOX_ROOT", str(root))
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    claimed = "${DROPBOX_ROOT}/colleague/m.png"
+    _map_sidecar(downloads, deps=[_dep(1, "qgis_eval", code="x = 1"), _load(2)], figure=claimed)
+    records, skipped, _ = session_export.collect([str(downloads / "m.png")], None)
+    assert skipped == []
+    kept, warnings = session_export.keep_evals(records, include_evals=True, trust_foreign=False)
+    assert [d["call"]["tool"] for d in kept[0]["depends_on"]] == ["qgis_load_layer"]
+    assert "trust_foreign=True" in warnings[0]
+
+
+def test_a_dependency_cannot_route_its_inputs_through_out():
+    smuggled = {**_load(), "replayed_inputs": ["${DROPBOX_ROOT}/z.gpkg"]}
+    body = _body(_script([_record(10, deps=[smuggled])]))
+    assert body[0] == "layer_1 = server.qgis_load_layer(path=src('${DROPBOX_ROOT}/z.gpkg')).layer_id"
+
+
+def test_replayed_evals_must_succeed():
+    body = _body(_script([_record(10, deps=[_dep(1, "qgis_eval", code="x = 1"), _load(2)])]))
+    assert body[0] == "replay.require_ok(server.qgis_eval(code='x = 1'))"

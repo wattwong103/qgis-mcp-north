@@ -139,3 +139,29 @@ async def test_project_export_after_restyle_is_state_reading(server, fake_execut
                                                       "output_path": str(root / "a4.png")})
     deps = _sidecar(root / "a4.png")["depends_on"]
     assert [d["call"]["tool"] for d in deps] == ["qgis_project_load", "qgis_style_categorized"]
+
+
+async def test_a_failed_project_export_forgets_the_project(server, fake_executor, root):
+    """The plugin opens the project before it can fail (e.g. no such layout): QGIS may
+    hold a different project afterwards, so the ledger must not vouch for the old one."""
+    qgz = root / "p.qgz"
+    qgz.write_bytes(b"qgz")
+    fake_executor.responses["project_load"] = {
+        "project_path": str(qgz), "crs": "EPSG:4326", "extent": [0, 0, 1, 1],
+        "layers": [{"layer_id": "P1", "name": "zones", "geometry_type": "polygon", "visible": True}],
+        "layouts": [{"name": "A4"}],
+    }
+    fake_executor.responses["set_layer_style"] = {"ok": True, "n_classes": 1, "classes": []}
+
+    def broken(params):
+        raise RuntimeError("plugin failed after opening the project")
+
+    fake_executor.responses["export_layout"] = broken
+    fake_executor.responses["render_layers_to_path"] = _render
+    await server.mcp.call_tool("qgis_project_load", {"qgz_path": str(qgz)})
+    await server.mcp.call_tool("qgis_style_categorized", {"layer_id": "P1", "field": "zone_id"})
+    with pytest.raises(Exception, match=r"plugin failed|Error executing tool"):  # mcp 2.x masks untyped errors
+        await server.mcp.call_tool("qgis_export_layout", {"qgz_path": str(root / "other.qgz"), "layout_name": "A4",
+                                                          "output_path": str(root / "a4.png")})
+    await server.mcp.call_tool("qgis_render_map", {"layer_ids": ["P1"], "output_png": str(root / "m.png")})
+    assert _sidecar(root / "m.png")["depends_on"] == []

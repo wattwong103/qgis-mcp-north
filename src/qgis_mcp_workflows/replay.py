@@ -46,9 +46,15 @@ def resolve(path: str) -> str:
 _TEXT_MAX = 200
 
 
+def _printable(text: Any) -> str:
+    """Every character a terminal would not show as itself (controls, bidi overrides,
+    zero-width and line-separator characters) becomes a space."""
+    return "".join(c if c.isprintable() else " " for c in str(text))
+
+
 def _clean(text: Any) -> str:
-    """Printable and short: C0 and C1 control characters (terminal escapes) become spaces."""
-    return re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(text))[:_TEXT_MAX]
+    """Printable and short."""
+    return _printable(text)[:_TEXT_MAX]
 
 
 def check_inputs(inputs: list[dict]) -> list[str]:
@@ -141,7 +147,9 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--yes", action="store_true", help="with --in-place: replace existing files")
     parser.add_argument("--force", action="store_true", help="replay even if source inputs changed")
     parser.add_argument("--allow-eval", action="store_true",
-                        help="run the recorded qgis_eval code (read it first: it is printed when this flag is missing)")
+                        help="run the recorded qgis_eval code (read it first with --show-evals)")
+    parser.add_argument("--show-evals", action="store_true",
+                        help="print the full recorded qgis_eval code, numbered, and run nothing")
     return parser.parse_args(argv)
 
 
@@ -156,14 +164,41 @@ def reset_session() -> None:
         shutdown()
 
 
+def require_ok(result: Any) -> Any:
+    """A replayed qgis_eval that raised inside QGIS fails the replay: only evals that
+    succeeded were recorded, so a failure means the replay has diverged."""
+    exception = getattr(result, "exception", None)
+    if exception:
+        from qgis_mcp_workflows.errors import QgisMcpWorkflowsError
+
+        last = str(exception).strip().splitlines() or [""]
+        raise QgisMcpWorkflowsError(
+            f"a replayed qgis_eval failed: {_clean(last[-1])}. Next: read it with --show-evals; "
+            "it may name a layer id or a path from the recording session.")
+    return result
+
+
 def _refuse_evals(evals: list[dict]) -> int:
-    print("this replay runs qgis_eval code recorded in the sidecars; read it, then re-run with --allow-eval:",
-          file=sys.stderr)
+    print("this replay runs qgis_eval code recorded in the sidecars; read all of it with --show-evals, "
+          "then re-run with --allow-eval:", file=sys.stderr)
     for item in evals:
         figures = ", ".join(_clean(f) for f in item.get("figures") or [])
-        print(f"  sha256 {_clean(item.get('sha256'))} (used by {figures})", file=sys.stderr)
-        for line in (item.get("first_lines") or [])[:3]:
+        lines, size = item.get("lines"), item.get("bytes")
+        print(f"  sha256 {_clean(item.get('sha256'))}: {lines} lines, {size} bytes (used by {figures})",
+              file=sys.stderr)
+        shown = (item.get("first_lines") or [])[:3]
+        for line in shown:
             print(f"    | {_clean(line)}", file=sys.stderr)
+        if isinstance(lines, int) and lines > len(shown):
+            print(f"    ... {lines - len(shown)} more line(s) not shown", file=sys.stderr)
+    return 3
+
+
+def _show_evals(evals: list[dict]) -> int:
+    for item in evals:
+        print(f"# qgis_eval sha256 {_clean(item.get('sha256'))}")
+        for n, line in enumerate(str(item.get("code", "")).splitlines(), 1):
+            print(f"{n:4} | {_printable(line)}")
     return 3
 
 
@@ -172,10 +207,13 @@ def main(script: str, inputs: list[dict], outputs: list[str], notes: list[str],
          evals: list[dict] | None = None) -> int:
     """Entry point of a generated replay script. Returns the process exit code."""
     args = _parse(argv)
-    for note in notes:
-        print(f"note: {note}")
+    # Decide about evals before any sidecar text is printed: notes come from sidecars too.
+    if evals and args.show_evals:
+        return _show_evals(evals)
     if evals and not args.allow_eval:
         return _refuse_evals(evals)
+    for note in notes:
+        print(f"note: {note}")
     try:
         if args.in_place and args.force:
             raise ReplayError("--in-place cannot be combined with --force")
