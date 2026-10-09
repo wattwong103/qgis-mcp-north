@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -135,3 +136,83 @@ def test_main_refuses_in_place_with_force(monkeypatch, tmp_path, capsys):
     code, ran = _run_main(tmp_path, monkeypatch, argv=["--in-place", "--force"])
     assert code == 2 and ran == []
     assert "cannot be combined" in capsys.readouterr().err
+
+
+# --- Task 5: collect -----------------------------------------------------------------
+
+
+def _sidecar(tmp_path, name, *, tool="qgis_render_choropleth", module="server", args=None,
+             data=b"png", seq=1, inputs=(), schema=None, session="s1"):
+    fig = tmp_path / name
+    fig.write_bytes(data)
+    record = {
+        "schema": schema or provenance.SCHEMA, "figure": str(fig),
+        "figure_sha256": hashlib.sha256(data).hexdigest(), "figure_bytes": len(data),
+        "session_id": session, "seq": seq,
+        "call": {"tool": tool, "module": module,
+                 "arguments": args if args is not None else {"zones_path": "/z.gpkg", "value_field": "n",
+                                                             "output_png": str(fig)}},
+        "inputs": list(inputs), "implicit_inputs": [], "outputs": [str(fig)],
+        "unrecorded_state": [], "machine_specific": [], "remote": [],
+    }
+    (tmp_path / f"{name}.provenance.json").write_text(json.dumps(record), encoding="utf-8")
+    return fig
+
+
+def _reasons(skipped):
+    return sorted(s["reason"] for s in skipped)
+
+
+def test_collect_reads_named_figures(tmp_path):
+    fig = _sidecar(tmp_path, "a.png")
+    records, skipped, _ = replay.collect([str(fig)], None)
+    assert len(records) == 1 and skipped == []
+
+
+def test_collect_skips_with_fixed_reasons(tmp_path):
+    ok = _sidecar(tmp_path, "ok.png")
+    hostile = _sidecar(tmp_path, "h.png", tool="os.system")
+    badkey = _sidecar(tmp_path, "k.png", args={"zones_path": "/z", "value_field": "n", "output_png": "x",
+                                               "__import__": 1})
+    unknown = _sidecar(tmp_path, "u.png", schema="other@9")
+    state = _sidecar(tmp_path, "m.png", tool="qgis_render_map", args={"layer_ids": ["L1"], "output_png": "x"})
+    stale = _sidecar(tmp_path, "s.png")
+    stale.write_bytes(b"changed by a script")
+    nofile = tmp_path / "none.png"
+    records, skipped, _ = replay.collect([str(p) for p in (ok, hostile, badkey, unknown, state, stale, nofile)], None)
+    assert len(records) == 1
+    assert _reasons(skipped) == sorted(["unknown tool", "unknown tool", "unknown schema",
+                                        "needs session state", "stale sidecar: figure changed", "no sidecar"])
+
+
+def test_deleted_figure_is_still_replayable(tmp_path):
+    fig = _sidecar(tmp_path, "gone.png")
+    fig.unlink()
+    records, skipped, _ = replay.collect([str(fig) + ".provenance.json"], None)
+    assert len(records) == 1 and skipped == []
+
+
+def test_folder_mode_skips_conflicted_copies(tmp_path):
+    _sidecar(tmp_path, "a.png")
+    (tmp_path / "a (North's conflicted copy).png.provenance.json").write_text("{}", encoding="utf-8")
+    records, skipped, _ = replay.collect(None, str(tmp_path))
+    assert len(records) == 1 and _reasons(skipped) == ["conflicted copy"]
+
+
+def test_collect_follows_made_by_to_producers(tmp_path):
+    producer = _sidecar(tmp_path, "route.csv", tool="qgis_route_on_network",
+                        args={"input_csv": "/stops.csv", "network_path": "/net.tsv",
+                              "output_csv": str(tmp_path / "route.csv")})
+    consumer = _sidecar(tmp_path, "fig.png", seq=2, inputs=[{
+        "argument": "zones_path", "path": str(producer), "sha256": hashlib.sha256(b"png").hexdigest(),
+        "bytes": 3, "made_by": str(producer) + ".provenance.json"}])
+    records, _, _ = replay.collect([str(consumer)], None)
+    assert {r["call"]["tool"] for r in records} == {"qgis_route_on_network", "qgis_render_choropleth"}
+
+
+def test_collect_rejects_non_object_sidecars(tmp_path):
+    fig = tmp_path / "x.png"
+    fig.write_bytes(b"png")
+    (tmp_path / "x.png.provenance.json").write_text("[]", encoding="utf-8")
+    _, skipped, _ = replay.collect([str(fig)], None)
+    assert _reasons(skipped) == ["no sidecar"]

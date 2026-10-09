@@ -16,12 +16,23 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import inspect
+import json
 import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from qgis_mcp_workflows.provenance import ROOT_TOKEN, _relative_under, fingerprint, normalise
+from qgis_mcp_workflows.provenance import (
+    ROOT_TOKEN,
+    SCHEMA,
+    SIDECAR_SUFFIX,
+    _regular_stat,
+    _relative_under,
+    fingerprint,
+    normalise,
+    sidecar_path,
+)
 
 
 class ReplayError(Exception):
@@ -148,3 +159,102 @@ def main(script: str, inputs: list[dict], outputs: list[str], notes: list[str],
             shutdown()
     print(f"replayed {len(outputs)} file(s)" + ("" if args.in_place else f" into {out_dir}"))
     return 0
+
+
+# --- export side ---------------------------------------------------------------------
+
+MAX_SIDECARS = 200
+_SIDECAR_MAX_BYTES = 2 * 1024 * 1024
+_STATE_READING_TOOLS = frozenset({"qgis_render_map"})
+
+
+def _load_sidecar(path: str) -> dict | None:
+    st = _regular_stat(path)
+    if st is None or st.st_size > _SIDECAR_MAX_BYTES:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _local(path: str) -> str:
+    try:
+        return resolve(path)
+    except ReplayError:
+        return path
+
+
+def _tool_function(record: dict) -> Callable | None:
+    """The registered tool a sidecar names — None unless every argument is a real parameter."""
+    from qgis_mcp_workflows import compound, server
+
+    call = record.get("call")
+    if not isinstance(call, dict) or not isinstance(call.get("arguments"), dict):
+        return None
+    module = {"server": server, "compound": compound}.get(call.get("module"))
+    name = call.get("tool")
+    if module is None or not isinstance(name, str) or not name.startswith("qgis_"):
+        return None
+    fn = getattr(module, name, None)
+    if not inspect.isfunction(fn) or fn.__module__ != module.__name__:
+        return None
+    return fn if set(call["arguments"]) <= set(inspect.signature(fn).parameters) else None
+
+
+def _skip_reason(record: dict, figure: str) -> str | None:
+    if record.get("schema") != SCHEMA:
+        return "unknown schema"
+    if _tool_function(record) is None:
+        return "unknown tool"
+    call = record["call"]
+    if call["tool"] in _STATE_READING_TOOLS or (
+        call["tool"] == "qgis_render" and call["arguments"].get("mode") == "map"
+    ):
+        return "needs session state"
+    recorded = record.get("figure_sha256")
+    if recorded and os.path.exists(figure) and fingerprint(figure)["sha256"] != recorded:
+        return "stale sidecar: figure changed"
+    return None
+
+
+def collect(figures: list[str] | None, folder: str | None) -> tuple[list[dict], list[dict], list[str]]:
+    """(replayable records, skipped figures, warnings), following made_by links."""
+    skipped: list[dict] = []
+    warnings: list[str] = []
+    queue: list[str] = []
+    if folder is not None:
+        for path in sorted(Path(folder).glob("*" + SIDECAR_SUFFIX)):
+            if "conflicted copy" in path.name:
+                skipped.append({"figure": path.name, "reason": "conflicted copy"})
+            else:
+                queue.append(str(path))
+    else:
+        queue = [f if f.endswith(SIDECAR_SUFFIX) else sidecar_path(normalise(f)) for f in figures or []]
+    records: list[dict] = []
+    seen: set[str] = set()
+    while queue:
+        if len(seen) >= MAX_SIDECARS:
+            warnings.append(f"stopped after {MAX_SIDECARS} sidecars; the rest were not read")
+            break
+        side = normalise(queue.pop(0))
+        if side in seen:
+            continue
+        seen.add(side)
+        figure = side[: -len(SIDECAR_SUFFIX)]
+        record = _load_sidecar(side)
+        if record is None:
+            skipped.append({"figure": figure, "reason": "no sidecar"})
+            continue
+        reason = _skip_reason(record, figure)
+        if reason:
+            skipped.append({"figure": figure, "reason": reason})
+            continue
+        records.append(record)
+        for entry in record.get("inputs") or []:
+            link = entry.get("made_by") if isinstance(entry, dict) else None
+            if isinstance(link, str):
+                queue.append(_local(link))
+    return records, skipped, warnings
