@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from qgis_mcp_workflows import executors, provenance
+from qgis_mcp_workflows import executors, ledger, provenance
 from qgis_mcp_workflows.executors.headless import HeadlessExecutor
 from tests.conftest import requires_headless
 
@@ -38,3 +38,32 @@ async def test_trajectory_replays_to_the_same_size(tmp_path, monkeypatch):
     assert done.returncode == 0, done.stdout + done.stderr
     replayed = tmp_path / "out" / "DROPBOX_ROOT" / "t.png"
     assert replayed.stat().st_size == (tmp_path / "t.png").stat().st_size
+
+
+ZONES = os.path.join(os.path.dirname(__file__), "fixtures", "tiny_zones.geojson")
+
+
+async def test_styled_map_replays_to_the_same_size(tmp_path, monkeypatch):
+    monkeypatch.setenv("DROPBOX_ROOT", str(tmp_path))
+    provenance.reset_for_tests()
+    server = importlib.import_module("qgis_mcp_workflows.server")
+    zones = tmp_path / "zones.geojson"
+    zones.write_bytes(Path(ZONES).read_bytes())
+    executor = HeadlessExecutor()
+    executors.set_executor(executor)
+    try:
+        await server.mcp.call_tool("qgis_load_layer", {"path": str(zones)})
+        [layer_id] = list(ledger._layers)  # reset_for_tests() emptied the ledger: this is the one just loaded
+        await server.mcp.call_tool("qgis_style_categorized", {"layer_id": layer_id, "field": "zone_id"})
+        await server.mcp.call_tool("qgis_render_map", {"layer_ids": [layer_id], "output_png": str(tmp_path / "m.png")})
+    finally:
+        executor.shutdown()
+        executors.set_executor(None)
+    script = tmp_path / "replay.py"
+    result = server.qgis_export_session(output_py=str(script), figures=[str(tmp_path / "m.png")])
+    assert result.skipped == []
+    done = subprocess.run([sys.executable, str(script), "--out-dir", str(tmp_path / "out")],
+                          capture_output=True, text=True, timeout=300, env={**os.environ})
+    assert done.returncode == 0, done.stdout + done.stderr
+    replayed = tmp_path / "out" / "DROPBOX_ROOT" / "m.png"
+    assert replayed.stat().st_size == (tmp_path / "m.png").stat().st_size
