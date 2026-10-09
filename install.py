@@ -428,7 +428,8 @@ def configure_client(client_name: str, remote: bool) -> None:
 
     path = Path(info["path"])
     key = info["key"]
-    entry = _server_entry(client_name, remote)
+    # A project-local config syncs with the repo to other machines: no machine's root in it.
+    entry = _server_entry(client_name, remote, pass_env=not info.get("project_local", False))
 
     config = _read_json(path)
     if path.exists():

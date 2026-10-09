@@ -18,6 +18,7 @@ import inspect
 import itertools
 import json
 import logging
+import math
 import os
 import platform
 import stat
@@ -25,6 +26,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import typing
 import uuid
 import weakref
 from collections.abc import Callable
@@ -88,12 +90,17 @@ _hash_cache: dict[tuple[str, int, int], str] = {}
 _cache_lock = threading.Lock()
 
 
+_DEFAULT_HASH_MAX_MB = 256.0
+
+
 def hash_cap_bytes() -> int:
-    raw = os.environ.get("QGIS_MCP_WORKFLOWS_PROVENANCE_HASH_MAX_MB", "256")
+    raw = os.environ.get("QGIS_MCP_WORKFLOWS_PROVENANCE_HASH_MAX_MB", str(_DEFAULT_HASH_MAX_MB))
     try:
         megabytes = float(raw)
     except ValueError:
-        megabytes = 256.0
+        megabytes = _DEFAULT_HASH_MAX_MB
+    if not math.isfinite(megabytes) or megabytes < 0:  # "inf"/"nan" would raise in int()
+        megabytes = _DEFAULT_HASH_MAX_MB
     return int(megabytes * 1024 * 1024)
 
 
@@ -138,7 +145,11 @@ def fingerprint(path: str) -> dict:
     if st is None:
         return {"path": stored, "bytes": None, "mtime": None, "sha256": None,
                 "hashed": False, "missing": True}
-    digest = _sha256(path, st)
+    try:
+        digest = _sha256(path, st)
+    except OSError as err:  # locked by Dropbox/QGIS: record it unhashed, never fail the call
+        return {"path": stored, "bytes": st.st_size, "mtime": _utc(st.st_mtime), "sha256": None,
+                "hashed": False, "missing": False, "error": str(err)}
     return {"path": stored, "bytes": st.st_size, "mtime": _utc(st.st_mtime), "sha256": digest,
             "hashed": digest is not None, "missing": False}
 
@@ -233,13 +244,26 @@ def _summarisable(value: Any) -> bool:
     return _scalar(value)
 
 
+def _summary_key(key: str) -> bool:
+    return key not in _SUMMARY_SKIP and key != "csv" and not key.endswith("_path")
+
+
 def result_summary(result: Any) -> dict:
-    """Decision fields of the result (breaks, counts, flags) for replay diffs."""
-    return {
-        key: value
-        for key, value in result.model_dump(mode="json").items()
-        if key not in _SUMMARY_SKIP and not key.endswith("_path") and _summarisable(value)
-    }
+    """Decision fields of the result (breaks, counts, flags) for replay diffs.
+
+    One nested level is flattened as ``parent.child`` (a choropleth's
+    ``join.n_matched``); paths are never included.
+    """
+    summary: dict = {}
+    for key, value in result.model_dump(mode="json").items():
+        if not _summary_key(key):
+            continue
+        if isinstance(value, dict):
+            summary.update({f"{key}.{sub}": v for sub, v in value.items()
+                            if _summary_key(sub) and _summarisable(v)})
+        elif _summarisable(value):
+            summary[key] = value
+    return summary
 
 
 _EXTRAS = {"pptx": "pptx", "duckdb": "duckdb", "network": "networkx",
@@ -255,18 +279,27 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
+def _git(root: Path, *args: str) -> str | None:
+    """git output, or None if git failed. --no-optional-locks: never take
+    index.lock away from another session committing in the same repo."""
+    try:
+        done = subprocess.run(["git", "--no-optional-locks", "-C", str(root), *args],
+                              capture_output=True, encoding="utf-8", errors="replace", timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
 def _git_state() -> dict:
+    unknown = {"git": None, "git_dirty": None}
     root = Path(__file__).resolve().parents[2]
     if not (root / ".git").exists():
-        return {"git": None, "git_dirty": None}
-    try:
-        sha = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
-                             capture_output=True, text=True, timeout=5).stdout.strip()
-        dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"],
-                               capture_output=True, text=True, timeout=5).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return {"git": None, "git_dirty": None}
-    return {"git": sha or None, "git_dirty": bool(dirty)}
+        return unknown
+    sha = _git(root, "rev-parse", "--short", "HEAD")
+    status = _git(root, "status", "--porcelain", "--untracked-files=no")
+    if not sha or status is None:  # e.g. "dubious ownership": unknown, never "clean"
+        return unknown
+    return {"git": sha, "git_dirty": bool(status)}
 
 
 def _static_environment() -> dict:
@@ -396,22 +429,35 @@ def _flag(machine_specific: list[dict], path: str) -> None:
         machine_specific.append(entry)
 
 
+_SIDECAR_MAX_BYTES = 2 * 1024 * 1024
+
+
 def _made_by(path: str, digest: str | None) -> str | None:
-    """The producer's sidecar, only if it vouches for exactly these bytes."""
+    """The producer's sidecar, only if it vouches for exactly these bytes.
+
+    Anything else beside the input — a non-file, a huge file, JSON that is not
+    an object — is ignored rather than allowed to abort the record.
+    """
     if digest is None:
         return None
     side = sidecar_path(path)
+    st = _regular_stat(side)
+    if st is None or st.st_size > _SIDECAR_MAX_BYTES:
+        return None
     try:
         with open(side, encoding="utf-8") as fh:
             producer = json.load(fh)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
-    return portable(side)[0] if producer.get("figure_sha256") == digest else None
+    if not isinstance(producer, dict) or producer.get("figure_sha256") != digest:
+        return None
+    return portable(side)[0]
 
 
 def _remote(args: dict, machine_specific: list[dict]) -> list[dict]:
     basemap = args.get("basemap")
-    if not basemap:
+    # Every render tool defaults basemap="none", which apply_defaults() fills in.
+    if not basemap or str(basemap).strip().lower() == "none":
         return []
     if str(basemap).startswith("qms:"):
         machine_specific.append({"path": str(basemap),
@@ -428,7 +474,8 @@ def _record(tool: str, module: str, call_args: dict, before: dict, prints: list[
     for entry in prints + implicit:
         path = entry.pop("_path")
         entry["changed_during_call"] = snapshot(path) != before[path]
-        entry["made_by"] = _made_by(path, entry["sha256"])
+        # An input this call overwrote must not link to the sidecar it is replacing.
+        entry["made_by"] = None if path in figures else _made_by(path, entry["sha256"])
         _flag(machine_specific, path)
     written = {portable(f)[0] for f in figures}
     unrecorded = [f"input overwritten by this call: {e['argument']}" for e in prints if e["path"] in written]
@@ -453,11 +500,38 @@ def _record(tool: str, module: str, call_args: dict, before: dict, prints: list[
     for figure in figures:
         fp = fingerprint(figure)
         write_sidecar(figure, {"schema": SCHEMA, "figure": fp["path"], "figure_sha256": fp["sha256"],
-                               "figure_bytes": fp["bytes"], **shared})
+                               "figure_bytes": fp["bytes"], "figure_mtime": fp["mtime"], **shared})
+
+
+def _drop_stale_sidecars(result: Any) -> None:
+    """Recording failed: an old sidecar must not vouch for a freshly written file."""
+    with contextlib.suppress(Exception):
+        for figure in written_files(result):
+            with contextlib.suppress(OSError):
+                os.remove(sidecar_path(figure))
+
+
+def _writes_files(fn: Callable) -> bool:
+    """Whether ``fn``'s result model can name a written file (else: no wrapper at all).
+
+    Read-only tools (layer_inspect, style_*) then pay nothing — not even input
+    hashing. If the annotation cannot be resolved, wrap to be safe.
+    """
+    try:
+        ret = inspect.signature(fn, eval_str=True).return_annotation
+    except Exception:
+        return True
+    models = typing.get_args(ret) or (ret,)
+    return any(
+        isinstance(m, type) and any(c.__name__ in WRITTEN_BY_MODEL for c in m.__mro__)
+        for m in models
+    )
 
 
 def with_provenance(fn: Callable) -> Callable:
     """Wrap a tool so each successful MCP call leaves a sidecar per written file."""
+    if not _writes_files(fn):
+        return fn
     signature = inspect.signature(fn)
     module = "compound" if fn.__module__.endswith(".compound") else "server"
 
@@ -486,6 +560,7 @@ def with_provenance(fn: Callable) -> Callable:
                     requests_before, result, time.monotonic() - started)
         except Exception:
             logger.warning("provenance: recording failed for %s", fn.__name__, exc_info=True)
+            _drop_stale_sidecars(result)
         return result
 
     return wrapper

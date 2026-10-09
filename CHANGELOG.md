@@ -9,7 +9,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Every file a tool writes through MCP gets `<file>.provenance.json`: the call
   with all arguments, inputs fingerprinted before the call (sha256 up to 256 MB),
-  the file's own sha256 (a later overwrite shows as a stale sidecar), `made_by`
+  the file's own sha256 (a later overwrite shows as a stale sidecar; files above
+  the hash cap carry size + mtime only), `made_by`
   links verified by fingerprint, a result summary and the environment (package,
   git commit, extras, QGIS/plugin version when the call used QGIS). Paths under
   `$DROPBOX_ROOT` are portable across machines. Disable with

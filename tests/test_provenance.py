@@ -302,3 +302,97 @@ def test_portable_arguments_serialises_tuples_and_paths(monkeypatch, tmp_path):
     out = provenance._portable_arguments(
         {"extent": (1, 2, 3, 4), "zones_path": Path(tmp_path / "z.gpkg"), "palette": "gufm"})
     assert out == {"extent": [1, 2, 3, 4], "zones_path": "${DROPBOX_ROOT}/z.gpkg", "palette": "gufm"}
+
+
+# --- Final review fixes -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["none", "None", "NONE", None, ""])
+def test_remote_ignores_the_no_basemap_default(value):
+    # Every render tool defaults basemap="none"; apply_defaults() fills it in.
+    assert provenance._remote({"basemap": value}, []) == []
+
+
+def test_remote_records_a_real_basemap():
+    flagged: list[dict] = []
+    assert provenance._remote({"basemap": "qms:42"}, flagged)[0]["value"] == "qms:42"
+    assert flagged and flagged[0]["reason"].startswith("QuickMapServices")
+
+
+def test_fingerprint_survives_an_unreadable_file(monkeypatch, tmp_path):
+    provenance.reset_for_tests()
+    f = tmp_path / "locked.gpkg"
+    f.write_bytes(b"data")
+
+    def locked(*args, **kwargs):
+        raise PermissionError("held by Dropbox")
+
+    monkeypatch.setattr(provenance, "open", locked, raising=False)
+    fp = provenance.fingerprint(str(f))
+    assert fp["hashed"] is False and fp["sha256"] is None and fp["missing"] is False
+    assert "held by Dropbox" in fp["error"]
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-1", "abc"])
+def test_hash_cap_falls_back_on_unusable_values(monkeypatch, raw):
+    monkeypatch.setenv("QGIS_MCP_WORKFLOWS_PROVENANCE_HASH_MAX_MB", raw)
+    assert provenance.hash_cap_bytes() == 256 * 1024 * 1024
+
+
+@pytest.mark.parametrize("content", ["[]", "null", "{bad json", "[" * 5000 + "]" * 5000],
+                         ids=["list", "null", "bad-json", "deep-nesting"])
+def test_made_by_ignores_a_malformed_producer_sidecar(tmp_path, content):
+    f = tmp_path / "in.csv"
+    f.write_bytes(b"x")
+    (tmp_path / "in.csv.provenance.json").write_text(content, encoding="utf-8")
+    assert provenance._made_by(str(f), hashlib.sha256(b"x").hexdigest()) is None
+
+
+def test_git_state_failure_is_unknown_not_clean(monkeypatch):
+    class Failed:
+        returncode = 128
+        stdout = ""
+
+    monkeypatch.setattr(provenance.subprocess, "run", lambda *a, **k: Failed())
+    assert provenance._git_state() in ({"git": None, "git_dirty": None},)
+
+
+def test_git_state_takes_no_optional_locks_and_decodes_utf8(monkeypatch):
+    seen: list[tuple[list, dict]] = []
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+
+    def run(argv, **kwargs):
+        seen.append((argv, kwargs))
+        return Ok()
+
+    monkeypatch.setattr(provenance.subprocess, "run", run)
+    provenance._git_state()
+    if not seen:
+        pytest.skip("package is not a git checkout here")
+    assert all("--no-optional-locks" in argv for argv, _ in seen)
+    assert all(kw.get("encoding") == "utf-8" and kw.get("errors") == "replace" for _, kw in seen)
+
+
+def test_tools_that_never_write_files_are_not_wrapped():
+    from qgis_mcp_workflows import server
+
+    assert provenance.with_provenance(server.qgis_layer_inspect) is server.qgis_layer_inspect
+    assert provenance.with_provenance(server.qgis_style_categorized) is server.qgis_style_categorized
+    assert provenance.with_provenance(server.qgis_render_choropleth) is not server.qgis_render_choropleth
+
+
+def test_result_summary_flattens_one_level_without_paths():
+    from qgis_mcp_workflows.server import ChoroplethResult
+
+    result = ChoroplethResult.model_validate({
+        "output_path": "/x.png", "width": 8, "height": 6, "dpi": 150, "extent": [0, 0, 1, 1],
+        "crs": "EPSG:4326", "n_layers": 1, "field": "n", "n_classes": 5, "breaks": [1.0, 2.0],
+        "mode": "quantile", "min_value": 1.0, "max_value": 2.0, "n_features": 23,
+        "join": {"csv": "/data/v.csv", "field": "zone_id", "n_matched": 20, "n_unmatched": 3},
+    })
+    summary = provenance.result_summary(result)
+    assert summary["join.n_matched"] == 20 and summary["join.n_unmatched"] == 3
+    assert "join.csv" not in summary and "join" not in summary

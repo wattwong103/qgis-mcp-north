@@ -310,3 +310,15 @@ def test_zed_entry_carries_dropbox_root(install_mod, monkeypatch):
 def test_tracked_mcp_json_never_gets_a_machine_path(install_mod, monkeypatch):
     monkeypatch.setenv("DROPBOX_ROOT", "H:/Dropbox")
     assert "env" not in install_mod._server_entry("cursor", remote=False, pass_env=False)
+
+
+def test_project_local_config_never_gets_dropbox_root(install_mod, monkeypatch, tmp_path):
+    # .vscode/mcp.json lives in the Dropbox-synced repo: another machine would
+    # inherit this machine's root.
+    monkeypatch.setenv("DROPBOX_ROOT", "H:/Dropbox")
+    cfg = tmp_path / "proj" / "mcp.json"
+    monkeypatch.setattr(install_mod, "_client_registry",
+                        lambda: {"vscode": {"path": cfg, "key": "mcpServers", "project_local": True}})
+    install_mod.configure_client("vscode", remote=False)
+    entry = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["qgis-workflows"]
+    assert "env" not in entry

@@ -89,6 +89,22 @@ async def test_render_through_mcp_writes_a_sidecar(server, fake_executor, root):
     assert record["session_id"] == provenance.SESSION_ID and isinstance(record["seq"], int)
     assert record["environment"]["transport"] == "fake"
     assert record["machine_specific"] == []
+    assert record["remote"] == []                                       # basemap="none" default
+    assert record["figure_bytes"] == len(PNG) and record["figure_mtime"].endswith("Z")
+
+
+async def test_recording_failure_removes_a_stale_sidecar(server, fake_executor, root, monkeypatch):
+    fake_executor.responses["render_choropleth"] = _choropleth_response
+    stale = root / "fig.png.provenance.json"
+    stale.write_text('{"figure_sha256": "old"}', encoding="utf-8")
+
+    def broken(result):
+        raise RuntimeError("summary failed")
+
+    monkeypatch.setattr(provenance, "result_summary", broken)
+    png = await _render(server, root)
+    assert png.read_bytes() == PNG                                     # the call itself succeeded
+    assert not stale.exists()                                          # cannot vouch for the new PNG
 
 
 async def test_direct_python_call_writes_no_sidecar(server, fake_executor, root):
@@ -155,14 +171,18 @@ async def test_overwritten_producer_breaks_the_link(server, fake_executor, root)
 
 
 async def test_in_place_deck_append_is_flagged(server, fake_executor, root):
-    pptx = pytest.importorskip("pptx")
+    pytest.importorskip("pptx")
     fake_executor.responses["render_choropleth"] = _choropleth_response
     png = await _render(server, root)
     deck = root / "deck.pptx"
-    pptx.Presentation().save(str(deck))
+    # First call creates the deck (and its sidecar); the second appends in place.
+    await server.mcp.call_tool("qgis_figures_to_pptx", {"figure_paths": [str(png)], "pptx_path": str(deck)})
+    before = hashlib.sha256(deck.read_bytes()).hexdigest()
     await server.mcp.call_tool("qgis_figures_to_pptx", {
         "figure_paths": [str(png)], "pptx_path": str(deck), "template_pptx": str(deck)})
     record = _sidecar(deck)
     assert "input overwritten by this call: template_pptx" in record["unrecorded_state"]
     template = next(i for i in record["inputs"] if i["argument"] == "template_pptx")
     assert template["changed_during_call"] is True
+    assert template["sha256"] == before        # fingerprinted before the call, not after
+    assert template["made_by"] is None         # not a link to the sidecar this call overwrites
