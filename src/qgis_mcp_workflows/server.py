@@ -2921,7 +2921,7 @@ def qgis_figures_to_pptx(
 
 @_maybe_tool(
     annotations=ToolAnnotations(
-        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=False
+        readOnlyHint=False, idempotentHint=True, destructiveHint=True, openWorldHint=False
     )
 )
 def qgis_export_session(

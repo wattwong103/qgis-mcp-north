@@ -103,3 +103,46 @@ async def test_export_session_writes_no_sidecar_of_its_own(server, fake_executor
     await server.mcp.call_tool("qgis_export_session",
                                {"output_py": str(root / "replay.py"), "figures": [str(root / "deck.pptx")]})
     assert not (root / "replay.py.provenance.json").exists()
+
+
+def _run_script(script, monkeypatch, *argv):
+    monkeypatch.setattr(sys, "argv", [str(script), *argv])
+    with pytest.raises(SystemExit) as done:
+        runpy.run_path(str(script), run_name="__main__")
+    return done.value.code
+
+
+async def test_a_deck_appended_in_place_is_not_appended_again(server, fake_executor, root, monkeypatch):
+    pptx = pytest.importorskip("pptx")
+    fig, deck = root / "fig.png", root / "deck.pptx"
+    fig.write_bytes(PNG)
+    server.qgis_figures_to_pptx(figure_paths=[str(fig)], pptx_path=str(deck))    # not through MCP: no sidecar
+    await server.mcp.call_tool("qgis_figures_to_pptx", {"figure_paths": [str(fig)], "pptx_path": str(deck),
+                                                        "template_pptx": str(deck)})
+    script = root / "replay.py"
+    server.qgis_export_session(output_py=str(script), figures=[str(deck)])
+    monkeypatch.setattr(replay, "_new_executor", lambda: fake_executor)
+    assert _run_script(script, monkeypatch, "--in-place", "--yes") == 2
+    assert _run_script(script, monkeypatch, "--out-dir", str(root / "out")) == 2   # the template changed since
+    assert len(pptx.Presentation(str(deck)).slides) == 2
+
+
+def test_export_refuses_a_missing_folder(server, root):
+    with pytest.raises(QgisMcpWorkflowsError, match="not a folder"):
+        server.qgis_export_session(output_py=str(root / "r.py"), folder=str(root / "typo"))
+
+
+def test_export_refuses_an_empty_figure_list(server, root):
+    with pytest.raises(QgisMcpWorkflowsError, match="figures is empty"):
+        server.qgis_export_session(output_py=str(root / "r.py"), figures=[])
+
+
+def test_export_fails_when_nothing_can_be_replayed(server, root):
+    with pytest.raises(QgisMcpWorkflowsError, match="no sidecar"):
+        server.qgis_export_session(output_py=str(root / "r.py"), figures=[str(root / "none.png")])
+    assert not (root / "r.py").exists()
+
+
+async def test_export_session_is_marked_destructive(server):
+    [tool] = [t for t in await server.mcp.list_tools() if t.name == "qgis_export_session"]
+    assert tool.annotations.destructiveHint is True   # overwrite=True replaces a file
