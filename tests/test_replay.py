@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -97,3 +98,40 @@ def test_in_place_needs_yes_to_overwrite(monkeypatch, tmp_path):
         replay.output_mapper(["${DROPBOX_ROOT}/fig.png"], [], "", True, False)
     out = replay.output_mapper(["${DROPBOX_ROOT}/fig.png"], [], "", True, True)
     assert out("${DROPBOX_ROOT}/fig.png") == provenance.normalise(str(tmp_path / "fig.png"))
+
+
+# --- Task 4: main ------------------------------------------------------------------
+
+
+def _run_main(tmp_path, monkeypatch, inputs=(), argv=(), steps=None):
+    ran = []
+
+    class Executor:
+        def shutdown(self):
+            ran.append("shutdown")
+
+    monkeypatch.setattr(replay, "_new_executor", Executor)
+    code = replay.main(str(tmp_path / "replay.py"), list(inputs), ["${DROPBOX_ROOT}/fig.png"], ["a note"],
+                       steps or (lambda out, src: ran.append(out("${DROPBOX_ROOT}/fig.png"))), list(argv))
+    return code, ran
+
+
+def test_main_runs_steps_into_out_dir_and_shuts_down(monkeypatch, tmp_path, capsys):
+    code, ran = _run_main(tmp_path, monkeypatch, argv=["--out-dir", str(tmp_path / "o")])
+    assert code == 0
+    assert ran[0].endswith(str(Path("o") / "DROPBOX_ROOT" / "fig.png")) and ran[-1] == "shutdown"
+    assert "note: a note" in capsys.readouterr().out
+
+
+def test_main_stops_on_changed_inputs_unless_forced(monkeypatch, tmp_path):
+    f = tmp_path / "z.csv"
+    f.write_bytes(b"new")
+    stale = [{"path": str(f), "sha256": hashlib.sha256(b"old").hexdigest(), "bytes": 3}]
+    assert _run_main(tmp_path, monkeypatch, stale, ["--out-dir", str(tmp_path / "o")])[0] == 2
+    assert _run_main(tmp_path, monkeypatch, stale, ["--out-dir", str(tmp_path / "o"), "--force"])[0] == 0
+
+
+def test_main_refuses_in_place_with_force(monkeypatch, tmp_path, capsys):
+    code, ran = _run_main(tmp_path, monkeypatch, argv=["--in-place", "--force"])
+    assert code == 2 and ran == []
+    assert "cannot be combined" in capsys.readouterr().err

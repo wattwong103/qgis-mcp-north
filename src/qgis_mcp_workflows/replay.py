@@ -14,7 +14,10 @@ Spec: docs/superpowers/specs/2026-10-08-figure-provenance-design.md §7.
 
 from __future__ import annotations
 
+import argparse
+import datetime as _dt
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -89,3 +92,59 @@ def output_mapper(outputs: list[str], sources: list[str], out_dir: str,
         return str(target)
 
     return out
+
+
+def _new_executor():
+    from qgis_mcp_workflows.executors.headless import HeadlessExecutor
+
+    return HeadlessExecutor()
+
+
+def _parse(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Re-make figures recorded by qgis-mcp-workflows.")
+    parser.add_argument("--out-dir", help="where replayed files go (default: replay_<UTC date>/ beside this script)")
+    parser.add_argument("--in-place", action="store_true", help="write to the original paths instead")
+    parser.add_argument("--yes", action="store_true", help="with --in-place: replace existing files")
+    parser.add_argument("--force", action="store_true", help="replay even if source inputs changed")
+    return parser.parse_args(argv)
+
+
+def main(script: str, inputs: list[dict], outputs: list[str], notes: list[str],
+         steps: Callable[[Callable, Callable], None], argv: list[str] | None = None) -> int:
+    """Entry point of a generated replay script. Returns the process exit code."""
+    args = _parse(argv)
+    for note in notes:
+        print(f"note: {note}")
+    try:
+        if args.in_place and args.force:
+            raise ReplayError("--in-place cannot be combined with --force")
+        problems = check_inputs(inputs)
+        if problems:
+            print("source inputs differ from the recording:")
+            for line in problems:
+                print(f"  {line}")
+            if not args.force:
+                print("re-run with --force to replay anyway")
+                return 2
+        out_dir = args.out_dir or os.path.join(
+            os.path.dirname(os.path.abspath(script)),
+            "replay_" + _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d"))
+        out = output_mapper(outputs, [i["path"] for i in inputs], out_dir, args.in_place, args.yes)
+    except ReplayError as err:
+        print(f"replay: {err}", file=sys.stderr)
+        return 2
+    from qgis_mcp_workflows import executors
+
+    executor = _new_executor()
+    executors.set_executor(executor)
+    try:
+        steps(out, resolve)
+    except ReplayError as err:
+        print(f"replay: {err}", file=sys.stderr)
+        return 2
+    finally:
+        shutdown = getattr(executor, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
+    print(f"replayed {len(outputs)} file(s)" + ("" if args.in_place else f" into {out_dir}"))
+    return 0
