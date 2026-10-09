@@ -10,11 +10,17 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import importlib.metadata
+import importlib.util
 import logging
 import os
+import platform
 import stat
+import subprocess
 import threading
+import weakref
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("qgis_mcp_workflows.provenance")
@@ -128,8 +134,11 @@ def fingerprint(path: str) -> dict:
 
 
 def reset_for_tests() -> None:
+    global _static_facts
     with _cache_lock:
         _hash_cache.clear()
+    _static_facts = None
+    _qgis_facts.clear()
 
 
 INPUT_ARGS = frozenset({
@@ -221,3 +230,80 @@ def result_summary(result: Any) -> dict:
         for key, value in result.model_dump(mode="json").items()
         if key not in _SUMMARY_SKIP and not key.endswith("_path") and _summarisable(value)
     }
+
+
+_EXTRAS = {"pptx": "pptx", "duckdb": "duckdb", "network": "networkx",
+           "trajectory": "movingpandas", "drm": "geopandas"}
+_static_facts: dict | None = None
+_qgis_facts: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _package_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _git_state() -> dict:
+    root = Path(__file__).resolve().parents[2]
+    if not (root / ".git").exists():
+        return {"git": None, "git_dirty": None}
+    try:
+        sha = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"],
+                               capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return {"git": None, "git_dirty": None}
+    return {"git": sha or None, "git_dirty": bool(dirty)}
+
+
+def _static_environment() -> dict:
+    global _static_facts
+    if _static_facts is None:
+        _static_facts = {
+            "qgis_mcp_workflows": _package_version("qgis-mcp-workflows"),
+            **_git_state(),
+            "extras": sorted(e for e, module in _EXTRAS.items() if importlib.util.find_spec(module)),
+            "mcp": _package_version("mcp"),
+            "python": platform.python_version(),
+            "platform": platform.platform(terse=True),
+        }
+    return dict(_static_facts)
+
+
+def _qgis_versions(executor: Any) -> dict:
+    cached = _qgis_facts.get(executor)
+    if cached is not None:
+        return cached
+    try:
+        response = executor.dispatch("diagnose", {}, timeout=10)
+        checks = {c.get("name"): c for c in response.get("checks", [])}
+    except Exception:  # degraded transport or a test fake: never cached
+        return {"qgis": "unknown", "plugin": "unknown"}
+    qgis = checks.get("qgis", {}).get("detail")
+    versions = {
+        "qgis": qgis.get("qgis_version", "unknown") if isinstance(qgis, dict) else "unknown",
+        "plugin": str(checks.get("plugin_version", {}).get("detail", "unknown")),
+    }
+    _qgis_facts[executor] = versions
+    return versions
+
+
+def environment(dispatched: bool) -> dict:
+    """Package/runtime facts; QGIS + plugin versions only if the call used QGIS.
+
+    A pure-Python tool (figures_to_pptx, route_on_network, assign_section_load)
+    must not spawn headless QGIS just to be recorded.
+    """
+    facts = _static_environment()
+    if not dispatched:
+        facts.update(transport="not queried", qgis="not queried", plugin="not queried")
+        return facts
+    from qgis_mcp_workflows import executors
+
+    executor = executors.get_executor()
+    facts["transport"] = type(executor).__name__.removesuffix("Executor").lower() or "unknown"
+    facts.update(_qgis_versions(executor))
+    return facts

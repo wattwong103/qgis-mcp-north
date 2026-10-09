@@ -190,3 +190,38 @@ def test_result_summary_keeps_scalars_drops_paths():
     # Subset, not equality: #25 adds unavailable_layers ([] — a short scalar list, kept).
     assert {"format": "pdf", "n_pages": 3, "layout_name": "L"}.items() <= summary.items()
     assert "output_path" not in summary
+
+
+# --- Task 5: environment block --------------------------------------------------
+
+
+def test_environment_not_queried_when_tool_did_not_dispatch(fake_executor):
+    provenance.reset_for_tests()
+    facts = provenance.environment(dispatched=False)
+    assert facts["qgis"] == "not queried" and facts["plugin"] == "not queried"
+    assert fake_executor.calls == []
+    assert {"qgis_mcp_workflows", "git", "git_dirty", "extras", "mcp", "python", "platform"} <= set(facts)
+
+
+def test_environment_reads_diagnose_and_caches_success(fake_executor):
+    provenance.reset_for_tests()
+    fake_executor.responses["diagnose"] = {"checks": [
+        {"name": "qgis", "status": "ok", "detail": {"qgis_version": "3.40.14-Bratislava"}},
+        {"name": "plugin_version", "status": "ok", "detail": "1.14.0"},
+    ]}
+    facts = provenance.environment(dispatched=True)
+    assert (facts["qgis"], facts["plugin"], facts["transport"]) == ("3.40.14-Bratislava", "1.14.0", "fake")
+    provenance.environment(dispatched=True)
+    assert [c for c, _ in fake_executor.calls] == ["diagnose"]  # cached
+
+
+def test_environment_never_caches_a_failure(fake_executor):
+    provenance.reset_for_tests()
+
+    def down(params):
+        raise ConnectionError("degraded")
+
+    fake_executor.responses["diagnose"] = down
+    assert provenance.environment(dispatched=True)["qgis"] == "unknown"
+    provenance.environment(dispatched=True)
+    assert [c for c, _ in fake_executor.calls] == ["diagnose", "diagnose"]
