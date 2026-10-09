@@ -215,10 +215,26 @@ def _zed_remote_entry() -> dict:
     }
 
 
-def _server_entry(client: str, remote: bool) -> dict:
+def _with_dropbox_root(entry: dict) -> dict:
+    """GUI clients do not inherit the shell environment; pass DROPBOX_ROOT through.
+
+    The provenance recorder stores paths under it so figures replay on every
+    machine. CLI clients (claude, codex, grok) inherit it from their shell.
+    """
+    root = os.environ.get("DROPBOX_ROOT", "").strip()
+    if not root:
+        return entry
+    holder = entry["command"] if isinstance(entry.get("command"), dict) else entry
+    holder.setdefault("env", {})["DROPBOX_ROOT"] = root
+    return entry
+
+
+def _server_entry(client: str, remote: bool, pass_env: bool = True) -> dict:
     if client == "zed":
-        return _zed_remote_entry() if remote else _zed_local_entry()
-    return _remote_entry() if remote else _local_entry()
+        entry = _zed_remote_entry() if remote else _zed_local_entry()
+    else:
+        entry = _remote_entry() if remote else _local_entry()
+    return _with_dropbox_root(entry) if pass_env else entry
 
 
 SERVER_NAME = "qgis-workflows"
@@ -287,7 +303,8 @@ def _configure_cli_client(client_name: str, remote: bool) -> None:
             if mcp_path.exists():
                 _backup(mcp_path)
             config.setdefault("mcpServers", {})
-            config["mcpServers"][SERVER_NAME] = _server_entry("cursor", remote)
+            # .mcp.json is tracked: no machine-specific DROPBOX_ROOT in it.
+            config["mcpServers"][SERVER_NAME] = _server_entry("cursor", remote, pass_env=False)
             _write_json(mcp_path, config)
             print(f"  '{cli_name}' CLI not found; wrote {mcp_path}")
             print(f"  Or run: {cli_name} {' '.join(add_prefix)} {SERVER_NAME} -- {' '.join(argv)}")
