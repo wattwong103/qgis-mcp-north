@@ -9,6 +9,7 @@ from qgis_mcp_workflows.helpers import (
     maybe_preview,
     png_preview_content,
 )
+from tests.mcp_compat import field
 
 
 class _Result(BaseModel):
@@ -31,7 +32,7 @@ def test_png_preview_reads_small_png(tmp_path):
     p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
     img = png_preview_content(str(p))
     assert img is not None
-    assert img.mimeType == "image/png"
+    assert field(img, "mimeType") == "image/png"
     assert img.data
 
 
@@ -58,11 +59,11 @@ def test_maybe_preview_attaches_image(tmp_path):
     result = _Result(output_path=str(p), n=3)
     out = maybe_preview(result)
     assert isinstance(out, CallToolResult)
-    assert out.structuredContent == {"output_path": str(p), "n": 3}
+    assert field(out, "structuredContent") == {"output_path": str(p), "n": 3}
     text, image = out.content
     assert '"n": 3' in text.text or '"n":3' in text.text.replace(" ", "")
-    assert image.mimeType == "image/png"
-    assert not out.isError
+    assert field(image, "mimeType") == "image/png"
+    assert not field(out, "isError")
 
 
 async def test_registered_render_tool_returns_image_and_structured(fake_executor, tmp_path):
@@ -95,4 +96,4 @@ async def test_registered_render_tool_returns_image_and_structured(fake_executor
     )
     assert isinstance(out, CallToolResult)
     assert any(isinstance(b, ImageContent) for b in out.content)
-    assert out.structuredContent["output_path"] == str(png)
+    assert field(out, "structuredContent")["output_path"] == str(png)

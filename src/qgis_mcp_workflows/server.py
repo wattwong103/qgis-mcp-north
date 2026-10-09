@@ -41,6 +41,7 @@ except Exception as _mcp_exc:
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
+from qgis_mcp_workflows.errors import InvalidArgumentError
 from qgis_mcp_workflows.helpers import with_png_preview
 from qgis_mcp_workflows.provenance import with_provenance
 
@@ -367,6 +368,7 @@ class ProjectInfo(BaseModel):
     extent: list[float]
     layers: list[LayerSummary]
     layouts: list[LayoutSummary]
+    unavailable_layers: Annotated[list[str], Field(description="Layers in the project whose data source is missing (kept as unavailable, not drawn).")] = []
 
 
 class ClassEntry(BaseModel):
@@ -567,6 +569,7 @@ class ExportResult(BaseModel):
     format: str
     n_pages: int
     layout_name: str
+    unavailable_layers: Annotated[list[str], Field(description="Layers in the project whose data source is missing (kept as unavailable, not drawn).")] = []
 
 
 class ComposeLayoutResult(BaseModel):
@@ -605,6 +608,8 @@ class BatchRenderResult(BaseModel):
     n_rendered: int
     manifest: list[BatchManifestEntry]
     errors: list[BatchError]
+    target_layer: Annotated[str | None, Field(description="Name of the layer that was filtered per value.")] = None
+    unavailable_layers: Annotated[list[str], Field(description="Layers in the project whose data source is missing (kept as unavailable, not drawn).")] = []
 
 
 class PptxResult(BaseModel):
@@ -624,6 +629,18 @@ class EvalResult(BaseModel):
 # ---------------------------------------------------------------------------
 # Stub helper
 # ---------------------------------------------------------------------------
+
+
+def _require_file(argument: str, path: str) -> None:
+    """Raise a typed error for a missing input file before anything opens it.
+
+    A bare FileNotFoundError from open() would reach mcp >= 2.1 clients only as
+    "Error executing tool <name>".
+    """
+    from qgis_mcp_workflows.errors import InputFileNotFoundError
+
+    if not os.path.isfile(path):
+        raise InputFileNotFoundError(argument, path)
 
 
 def _stub(tool_name: str, design_section: str) -> None:
@@ -1049,6 +1066,7 @@ def qgis_project_load(
             for la in result.get("layers", [])
         ],
         layouts=[LayoutSummary(name=lo["name"]) for lo in result.get("layouts", [])],
+        unavailable_layers=result.get("unavailable_layers", []),
     )
 
 
@@ -1517,6 +1535,8 @@ def qgis_render_choropleth(
     abs_output = os.path.abspath(output_png)
     abs_basemaps = [os.path.abspath(p) for p in (basemap_paths or [])]
     abs_csv = os.path.abspath(value_csv) if value_csv else None
+    if abs_csv is not None:
+        _require_file("value_csv", abs_csv)
 
     value_dict: dict[str, float] | None = None
     if abs_csv is not None:
@@ -1650,6 +1670,7 @@ def qgis_render_trajectory(
     from qgis_mcp_workflows.executors import get_executor
 
     abs_input = os.path.abspath(input_path)
+    _require_file("input_path", abs_input)
     abs_output = os.path.abspath(output_png)
     abs_basemaps = [os.path.abspath(p) for p in (basemap_paths or [])]
 
@@ -1873,21 +1894,22 @@ def _aggregate_link_density(
 
     Raises:
         FieldNotFoundError: if link_id_col or value_col is missing from any CSV.
-        ValueError: if aggregation='sum' but value_col is None.
+        InvalidArgumentError: if aggregation='sum' but value_col is None.
     """
     import csv as _csv
 
     from qgis_mcp_workflows.errors import FieldNotFoundError
 
     if aggregation == "sum" and value_col is None:
-        raise ValueError("aggregation='sum' requires value_col to be set.")
+        raise InvalidArgumentError("aggregation='sum' requires value_col to be set.")
     if aggregation not in ("count", "sum"):
-        raise ValueError(f"Unknown aggregation: {aggregation!r}. Use 'count' or 'sum'.")
+        raise InvalidArgumentError(f"Unknown aggregation: {aggregation!r}. Use 'count' or 'sum'.")
 
     density: dict[str, float] = {}
     n_rows = 0
 
     for path in csv_paths:
+        _require_file("trajectory_csvs", path)
         with open(path, encoding="utf-8", newline="") as f:
             reader = _csv.DictReader(f)
             columns = reader.fieldnames or []
@@ -1922,6 +1944,7 @@ def _read_load_csv(path: str, link_id_col: str, volume_col: str) -> tuple[dict[s
 
     from qgis_mcp_workflows.errors import FieldNotFoundError
 
+    _require_file("load_csv", path)
     density: dict[str, float] = {}
     with open(path, encoding="utf-8", newline="") as f:
         reader = _csv.DictReader(f)
@@ -1991,6 +2014,7 @@ def qgis_render_od_flows(
     from qgis_mcp_workflows.executors import get_executor
 
     abs_od = os.path.abspath(od_csv)
+    _require_file("od_csv", abs_od)
     abs_zones = os.path.abspath(zones_layer_path)
     abs_output = os.path.abspath(output_png)
     abs_basemaps = [os.path.abspath(p) for p in (basemap_paths or [])]
@@ -2117,7 +2141,7 @@ def qgis_render_link_density(
         raise DRMNetworkNotFoundError(abs_drm)
 
     if load_csv and trajectory_csvs:
-        raise ValueError("Pass trajectory_csvs or load_csv, not both.")
+        raise InvalidArgumentError("Pass trajectory_csvs or load_csv, not both.")
     if load_csv:
         density, n_rows_total = _read_load_csv(
             os.path.abspath(load_csv),
@@ -2135,7 +2159,7 @@ def qgis_render_link_density(
             value_col=value_col,
         )
     else:
-        raise ValueError("qgis_render_link_density requires trajectory_csvs or load_csv.")
+        raise InvalidArgumentError("qgis_render_link_density requires trajectory_csvs or load_csv.")
 
     n_points_total = int(sum(density.values())) if aggregation == "count" else n_rows_total
 
@@ -2246,7 +2270,9 @@ def qgis_assign_section_load(
     )
 
     abs_od = os.path.abspath(od_csv)
+    _require_file("od_csv", abs_od)
     abs_net = os.path.abspath(network_path)
+    _require_file("network_path", abs_net)
     abs_out = os.path.abspath(output_csv)
     rows, columns = read_od_csv(abs_od)
     for required in (origin_col, dest_col, value_col):
@@ -2551,6 +2577,7 @@ def qgis_export_layout(
         format=result["format"],
         n_pages=result["n_pages"],
         layout_name=result["layout_name"],
+        unavailable_layers=result.get("unavailable_layers", []),
     )
 
 
@@ -2561,6 +2588,7 @@ class AtlasExportResult(BaseModel):
     n_pages: int
     layout_name: str
     files: list[str]
+    unavailable_layers: Annotated[list[str], Field(description="Layers in the project whose data source is missing (kept as unavailable, not drawn).")] = []
 
 
 @_maybe_tool(
@@ -2613,6 +2641,7 @@ def qgis_export_atlas(
         n_pages=int(result.get("n_pages") or len(files)),
         layout_name=result.get("layout_name", layout_name),
         files=files,
+        unavailable_layers=result.get("unavailable_layers", []),
     )
 
 
@@ -2675,12 +2704,13 @@ def qgis_compose_layout(
     )
 )
 def qgis_batch_render(
-    template_qgz: Annotated[str, Field(description="Absolute path to a template project. Must contain a single 'active' layer to filter and (optionally) a layout to export.")],
-    attribute: Annotated[str, Field(description="Field on the active layer to filter by.")],
+    template_qgz: Annotated[str, Field(description="Absolute path to a template project with the layer to filter and (optionally) a layout to export.")],
+    attribute: Annotated[str, Field(description="Field on the filtered layer to filter by.")],
     values: Annotated[list[str], Field(description="Filter values to iterate. One render per value.")],
     output_dir: Annotated[str, Field(description="Absolute path to a directory where renders are written.")],
     layout_name: Annotated[str | None, Field(description="If given, exports the layout with this name; otherwise renders the map canvas.")] = None,
     filename_template: Annotated[str, Field(description="Filename template, e.g. '{value}.png' or 'choropleth_{value}.png'.")] = "{value}.png",
+    layer: Annotated[str | None, Field(description="Name or id of the vector layer to filter. Default: the top-most visible vector layer in the template's layer tree.")] = None,
 ) -> BatchRenderResult:
     """Fan-out: render the same template per filter value. Workflow tool.
 
@@ -2715,6 +2745,7 @@ def qgis_batch_render(
         "output_dir": abs_output_dir,
         "layout_name": layout_name,
         "filename_template": filename_template,
+        "layer": layer,
     }
     try:
         result = get_executor().dispatch("batch_render", params, timeout=300)
@@ -2748,6 +2779,8 @@ def qgis_batch_render(
             BatchError(value=e["value"], error=e["error"])
             for e in result.get("errors", [])
         ],
+        target_layer=result.get("target_layer"),
+        unavailable_layers=result.get("unavailable_layers", []),
     )
 
 
@@ -2778,7 +2811,7 @@ def qgis_figures_to_pptx(
     from pptx.util import Inches, Pt
 
     if captions is not None and len(captions) != len(figure_paths):
-        raise ValueError(
+        raise InvalidArgumentError(
             f"captions length ({len(captions)}) must match figure_paths length "
             f"({len(figure_paths)}). Pass captions=None to skip titles entirely."
         )
@@ -2790,6 +2823,10 @@ def qgis_figures_to_pptx(
     )
 
     abs_figs = [os.path.abspath(fig) for fig in figure_paths]
+    for fig in abs_figs:
+        _require_file("figure_paths", fig)
+    if template_pptx:
+        _require_file("template_pptx", os.path.abspath(template_pptx))
     abs_pptx = os.path.abspath(pptx_path)
     if template_pptx:
         prs = Presentation(os.path.abspath(template_pptx))
