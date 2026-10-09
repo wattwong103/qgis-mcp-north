@@ -25,16 +25,25 @@ class Executor(Protocol):
 
 
 _current: Executor | None = None
+# Tools call get_executor() right before dispatching, so this tells the
+# provenance recorder whether a call touched QGIS (provenance.environment).
+_requests = 0
 
 
 def get_executor() -> Executor:
     """Return the active executor; lazily creates a ``PluginExecutor`` default."""
-    global _current
+    global _current, _requests
+    _requests += 1
     if _current is None:
         from qgis_mcp_workflows.executors.plugin import PluginExecutor
 
         _current = PluginExecutor()
     return _current
+
+
+def executor_requests() -> int:
+    """How many times get_executor() has been called in this process."""
+    return _requests
 
 
 def set_executor(executor: Executor | None) -> None:
@@ -43,4 +52,4 @@ def set_executor(executor: Executor | None) -> None:
     _current = executor
 
 
-__all__ = ["Executor", "get_executor", "set_executor"]
+__all__ = ["Executor", "executor_requests", "get_executor", "set_executor"]
