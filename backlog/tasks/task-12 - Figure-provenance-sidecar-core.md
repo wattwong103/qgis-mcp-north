@@ -1,9 +1,10 @@
 ---
 id: TASK-12
 title: Figure provenance — sidecar core
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-08 10:00'
+updated_date: '2026-10-09 23:10'
 labels:
   - feature
   - provenance
@@ -28,3 +29,5 @@ First of four PRs for figure provenance (`docs/superpowers/specs/2026-10-08-figu
 - [x] #5 Environment never spawns headless for pure-Python tools and never caches a failure
 - [x] #6 pytest + ruff green; DESIGN §5, .gitignore, CHANGELOG updated
 <!-- AC:END -->
+
+Merged in PR #26 (wattwong103/qgis-mcp-north).

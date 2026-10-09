@@ -1,9 +1,10 @@
 ---
 id: TASK-13
 title: qgis_export_session — replay script from provenance sidecars
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-08 10:00'
+updated_date: '2026-10-09 23:10'
 labels:
   - feature
   - provenance
@@ -41,3 +42,5 @@ Plan: docs/superpowers/plans/2026-10-09-export-session.md (11 tasks). Deviations
 
 Review fix pass (code/python/security reviewers, 2026-10-09): replayable tools limited to those that record sidecars (a planted sidecar could emit qgis_eval); arguments must agree with recorded inputs/outputs; hash-verified made_by and intermediates; per-fingerprint source checks; batch file-name, network-path, malformed/oversized-sidecar gates; cross-OS out-dir mapping; DuckDB queries not replayed.
 <!-- SECTION:NOTES:END -->
+
+Merged in PR #27 (wattwong103/qgis-mcp-north).

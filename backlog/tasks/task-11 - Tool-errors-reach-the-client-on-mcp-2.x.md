@@ -1,9 +1,10 @@
 ---
 id: TASK-11
 title: Tool errors reach the client on mcp 2.x
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-06 23:30'
+updated_date: '2026-10-09 23:10'
 labels:
   - bug
   - deps
@@ -35,3 +36,5 @@ Found 2026-10-06 by the upstream comparison (upstream 4e2d830, 060bc25). mcp >= 
 Files: src/qgis_mcp_workflows/errors.py, compound.py, server.py, route.py; tests/test_tool_errors.py, tests/mcp_compat.py, tests/test_preview.py, tests/test_compound_mode.py; docs/DESIGN.md; CHANGELOG.md.
 Validation: uv run --no-sync pytest tests/ -q (locked 1.26); uv run --no-project --with-editable '.[dev,pptx,duckdb,network]' --with "mcp[cli]==2.3.0" --with pytest-asyncio pytest tests/ -q; uv tool run ruff check src/ tests/.
 <!-- SECTION:PLAN:END -->
+
+Merged in PR #24 (wattwong103/qgis-mcp-north).

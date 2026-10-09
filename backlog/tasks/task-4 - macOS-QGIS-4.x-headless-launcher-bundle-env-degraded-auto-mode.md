@@ -1,10 +1,10 @@
 ---
 id: TASK-4
 title: 'macOS QGIS 4.x: headless launcher, bundle env, degraded auto mode'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-01 18:57'
-updated_date: '2026-10-01 19:15'
+updated_date: '2026-10-09 23:10'
 labels:
   - macos
   - headless
@@ -29,3 +29,5 @@ Found 2026-10-02 by the GUFM Mac runtime closeout (gufm/23_results/audits/code/2
 - [ ] #5 Docs (DESIGN.md, CLAUDE.md, CHANGELOG) updated; QGIS 4 plugin install documented
 - [ ] #6 Plugin map furniture renders under QGIS 4 / PyQt6 (scoped enums); CI-safe static guard
 <!-- AC:END -->
+
+Merged in PR #12 (wattwong103/qgis-mcp-north).
