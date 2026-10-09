@@ -398,3 +398,37 @@ def build_script(steps: list[dict], inputs: list[dict], outputs: list[str], note
     produced = set(outputs)
     steps_def.body = [_step_call(s, produced) for s in steps] or [ast.Pass()]
     return ast.unparse(ast.fix_missing_locations(tree)) + "\n"
+
+
+def _fail(message: str, next_step: str) -> None:
+    from qgis_mcp_workflows.errors import QgisMcpWorkflowsError
+
+    raise QgisMcpWorkflowsError(f"{message} Next: {next_step}.")
+
+
+def export_session(output_py: str, figures: list[str] | None = None, folder: str | None = None,
+                   overwrite: bool = False) -> dict:
+    """Write a replay script for the given figures (or every figure in folder)."""
+    if (figures is None) == (folder is None):
+        _fail("qgis_export_session needs exactly one of figures or folder.",
+              "pass figures=[...] or folder=...")
+    target = Path(output_py).expanduser().resolve()
+    if target.suffix != ".py":
+        _fail(f"output_py must be a .py file, got {target.name!r}.", "pass output_py ending in .py")
+    if target.exists() and not overwrite:
+        _fail(f"{target} already exists.", "pick another output_py, or pass overwrite=True")
+    records, skipped, warnings = collect(figures, folder)
+    steps = plan_steps(records)
+    outputs = outputs_of(steps)
+    source = build_script(steps, source_inputs(steps), outputs, notes_for(steps),
+                          _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d"))
+    compile(source, str(target), "exec")  # the generator must never emit invalid code
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(source, encoding="utf-8")
+    return {
+        "output_path": str(target),
+        "n_figures": len(outputs),
+        "n_calls": len(steps),
+        "skipped": [{"figure": _clean(s["figure"]), "reason": s["reason"]} for s in skipped],
+        "warnings": [_clean(w) for w in warnings],
+    }

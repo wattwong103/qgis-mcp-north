@@ -614,6 +614,19 @@ class PptxResult(BaseModel):
     slide_titles: list[str | None]
 
 
+class SkippedFigure(BaseModel):
+    figure: str
+    reason: str
+
+
+class SessionExportResult(BaseModel):
+    output_path: str
+    n_figures: int
+    n_calls: int
+    skipped: list[SkippedFigure]
+    warnings: list[str]
+
+
 class EvalResult(BaseModel):
     stdout: str
     stderr: str
@@ -2903,6 +2916,34 @@ def qgis_figures_to_pptx(
         n_slides_total=len(prs.slides),
         slide_titles=slide_titles,
     )
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=False
+    )
+)
+def qgis_export_session(
+    output_py: Annotated[str, Field(description="Absolute path for the replay script (.py). Refused if it exists unless overwrite=True.")],
+    figures: Annotated[list[str] | None, Field(description="Figure files (or their .provenance.json sidecars) to replay. Exactly one of figures / folder.")] = None,
+    folder: Annotated[str | None, Field(description="Replay every figure with a sidecar in this folder (not recursive).")] = None,
+    overwrite: Annotated[bool, Field(description="Replace an existing output_py.")] = False,
+) -> SessionExportResult:
+    """Write a script that re-makes figures from their provenance sidecars. Delivery tool.
+
+    When to use: to make paper or deck figures reproducible, or to re-make them
+    after source data changed. Follows made_by chains back to source data.
+    The script checks source inputs (exit 2 if they changed, unless --force),
+    writes to replay_<date>/ beside itself unless --in-place, and resolves
+    ${DROPBOX_ROOT} on whichever machine runs it.
+
+    Returns: ``SessionExportResult`` — script path, files and calls replayed,
+    and skipped figures with fixed reasons (no sidecar, stale sidecar, unknown
+    tool, needs session state, ...).
+    """
+    from qgis_mcp_workflows.replay import export_session
+
+    return SessionExportResult(**export_session(output_py, figures=figures, folder=folder, overwrite=overwrite))
 
 
 # ---------------------------------------------------------------------------
