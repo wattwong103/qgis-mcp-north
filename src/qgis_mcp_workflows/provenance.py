@@ -8,16 +8,20 @@ function and record nothing.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import hashlib
 import importlib.metadata
 import importlib.util
+import json
 import logging
 import os
 import platform
 import stat
 import subprocess
+import tempfile
 import threading
+import time
 import weakref
 from collections.abc import Callable
 from pathlib import Path
@@ -307,3 +311,47 @@ def environment(dispatched: bool) -> dict:
     facts["transport"] = type(executor).__name__.removesuffix("Executor").lower() or "unknown"
     facts.update(_qgis_versions(executor))
     return facts
+
+
+_REPLACE_ATTEMPTS = 5
+_REPLACE_DELAY_S = 0.1
+
+
+def sidecar_path(figure: str) -> str:
+    return figure + SIDECAR_SUFFIX
+
+
+def write_sidecar(figure: str, record: dict) -> bool:
+    """Write atomically; on failure remove any stale sidecar and return False.
+
+    The temp name is unique (two sessions may write into one Dropbox folder) and
+    os.replace is retried briefly because Dropbox can hold the target open.
+    """
+    target = sidecar_path(figure)
+    data = json.dumps(record, indent=2, ensure_ascii=False, default=str).encode("utf-8")
+    tmp: str | None = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target) or ".", prefix=".", suffix=".provenance.tmp")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        for attempt in range(_REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp, target)
+                tmp = None
+                return True
+            except PermissionError:
+                if attempt == _REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(_REPLACE_DELAY_S)
+        return False
+    except OSError as err:
+        logger.warning("provenance: could not write %s: %s", target, err)
+        with contextlib.suppress(OSError):
+            os.remove(target)  # a stale sidecar must not vouch for the new figure
+        return False
+    finally:
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)

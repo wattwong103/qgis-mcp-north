@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import os
 import typing
 
@@ -225,3 +226,42 @@ def test_environment_never_caches_a_failure(fake_executor):
     assert provenance.environment(dispatched=True)["qgis"] == "unknown"
     provenance.environment(dispatched=True)
     assert [c for c, _ in fake_executor.calls] == ["diagnose", "diagnose"]
+
+
+# --- Task 6: atomic sidecar write -----------------------------------------------
+
+
+def test_write_sidecar_writes_json_and_no_temp(tmp_path):
+    fig = tmp_path / "fig.png"
+    fig.write_bytes(b"png")
+    assert provenance.write_sidecar(str(fig), {"schema": provenance.SCHEMA}) is True
+    side = tmp_path / "fig.png.provenance.json"
+    assert json.loads(side.read_text(encoding="utf-8")) == {"schema": provenance.SCHEMA}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["fig.png", "fig.png.provenance.json"]
+
+
+def test_write_sidecar_replace_failure_removes_stale(monkeypatch, tmp_path):
+    fig = tmp_path / "fig.png"
+    fig.write_bytes(b"png")
+    stale = tmp_path / "fig.png.provenance.json"
+    stale.write_text("{}", encoding="utf-8")
+
+    def locked(src, dst):
+        raise PermissionError("Dropbox holds the file")
+
+    monkeypatch.setattr(provenance.os, "replace", locked)
+    monkeypatch.setattr(provenance, "_REPLACE_DELAY_S", 0)
+    assert provenance.write_sidecar(str(fig), {"schema": "x"}) is False
+    assert not stale.exists()                                    # cannot vouch for the new figure
+    assert [p.name for p in tmp_path.iterdir()] == ["fig.png"]   # no temp left
+
+
+def test_write_sidecar_mkstemp_failure(monkeypatch, tmp_path):
+    fig = tmp_path / "fig.png"
+    fig.write_bytes(b"png")
+
+    def no_space(**kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(provenance.tempfile, "mkstemp", no_space)
+    assert provenance.write_sidecar(str(fig), {"schema": "x"}) is False
