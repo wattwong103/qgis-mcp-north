@@ -78,6 +78,9 @@ uv tool run ruff check src/ tests/
 | `QGIS_MCP_WORKFLOWS_REPO_ROOT` | (auto-derived) | Headless transport: repo root the runner adds to `sys.path` so it can import `qgis_mcp_workflows_plugin` |
 | `QGIS_MCP_WORKFLOWS_LOG_FILE` | `~/.local/share/qgis-mcp-workflows/server.log` | Rotating log file (5MB × 3) — empty disables file logging |
 | `QGIS_MCP_WORKFLOWS_LOG_LEVEL` | `INFO` | File log level. Console (stderr) is always WARNING+ |
+| `QGIS_MCP_WORKFLOWS_PROVENANCE` | `1` | `0` disables `<file>.provenance.json` sidecars (read per call) |
+| `QGIS_MCP_WORKFLOWS_PROVENANCE_HASH_MAX_MB` | `256` | Inputs above this get size + mtime instead of sha256 |
+| `DROPBOX_ROOT` | (per machine) | Provenance stores paths under it as `${DROPBOX_ROOT}/…`; `install.py` passes it into GUI client configs |
 
 ## MCP Tools (26 total as of v1.14; 5 grouped tools in compound mode. See `docs/DESIGN.md` §4 for full signatures.)
 

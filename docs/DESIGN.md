@@ -528,6 +528,8 @@ database cursor, an API — renders through the same path.
 
 The mcp-builder skill emphasizes "actionable error messages." Every error message ends with one suggested next tool call.
 
+**Provenance.** Every file a tool writes through MCP gets `<file>.provenance.json`: the call with every argument (defaults filled in), inputs fingerprinted before the call (sha256 up to `QGIS_MCP_WORKFLOWS_PROVENANCE_HASH_MAX_MB`, default 256; size + mtime above it), the file's own sha256, `made_by` links to producer sidecars whose fingerprint matches, a result summary, and the environment. Paths under `$DROPBOX_ROOT` are stored as `${DROPBOX_ROOT}/…`; others are listed in `machine_specific`. Python callers (scripts, tests) are not recorded. `QGIS_MCP_WORKFLOWS_PROVENANCE=0` disables it. Spec: `docs/superpowers/specs/2026-10-08-figure-provenance-design.md`.
+
 **Idempotency annotations.** All `render_*`, `export_*`, `figures_to_pptx`, and `batch_render` are non-idempotent (they write files). Annotate accordingly. `layer_inspect`, `style_*` (in headless mode, where styling is in-memory) are read-only or idempotent.
 
 **Output discipline.** Every tool that writes a file returns the absolute path in `output_path`. The path is canonical. When the written file is an existing PNG under 1.5 MB, the MCP result also includes `ImageContent` so the model can see the figure in the same turn. Oversize / missing / non-PNG outputs stay path-only. Tools do not return a parallel `render_map_base64` payload.
