@@ -1198,6 +1198,33 @@ class QgisMCPServer(QObject):
         "pretty": QgsClassificationPrettyBreaks,
     }
 
+    # The catch-all class qgis_style_categorized(classes=...) adds for values
+    # outside the subset (and NULL). ColorBrewer Greys-3 middle.
+    _OTHER_CATEGORY_LABEL: ClassVar[str] = "all other values"
+    _OTHER_CATEGORY_COLOR: ClassVar[str] = "#bdbdbd"
+
+    @staticmethod
+    def _is_null(value):
+        """True for None and for a NULL QVariant (what PyQt5 builds may return)."""
+        return value is None or (isinstance(value, QVariant) and value.isNull())
+
+    @staticmethod
+    def _order_category_subset(unique_values, classes_subset):
+        """Map the caller's ``classes`` onto the layer's own values, in the caller's order.
+
+        ``classes_subset`` arrives as strings over MCP; ``unique_values`` are the
+        layer's typed values (int, float, str, or NULL), so match on ``str(value)``.
+        Returns the values that get their own palette colour, first to last.
+
+        A requested value the layer lacks stays as a 0-feature class (its own
+        string), so a batch of weekly figures keeps one legend and one colour per
+        value even when a mode is absent that week. Repeats keep their first
+        position. NULL is never matched by name: a NULL-valued category acts as
+        QGIS's catch-all, so NULL always lands in the "all other values" class.
+        """
+        by_text = {str(v): v for v in unique_values if not QgisMCPServer._is_null(v)}
+        return [by_text.get(text, text) for text in dict.fromkeys(str(c) for c in classes_subset)]
+
     def list_basemaps(self, group=None, keyless_only=False, **kwargs):
         """Catalog of basemaps available to render tools, for discovery.
 
@@ -3155,6 +3182,7 @@ class QgisMCPServer(QObject):
         mode="equal_interval",
         diverging=False,
         center=0.0,
+        classes_subset=None,
         **kwargs,
     ):
         """Apply categorical / graduated / single-symbol style to a vector layer.
@@ -3190,10 +3218,14 @@ class QgisMCPServer(QObject):
                 v = f.attribute(field)
                 counts[v] = counts.get(v, 0) + 1
 
+            listed = unique_values
+            if classes_subset is not None:
+                listed = self._order_category_subset(unique_values, classes_subset)
+
             categories = []
             class_entries = []
-            n = max(len(unique_values) - 1, 1)
-            for i, value in enumerate(unique_values):
+            n = max(len(listed) - 1, 1)
+            for i, value in enumerate(listed):
                 symbol = QgsSymbol.defaultSymbol(layer.geometryType())
                 color = ramp.color(i / n)
                 symbol.setColor(color)
@@ -3203,6 +3235,24 @@ class QgisMCPServer(QObject):
                     "value": label,
                     "color": color.name(),  # hex string
                     "n_features": int(counts.get(value, 0)),
+                })
+
+            # A category valued "" is QGIS's "all other values" class: it catches
+            # every unlisted value and NULL (checked on 3.40). Skip it when the
+            # subset already covers every feature, so the legend has no empty row.
+            n_other = 0
+            if classes_subset is not None:
+                n_other = sum(counts.values()) - sum(int(counts.get(v, 0)) for v in listed)
+            if n_other > 0:
+                symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+                symbol.setColor(QColor(self._OTHER_CATEGORY_COLOR))
+                categories.append(
+                    QgsRendererCategory("", symbol, self._OTHER_CATEGORY_LABEL)
+                )
+                class_entries.append({
+                    "value": self._OTHER_CATEGORY_LABEL,
+                    "color": self._OTHER_CATEGORY_COLOR,
+                    "n_features": int(n_other),
                 })
 
             renderer = QgsCategorizedSymbolRenderer(field, categories)
@@ -3657,6 +3707,17 @@ class QgisMCPServer(QObject):
             "layout_name": layout_name,
         }
 
+    @staticmethod
+    def _layout_export_status(result):
+        """Split a QgsLayoutExporter result into (code, error text).
+
+        The static iterator overloads (``exportToPdf(atlas, ...)``) return
+        ``(ExportResult, error)``; the instance methods return the bare code.
+        """
+        if isinstance(result, tuple):
+            return result[0], (result[1] if len(result) > 1 else "")
+        return result, ""
+
     def export_atlas(
         self,
         layout_name,
@@ -3710,61 +3771,52 @@ class QgisMCPServer(QObject):
             out = os.path.join(output_dir, "atlas.pdf")
             settings = QgsLayoutExporter.PdfExportSettings()
             settings.dpi = dpi
-            result = None
-            try:
-                result = QgsLayoutExporter.exportToPdf(atlas, out, settings)
-            except TypeError:
-                result = exporter.exportToPdf(out, settings)
-            if result not in (LAYOUT_SUCCESS, None) and result != 0:
-                raise Exception("Atlas PDF export failed with code: %s" % result)
-            if os.path.exists(out):
-                files.append(out)
+            # No fallback to the instance exportToPdf: it writes only the current
+            # layout page, which would pass off one page as the whole atlas.
+            code, error = self._layout_export_status(
+                QgsLayoutExporter.exportToPdf(atlas, out, settings)
+            )
+            if code not in (LAYOUT_SUCCESS, 0):
+                raise Exception("Atlas PDF export failed with code %s: %s" % (code, error))
+            files.append(out)
+            n_pages = atlas.count()
         else:
+            # One page at a time rather than the static exportToImage(atlas, ...):
+            # we name each file, so the result lists exactly what this run wrote,
+            # including files that overwrote a previous run's.
             settings = QgsLayoutExporter.ImageExportSettings()
             settings.dpi = dpi
-            before = set(os.listdir(output_dir))
-            used_static = False
+            if not atlas.beginRender():
+                raise Exception("Atlas beginRender failed for layout %r" % layout_name)
+            # Compared lower-cased: "Chiyoda" and "chiyoda" are one file on NTFS
+            # and on default (case-insensitive) APFS.
+            taken = set()
             try:
-                result = QgsLayoutExporter.exportToImage(
-                    atlas, os.path.join(output_dir, "atlas"), fmt, settings
-                )
-                used_static = True
-                if result not in (LAYOUT_SUCCESS, None) and result != 0:
-                    raise Exception("Atlas image export failed with code: %s" % result)
-            except Exception:
-                used_static = False
-            if used_static:
-                after = set(os.listdir(output_dir))
-                files = sorted(
-                    os.path.join(output_dir, name) for name in sorted(after - before)
-                )
-            if not files:
-                if not atlas.beginRender():
-                    raise Exception("Atlas beginRender failed for layout %r" % layout_name)
-                try:
-                    idx = 0
-                    more = True
-                    while more:
-                        stem = atlas.currentFilename() or ("page_%04d" % idx)
-                        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in stem)
-                        path = os.path.join(output_dir, "%s.%s" % (safe, fmt))
-                        img_result = exporter.exportToImage(path, settings)
-                        if img_result != LAYOUT_SUCCESS and img_result != 0:
-                            raise Exception(
-                                "Atlas page %s export failed with code: %s" % (idx, img_result)
-                            )
-                        files.append(path)
-                        idx += 1
-                        more = bool(atlas.next())
-                finally:
-                    atlas.endRender()
+                more = atlas.first()
+                while more:
+                    stem = atlas.currentFilename() or ("page_%04d" % len(files))
+                    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in stem)
+                    path = os.path.join(output_dir, "%s.%s" % (safe, fmt))
+                    if path.lower() in taken:  # filename expression not unique per feature
+                        path = os.path.join(output_dir, "%s_%04d.%s" % (safe, len(files), fmt))
+                    taken.add(path.lower())
+                    code, error = self._layout_export_status(exporter.exportToImage(path, settings))
+                    if code not in (LAYOUT_SUCCESS, 0):
+                        raise Exception(
+                            "Atlas page %s export failed with code %s: %s"
+                            % (len(files), code, error)
+                        )
+                    files.append(path)
+                    more = atlas.next()
+            finally:
+                atlas.endRender()
 
         return {
             "ok": True,
             "output_dir": output_dir,
             "output_path": files[0] if files else output_dir,
             "format": fmt,
-            "n_pages": len(files),
+            "n_pages": n_pages if fmt == "pdf" else len(files),
             "layout_name": layout_name,
             "files": files,
             "atlas_enabled": True,

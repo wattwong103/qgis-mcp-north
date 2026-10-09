@@ -33,6 +33,7 @@ DEFAULT_DRM_GPKG = str(_GUFM / "10_data" / "urban_kg" / "urban_data" / "road" / 
 # Demo-mode paths — bundled fixtures, suitable for CI.
 DEMO_ZONES_PATH = REPO_ROOT / "tests" / "benchmarks" / "fixtures" / "scaled_zones_134.geojson"
 DEMO_TRAJ_CSV = REPO_ROOT / "tests" / "fixtures" / "tiny_trajectory.csv"
+DEMO_LINK_DENSITY = {"100001": 3, "100002": 1}
 
 
 def run_weekly(
@@ -191,12 +192,14 @@ def _render_link_density(
         }
 
     else:
-        # Demo / test mode: dispatch directly to the executor.
-        # The FakeExecutor (or real headless/plugin) handles "render_link_density".
+        # Demo / test mode: dispatch directly to the executor, skipping the tool's
+        # DRM file check (there is no fixture GeoPackage), so only the FakeExecutor
+        # can serve it. The plugin takes the aggregated {link_id: density} dict,
+        # not trajectory CSVs, so send a fixed synthetic one.
         result = get_executor().dispatch(
             "render_link_density",
             {
-                "trajectory_csvs": [trajectory_csv],
+                "density": DEMO_LINK_DENSITY,
                 "drm_network_path": drm_gpkg or DEFAULT_DRM_GPKG,
                 "output_png": str(ld_out),
                 "link_id_col": "link_id",
@@ -205,8 +208,6 @@ def _render_link_density(
                 "n_classes": 7,
                 "mode": "quantile",
                 "palette": "YlOrRd",
-                "min_density": 1.0,
-                "top_n": None,
                 "extent": None,
                 "basemap_paths": [],
                 "width": 1600,
