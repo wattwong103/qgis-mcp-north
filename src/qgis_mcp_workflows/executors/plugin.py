@@ -33,6 +33,8 @@ class PluginExecutor:
             raise PluginUnavailableError(self.host, self.port)
         try:
             response = client.send_command(command, params or {}, timeout=timeout or TIMEOUT_DEFAULT)
+        except ConnectionError as err:  # QGIS closed or crashed mid-command
+            raise PluginUnavailableError(self.host, self.port) from err
         finally:
             client.disconnect()
 

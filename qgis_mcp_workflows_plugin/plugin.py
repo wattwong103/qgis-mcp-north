@@ -76,10 +76,21 @@ from qgis.core import (
     QgsVectorLayer,
     QgsWkbTypes,
 )
-from qgis.PyQt.QtCore import QBuffer, QByteArray, QObject, QSize, QSizeF, QTimer, QUrl, QVariant
+from qgis.PyQt.QtCore import (
+    QBuffer,
+    QByteArray,
+    QCoreApplication,
+    QObject,
+    QSize,
+    QSizeF,
+    QTimer,
+    QUrl,
+    QVariant,
+)
 from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon
 from qgis.PyQt.QtWidgets import (
     QAction,
+    QApplication,
     QCheckBox,
     QDialog,
     QHBoxLayout,
@@ -1063,13 +1074,15 @@ class QgisMCPServer(QObject):
             raise Exception(f"Failed to save project to {save_path}")
 
     def load_project(self, path, **kwargs):
+        unavailable = self._open_project(path, force=True)
         project = QgsProject.instance()
-        if project.read(path):
-            self.iface.mapCanvas().refresh()
-            QgsMessageLog.logMessage(f"Project loaded: {path}", self.LOG_TAG, MSG_INFO)
-            return {"loaded": path, "layer_count": len(project.mapLayers())}
-        else:
-            raise Exception(f"Failed to load project from {path}")
+        self.iface.mapCanvas().refresh()
+        QgsMessageLog.logMessage(f"Project loaded: {path}", self.LOG_TAG, MSG_INFO)
+        return {
+            "loaded": path,
+            "layer_count": len(project.mapLayers()),
+            "unavailable_layers": unavailable,
+        }
 
     def create_new_project(self, path, **kwargs):
         project = QgsProject.instance()
@@ -3652,12 +3665,7 @@ class QgisMCPServer(QObject):
         backward compatibility with existing callers.
         """
         if qgz_path:
-            project = QgsProject.instance()
-            current = project.fileName()
-            if current != qgz_path:
-                project.clear()
-                if not project.read(qgz_path):
-                    raise Exception(f"Failed to load project from {qgz_path}")
+            self._open_project(qgz_path)
 
         out = output_path or path
         if not out:
@@ -3705,6 +3713,7 @@ class QgisMCPServer(QObject):
             "format": fmt,
             "n_pages": int(n_pages),
             "layout_name": layout_name,
+            "unavailable_layers": self._unavailable_layers(),
         }
 
     @staticmethod
@@ -3734,11 +3743,7 @@ class QgisMCPServer(QObject):
         has no coverage layer (use export_layout / batch_render instead).
         """
         if qgz_path:
-            project = QgsProject.instance()
-            if project.fileName() != qgz_path:
-                project.clear()
-                if not project.read(qgz_path):
-                    raise Exception("Failed to load project from %s" % qgz_path)
+            self._open_project(qgz_path)
 
         if not output_dir:
             raise Exception("export_atlas: output_dir required")
@@ -3818,6 +3823,7 @@ class QgisMCPServer(QObject):
             "format": fmt,
             "n_pages": n_pages if fmt == "pdf" else len(files),
             "layout_name": layout_name,
+            "unavailable_layers": self._unavailable_layers(),
             "files": files,
             "atlas_enabled": True,
         }
@@ -4184,16 +4190,54 @@ class QgisMCPServer(QObject):
             "prefix": prefix,
         }
 
+    def _open_project(self, path, force=False):
+        """Make ``path`` the current project; return the layers QGIS could not load.
+
+        Reads only when another project is open (or ``force``). In Desktop, a layer
+        whose source is missing makes ``read()`` open the modal "Handle Unavailable
+        Layers" dialog and wait for a click, which blocks the socket until the
+        client times out. A timer rejects the dialog from inside its own event loop
+        (upstream 44ae681), which keeps those layers as unavailable; they are
+        returned so every caller can report them.
+        """
+        project = QgsProject.instance()
+        if force or project.fileName() != path:
+            project.clear()
+            # Only a widget application can show the dialog (headless runs an
+            # offscreen QApplication, where the timer simply never finds one).
+            timer = None
+            if isinstance(QCoreApplication.instance(), QApplication):
+                timer = QTimer()
+                timer.timeout.connect(self._dismiss_unavailable_layers_dialog)
+                timer.start(50)
+            try:
+                ok = project.read(path)
+            finally:
+                if timer is not None:
+                    timer.stop()
+            if not ok:
+                raise Exception(f"Failed to load project from {path}: {project.error()}")
+        return self._unavailable_layers()
+
+    @staticmethod
+    def _unavailable_layers():
+        layers = QgsProject.instance().mapLayers().values()
+        return sorted(layer.name() for layer in layers if not layer.isValid())
+
+    @staticmethod
+    def _dismiss_unavailable_layers_dialog():
+        dialog = QApplication.activeModalWidget()
+        if dialog is not None and dialog.metaObject().className() == "QgsHandleBadLayers":
+            dialog.reject()
+
     def project_load(self, qgz_path, **kwargs):
         """Load a saved .qgz/.qgs and return its layers + layouts in one call.
 
         Stateful — leaves the project loaded so subsequent export_layout or
         batch_render see the same project state.
         """
+        unavailable = self._open_project(qgz_path, force=True)
         project = QgsProject.instance()
-        project.clear()
-        if not project.read(qgz_path):
-            raise Exception(f"Failed to read project: {qgz_path}")
 
         try:
             if self.iface is not None and hasattr(self.iface, "mapCanvas"):
@@ -4247,6 +4291,7 @@ class QgisMCPServer(QObject):
             ],
             "layers": layers_info,
             "layouts": layouts,
+            "unavailable_layers": unavailable,
         }
 
     def batch_render(
@@ -4261,37 +4306,20 @@ class QgisMCPServer(QObject):
         height=1200,
         dpi=150,
         background="white",
+        layer=None,
         **kwargs,
     ):
-        """Fan-out: open template_qgz, iterate values, filter the active layer,
-        render each to output_dir. Returns a manifest + errors list.
+        """Fan-out: open template_qgz, filter one layer per value, render each to
+        output_dir. Returns a manifest + errors list.
 
-        Active-layer convention: project's saved active layer if set; else the
-        first vector layer. Documented loudly in the MCP tool docstring.
+        The filtered layer is ``layer`` (name or id) if given, else the top-most
+        visible vector layer in the layer tree. QGIS does not save the active
+        layer in a project, so the former "saved active layer" step never applied
+        and the fallback took registry order, which sorts layer ids by name.
         """
+        unavailable = self._open_project(template_qgz)
         project = QgsProject.instance()
-        if project.fileName() != template_qgz:
-            project.clear()
-            if not project.read(template_qgz):
-                raise Exception(f"Failed to read template: {template_qgz}")
-
-        # Resolve target layer.
-        target = None
-        try:
-            target = project.mapLayer(project.readPath("ActiveLayerID"))
-        except Exception:
-            target = None
-        if target is None or target.type() != LAYER_VECTOR:
-            for la in project.mapLayers().values():
-                if la.type() == LAYER_VECTOR:
-                    target = la
-                    QgsMessageLog.logMessage(
-                        f"batch_render: using first vector layer as filter target: {la.name()}",
-                        self.LOG_TAG, MSG_INFO,
-                    )
-                    break
-        if target is None:
-            raise Exception("batch_render: no vector layer found in template")
+        target = self._batch_target(project, layer)
 
         field_names = [f.name() for f in target.fields()]
         if attribute not in field_names:
@@ -4306,18 +4334,32 @@ class QgisMCPServer(QObject):
 
         manifest = []
         errors = []
+        # A template may carry its own filter; it is replaced while rendering and
+        # put back afterwards (it used to be cleared for the rest of the session).
+        original_subset = target.subsetString()
+        column = QgsExpression.quotedColumnRef(attribute)
+        render_layers = self._visible_layers(project, target)
 
         try:
             for value in values:
-                safe_value = str(value).replace("'", "''")
-                expr = f'"{attribute}" = \'{safe_value}\''
+                # SQL-style literal: OGR subset strings are SQL, where
+                # quotedValue's expression escaping (doubled backslashes) breaks.
+                literal = "'" + str(value).replace("'", "''") + "'"
+                expr = f"{column} = {literal}"
                 try:
-                    target.setSubsetString(expr)
+                    if not target.setSubsetString(expr):
+                        # An ignored False left the previous filter in place, so
+                        # the wrong features were saved under this value's name.
+                        errors.append({"value": str(value), "error": f"QGIS refused the filter {expr}"})
+                        continue
                     if target.featureCount() == 0:
                         errors.append({"value": str(value), "error": "No features match filter"})
                         continue
 
-                    filename = filename_template.format(value=value)
+                    # The value names a file inside output_dir, never a path:
+                    # "ko\to" or "../x" must not reach another folder.
+                    safe_name = "".join("_" if c in '\\/:*?"<>|' else c for c in str(value))
+                    filename = filename_template.format(value=safe_name)
                     out_path = os.path.join(output_dir, filename)
 
                     extent_rect = QgsRectangle(target.extent())
@@ -4344,7 +4386,7 @@ class QgisMCPServer(QObject):
                             continue
                     else:
                         ms = QgsMapSettings()
-                        ms.setLayers(list(project.mapLayers().values()))
+                        ms.setLayers(render_layers)
                         ms.setExtent(extent_rect)
                         ms.setOutputSize(QSize(int(width), int(height)))
                         ms.setOutputDpi(int(dpi))
@@ -4375,17 +4417,89 @@ class QgisMCPServer(QObject):
                 except Exception as err:
                     errors.append({"value": str(value), "error": str(err)})
         finally:
-            try:
-                target.setSubsetString("")
-            except Exception:
-                pass
+            if not target.setSubsetString(original_subset):
+                QgsMessageLog.logMessage(
+                    f"batch_render: could not restore the filter {original_subset!r} on {target.name()}",
+                    self.LOG_TAG, MSG_WARNING,
+                )
 
         return {
             "output_dir": output_dir,
             "n_rendered": len(manifest),
             "manifest": manifest,
             "errors": errors,
+            "target_layer": target.name(),
+            "unavailable_layers": unavailable,
         }
+
+    @staticmethod
+    def _layer_order(project):
+        """(layers top first, each once; ids of layers whose tree node is visible).
+
+        Order is the custom layer order if the project sets one, else the layer
+        tree. A layer placed in two groups has two tree nodes but appears once.
+        """
+        root = project.layerTreeRoot()
+        nodes = [n for n in root.findLayers() if n.layer() is not None]
+        visible = {n.layer().id() for n in nodes if n.isVisible()}
+        if root.hasCustomLayerOrder():
+            ordered = list(root.customLayerOrder())
+        else:
+            ordered = [n.layer() for n in nodes]
+        seen = set()
+        unique = []
+        for la in ordered:
+            if la is not None and la.id() not in seen:
+                seen.add(la.id())
+                unique.append(la)
+        return unique, visible
+
+    @classmethod
+    def _batch_target(cls, project, layer):
+        """The vector layer batch_render filters: ``layer`` by id or name, else the
+        top-most visible vector layer (same order as the drawing)."""
+        ordered, visible = cls._layer_order(project)
+        vectors = [la for la in ordered if la.type() == LAYER_VECTOR]
+        valid = [la for la in vectors if la.isValid()]
+        if layer:
+            matches = [la for la in valid if layer in (la.id(), la.name())]
+            if len(matches) != 1:
+                if matches:
+                    reason = "LAYER_AMBIGUOUS (pass the id)"
+                elif any(layer in (la.id(), la.name()) for la in vectors):
+                    reason = "LAYER_UNAVAILABLE (its data source is missing)"
+                else:
+                    reason = "LAYER_NOT_FOUND"
+                names = [f"{la.name()} ({la.id()})" for la in valid]
+                raise Exception(f"{reason}: {layer!r}. Vector layers: {names}")
+            return matches[0]
+        for la in vectors:
+            if la.id() not in visible:
+                continue
+            if not la.isValid():
+                # Skipping it would quietly filter the next layer down instead,
+                # e.g. when the zones file sits under another machine's Dropbox.
+                raise Exception(
+                    f"LAYER_UNAVAILABLE: the top-most visible vector layer {la.name()!r} has a "
+                    "missing data source; pass layer= to name the layer to filter"
+                )
+            return la
+        raise Exception(
+            "batch_render: no visible vector layer in the template; pass layer= to name one"
+        )
+
+    @classmethod
+    def _visible_layers(cls, project, target):
+        """Layers to draw, top first: what the template shows, plus the target.
+
+        Drawing every registry layer put hidden ones (an opaque aerial, say) on
+        top of the figure, in an order unrelated to the layer tree.
+        """
+        ordered, visible = cls._layer_order(project)
+        layers = [la for la in ordered if la.id() in visible and la.isValid()]
+        if target.id() not in {la.id() for la in layers}:
+            layers.insert(0, target)
+        return layers
 
     # -----------------------------------------------------------------------
     # Phase 3 — Plugin development & system management handlers

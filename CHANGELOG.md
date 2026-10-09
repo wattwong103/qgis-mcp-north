@@ -34,6 +34,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `install.py` writes `DROPBOX_ROOT` into GUI MCP client configs (never into the
   tracked `.mcp.json`).
 
+## Unreleased — batch render and project reads
+
+### Fixed
+
+- `qgis_batch_render` filters the right layer: `layer=` (name or id), else the
+  top-most visible vector layer in the template's layer tree, named in the new
+  `target_layer` field. The old "saved active layer" step could never apply
+  (QGIS does not save the active layer), so it fell back to registry order —
+  layer ids sorted by name — and could filter a hidden or unrelated layer.
+- Without a layout, `qgis_batch_render` draws the template's visible layers in
+  layer-tree order; it used to draw every layer, hidden ones included.
+- A filter the provider refuses is now an error for that value. The ignored
+  `False` used to leave the layer unfiltered and save the whole map under the
+  value's file name. The field is quoted with `QgsExpression.quotedColumnRef`,
+  the value as an SQL literal (OGR subset strings are SQL).
+- An unavailable top-most layer is no longer skipped in favour of the next one
+  down: without `layer=`, `qgis_batch_render` stops with `LAYER_UNAVAILABLE`.
+- Values name files inside `output_dir` only: path separators and characters
+  Windows forbids become `_` in the file name (`ko	o` -> `ko_to.png`); a
+  value such as `../x` used to write outside `output_dir`.
+- The template's own filter on the filtered layer is restored after the batch;
+  it used to be cleared for the rest of the session.
+- Project reads (`qgis_project_load`, `qgis_export_layout`, `qgis_export_atlas`,
+  `qgis_batch_render`) no longer block on QGIS Desktop's modal "Handle
+  Unavailable Layers" dialog (upstream 44ae681); the missing layers are kept as
+  unavailable and reported in a new `unavailable_layers` field. A failed read
+  now carries QGIS's own error text.
+
+## Unreleased — tool errors on mcp 2.x
+
+### Fixed
+
+- Tool errors keep their message and `Next:` hint on mcp >= 2.1, which shows
+  clients only "Error executing tool <name>" for any exception that is not the
+  SDK's `ToolError`. `QgisMcpWorkflowsError` now subclasses `ToolError` (import
+  shim for 1.x/2.x), and the 25 bare `ValueError` argument checks in the
+  compound tools, `qgis_render_link_density`, `qgis_figures_to_pptx` and the
+  network router raise `InvalidArgumentError` (still a `ValueError`) with a
+  `Next:` hint. Missing input files (CSV, figure, template, network) raise
+  `InputFileNotFoundError` (still a `FileNotFoundError`) before anything opens
+  them, and a plugin socket that drops mid-command raises
+  `PluginUnavailableError` instead of a bare `ConnectionError`. Installs from
+  `install.py --remote` resolve mcp 2.x; the locked 1.26 was unaffected.
+
+### Tests
+
+- The suite passes on mcp 2.3 as well as the locked 1.26: result fields are
+  read through `tests/mcp_compat.py` (2.x renamed `mimeType` / `structuredContent`
+  / `isError` to snake_case).
+
 ## Unreleased — upstream review fixes
 
 ### Fixed

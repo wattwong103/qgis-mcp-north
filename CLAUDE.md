@@ -102,7 +102,7 @@ uv tool run ruff check src/ tests/
 | `qgis_render_catchment` | ✅ v1.4 | Voronoi (Thiessen) service-area catchments around point features via `QgsGeometry.voronoiDiagram` (no Processing dep). |
 | `qgis_export_layout` | ✅ v0.5 | PNG/PDF/SVG via `QgsLayoutExporter`; loads `qgz_path` internally if not already loaded; `LayoutNotFoundError` when layout missing |
 | `qgis_compose_layout` | ✅ v1.4 | Programmatic `QgsPrintLayout`: titled map panel + linked legend / scale bar / north arrow, export PNG/PDF/SVG. Complements `export_layout` (which only exports pre-authored `.qgz`). |
-| `qgis_batch_render` | ✅ v0.5 | Fan-out per attribute value; active-layer convention (saved-active → first vector fallback); manifest + per-value errors; `subset_string` reset in `finally` |
+| `qgis_batch_render` | ✅ v0.5 | Fan-out per attribute value; filters `layer=` or the top-most visible vector layer (named in `target_layer`); draws only visible layers; refused filters reported per value; template filter restored in `finally` |
 | `qgis_figures_to_pptx` | ✅ v0.3 / v1.8 | Pure python-pptx. `two_column` pairs figures; `title_image_caption` splits a newline in the caption into title vs body. |
 | `qgis_export_session` | ✅ v1.15 | Replay script from provenance sidecars (AST-built; input check; `--out-dir`/`--in-place`); follows `made_by` chains; full mode only |
 | `qgis_list_basemaps` | ✅ v1.5 | Discovery for `basemap=`: built-in presets + every usable QuickMapServices source in the QGIS profile, plus `qms_rejected` explaining what was filtered (non-3857 CRS, licence-restricted providers) and why. |
