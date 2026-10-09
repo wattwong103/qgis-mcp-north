@@ -20,10 +20,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn
 
+from qgis_mcp_workflows import ledger
 from qgis_mcp_workflows.provenance import (
     INPUT_ARGS,
     INPUT_LIST_ARGS,
     OUTPUT_ARGS,
+    ROOT_TOKEN,
     SCHEMA,
     SIDECAR_SUFFIX,
     _regular_stat,
@@ -37,7 +39,6 @@ from qgis_mcp_workflows.replay import ReplayError, _clean, resolve
 
 MAX_SIDECARS = 200
 _SIDECAR_MAX_BYTES = 2 * 1024 * 1024
-_STATE_READING_TOOLS = frozenset({"qgis_render_map"})
 # A recorded SQL query is code: DuckDB can read files or fetch URLs from inside a
 # SELECT, so it is not replayed from an unsigned sidecar.
 _QUERY_TOOLS = frozenset({"qgis_render_from_duckdb"})
@@ -128,7 +129,8 @@ def _well_formed(record: dict) -> bool:
             and _str_list(record.get("outputs")) and record["figure"] in record["outputs"]
             and _str_list(record.get("unrecorded_state", [])) and _size_ok(record.get("unrecorded_state", []))
             and all(_file_entries(record.get(k, [])) for k in ("inputs", "implicit_inputs", "machine_specific"))
-            and isinstance(remote, list) and all(isinstance(e, dict) for e in remote))
+            and isinstance(remote, list) and all(isinstance(e, dict) for e in remote)
+            and isinstance(record.get("depends_on", []), list) and _size_ok(record.get("depends_on", [])))
 
 
 def _argument_paths(arguments: dict) -> tuple[list, list, list]:
@@ -197,8 +199,82 @@ def _record_paths(record: dict) -> list:
     for key in ("inputs", "implicit_inputs"):
         for entry in record.get(key, []):
             paths += [entry["path"], entry.get("made_by")]
+    for dep in record.get("depends_on", []):
+        inputs = dep.get("inputs") if isinstance(dep, dict) else None
+        if isinstance(inputs, list):
+            paths += [e.get("path") for e in inputs if isinstance(e, dict)]
     ins, outs, dirs = _argument_paths(record["call"]["arguments"])
     return paths + ins + outs + dirs
+
+
+# Calls a state-reading figure depends on (spec §6). A sidecar names them only
+# inside depends_on — never as its own call (TASK-13's _writes_files rule).
+_DEPENDENCY_TOOLS = frozenset({
+    ("server", "qgis_load_layer"), ("server", "qgis_style_categorized"), ("server", "qgis_style_graduated"),
+    ("server", "qgis_project_load"), ("server", "qgis_eval"),
+    ("compound", "qgis_inspect"), ("compound", "qgis_style"),
+})
+
+
+def _dependency_ok(entry: Any) -> bool:
+    """A depends_on entry is a real ledger call whose paths are its recorded inputs."""
+    from qgis_mcp_workflows import compound, server
+
+    if not isinstance(entry, dict) or not isinstance(entry.get("call"), dict):
+        return False
+    call, seq, layer = entry["call"], entry.get("seq"), entry.get("layer_id")
+    args = call.get("arguments")
+    key = (call.get("module"), call.get("tool"))
+    if key not in _DEPENDENCY_TOOLS or not isinstance(args, dict) or not _size_ok(args):
+        return False
+    if not (isinstance(seq, int) and not isinstance(seq, bool) and isinstance(layer, str | None)
+            and _file_entries(entry.get("inputs", []))):
+        return False
+    fn = getattr({"server": server, "compound": compound}[key[0]], key[1])
+    if not set(args) <= set(inspect.signature(fn).parameters):
+        return False
+    if ledger.kind(key[1], args) not in ("load", "style", "project", "eval"):
+        return False
+    ins, outs, dirs = _argument_paths(args)
+    read = {e["path"] for e in entry.get("inputs", [])}
+    return (not outs and not dirs
+            and all(isinstance(p, str) and p in read for p in ins)
+            and not any(_network(p) for p in read))
+
+
+def _qgz(tool: str, args: dict) -> Any:
+    batch = tool == "qgis_batch_render" or (tool == "qgis_export" and args.get("kind") == "batch")
+    return args.get("template_qgz") if batch else (args.get("qgz_path") or args.get("path"))
+
+
+def _covers_state(record: dict) -> bool:
+    """depends_on rebuilds what the figure reads: its layers, or the project it exports."""
+    tool, args = record["call"]["tool"], record["call"]["arguments"]
+    deps = record.get("depends_on") or []
+    projects = [d for d in deps if ledger.kind(d["call"]["tool"], d["call"]["arguments"]) == "project"]
+    if ledger.kind(tool, args) == "map":
+        loaded = {d.get("layer_id") for d in deps
+                  if ledger.kind(d["call"]["tool"], d["call"]["arguments"]) == "load"}
+        return bool(projects) or all(layer in loaded for layer in args.get("layer_ids") or [])
+    target = _qgz(tool, args)
+    return any(_qgz(d["call"]["tool"], d["call"]["arguments"]) == target for d in projects)
+
+
+def keep_evals(records: list[dict], include_evals: bool, trust_foreign: bool) -> tuple[list[dict], list[str]]:
+    """Drop recorded evals the caller did not ask for, or does not trust (spec §7 Trust)."""
+    kept: list[dict] = []
+    warnings: list[str] = []
+    for record in records:
+        deps = record.get("depends_on") or []
+        evals = [d for d in deps if d["call"]["tool"] == "qgis_eval"]
+        foreign = not record["figure"].startswith(ROOT_TOKEN)
+        if evals and (not include_evals or (foreign and not trust_foreign)):
+            why = ("include_evals=False" if not include_evals
+                   else "the figure is outside DROPBOX_ROOT; pass trust_foreign=True to keep them")
+            warnings.append(f"{_clean(record['figure'])}: {len(evals)} qgis_eval call(s) left out ({why})")
+            record = {**record, "depends_on": [d for d in deps if d["call"]["tool"] != "qgis_eval"]}
+        kept.append(record)
+    return kept, warnings
 
 
 def _skip_reason(record: dict, figure: str) -> str | None:
@@ -211,7 +287,13 @@ def _skip_reason(record: dict, figure: str) -> str | None:
     if any(_network(p) for p in _record_paths(record)):
         return "network path"
     tool, args = record["call"]["tool"], record["call"]["arguments"]
-    if tool in _STATE_READING_TOOLS or (tool == "qgis_render" and args.get("mode") == "map"):
+    deps = record.get("depends_on", [])
+    if not all(_dependency_ok(d) for d in deps):
+        return "invalid depends_on"
+    state_kind = ledger.kind(tool, args)
+    if deps and state_kind not in ("map", "export"):
+        return "invalid depends_on"
+    if (state_kind == "map" or deps) and not _covers_state(record):
         return "needs session state"
     if tool in _QUERY_TOOLS or (tool == "qgis_render" and args.get("mode") == "duckdb"):
         return "runs a recorded query"
