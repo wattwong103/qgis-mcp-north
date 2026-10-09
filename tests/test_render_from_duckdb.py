@@ -155,12 +155,25 @@ def test_query_cannot_read_other_files(fake_executor, db, tmp_path):
     secret = tmp_path / "secret.txt"
     secret.write_text("TOPSECRET", encoding="utf-8")
     fake_executor.responses["render_wkt_features"] = _render_response()
-    with pytest.raises(QgisMcpWorkflowsError, match="query failed"):
+    with pytest.raises(QgisMcpWorkflowsError, match="only tables stored in the database"):
         qgis_render_from_duckdb(
             db_path=db, query=f"SELECT content AS geom FROM read_text('{secret.as_posix()}')",
             output_png="/tmp/o.png", geometry_column="geom",
         )
     assert fake_executor.calls == []
+
+
+def test_a_view_over_an_external_file_gets_an_actionable_error(fake_executor, tmp_path):
+    csv = tmp_path / "zones.csv"
+    csv.write_text("zone_id,geom\nZ1,POINT (139.7 35.7)\n", encoding="utf-8")
+    path = tmp_path / "views.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute(f"CREATE VIEW v AS SELECT * FROM read_csv('{csv.as_posix()}')")
+    con.close()
+    with pytest.raises(QgisMcpWorkflowsError, match="only tables stored in the database") as err:
+        qgis_render_from_duckdb(db_path=str(path), query="SELECT * FROM v", output_png="/tmp/o.png",
+                                geometry_column="geom")
+    assert "Next:" in str(err.value)
 
 
 def test_closing_the_limit_wrapper_cannot_write_a_file(fake_executor, db, tmp_path):
@@ -190,12 +203,29 @@ def test_the_lockdown_cannot_be_undone_from_sql(db):
 
     con = _open_duckdb_locked(duckdb, db)
     try:
-        for sql in ("SET enable_external_access = true", "SET lock_configuration = false"):
+        for sql in ("SET enable_external_access = true", "SET lock_configuration = false",
+                    "RESET enable_external_access"):
             with pytest.raises(duckdb.Error, match=r"locked|Cannot"):
                 con.execute(sql)
         assert con.execute("SELECT count(*) FROM zones").fetchone()[0] == 4
     finally:
         con.close()
+
+
+def test_the_locked_connection_refuses_statements_on_its_own(db, tmp_path):
+    """Second line of defence: what the one-SELECT check stops must also fail on the connection."""
+    from qgis_mcp_workflows.server import _open_duckdb_locked
+
+    target = (tmp_path / "out.csv").as_posix()
+    con = _open_duckdb_locked(duckdb, db)
+    try:
+        for sql in (f"COPY (SELECT 1) TO '{target}'", f"ATTACH '{(tmp_path / 'o.duckdb').as_posix()}' AS o",
+                    "LOAD httpfs"):
+            with pytest.raises(duckdb.Error, match=r"Permission|disabled|external"):
+                con.execute(sql)
+    finally:
+        con.close()
+    assert not (tmp_path / "out.csv").exists()
 
 
 def test_geometry_columns_still_convert_when_spatial_is_installed(fake_executor, tmp_path):
@@ -209,7 +239,9 @@ def test_geometry_columns_still_convert_when_spatial_is_installed(fake_executor,
     con.execute("CREATE TABLE g AS SELECT 'Z1' AS zone_id, 1.0 AS trips, ST_Point(139.7, 35.7) AS geom")
     con.close()
     fake_executor.responses["render_wkt_features"] = _render_response("Point", 1)
-    qgis_render_from_duckdb(db_path=str(path), query="SELECT zone_id, trips, ST_AsText(geom) AS geom FROM g",
+    # ST_AsText alone is built into DuckDB 1.5; ST_Centroid needs the preloaded spatial extension.
+    qgis_render_from_duckdb(db_path=str(path),
+                            query="SELECT zone_id, trips, ST_AsText(ST_Centroid(geom)) AS geom FROM g",
                             output_png="/tmp/o.png", geometry_column="geom")
     [(_, params)] = [c for c in fake_executor.calls if c[0] == "render_wkt_features"]
     assert "POINT" in str(params)

@@ -1344,13 +1344,16 @@ def _one_select(duckdb: Any, query: str) -> str:
 
 
 def _open_duckdb_locked(duckdb: Any, path: str) -> Any:
-    """A read-only connection whose SQL can reach nothing but this database.
+    """A read-only connection whose SQL cannot use DuckDB's file system or the network.
 
     read_only alone protects only the database file: read_text/read_csv/ST_Read,
     COPY ... TO, ATTACH and INSTALL/LOAD still reach the file system and the
     network with the user's rights. The locally installed spatial extension is
-    loaded first, so ST_AsText(geom) still works; then external access is turned
+    loaded first, so spatial functions still work; then external access is turned
     off and the configuration locked, so the query cannot turn it back on.
+
+    Known gap: PROJ (behind spatial's ST_Transform) opens files itself, so a
+    '+init=<file>:<key>' CRS can still tell whether a local file exists.
     """
     conn = duckdb.connect(path, read_only=True, config={
         "autoinstall_known_extensions": False, "autoload_known_extensions": False,
@@ -1404,9 +1407,10 @@ def qgis_render_from_duckdb(
 
     The connection is opened read-only, so a query cannot alter the database, and
     the query is wrapped in a LIMIT so a mistaken `SELECT *` against a multi-GB
-    table cannot pull it all into memory. The query must be one SELECT, and SQL
-    cannot read or write other files, download extensions or reach the network
-    (a locally installed spatial extension is loaded, for ST_AsText).
+    table cannot pull it all into memory. The query must be one SELECT over
+    tables stored in the database: DuckDB's file readers, COPY, ATTACH, extension
+    downloads and network access are refused (a locally installed spatial
+    extension is loaded first).
     """
     import os
 
@@ -1450,6 +1454,13 @@ def qgis_render_from_duckdb(
             cursor = conn.execute(wrapped)
             columns = [d[0] for d in cursor.description]
             rows = cursor.fetchall()
+        except duckdb.PermissionException as exc:
+            raise QgisMcpWorkflowsError(
+                "DuckDB query failed: it reads outside the database (a file, a URL, or a view over one), "
+                "and this tool reads only tables stored in the database. "
+                "Next: query the stored tables, or materialise the view outside this tool "
+                "(CREATE TABLE t AS SELECT * FROM v)."
+            ) from exc
         except Exception as exc:
             raise QgisMcpWorkflowsError(
                 f"DuckDB query failed: {exc}. "

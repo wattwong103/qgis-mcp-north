@@ -27,3 +27,10 @@ Parked from the TASK-12 and TASK-13 security reviews. `qgis_render_from_duckdb` 
 - [x] #5 ST_AsText on a GEOMETRY column still works when spatial is installed locally (skipped where it is not)
 - [x] #6 Existing DuckDB tests, full suite and ruff green; DESIGN/CLAUDE.md/CHANGELOG say what the connection allows
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Reviews (code + security, opus, 2026-10-09): no CRITICAL/HIGH. Fixed in the one round: docs no longer claim SQL "reaches nothing but the database"; a query refused for reading outside the database (incl. a view over a file) gets an actionable error; the spatial test now uses ST_Centroid (ST_AsText alone is built into DuckDB 1.5, so it did not guard the preload); a direct test runs COPY/ATTACH/LOAD on the locked connection.
+Parked: PROJ `+init=<file>:<key>` file-existence oracle via ST_Transform (MEDIUM); no CPU/memory/temp-disk limits or timeout within one SELECT (MEDIUM); db_path not required to be a regular file (LOW); overlapping opens of one file fail after lock_configuration (LOW, unreachable while tools run serially); dynamic PIVOT rejected (LOW); trailing `--` comment breaks the LIMIT wrapper (LOW, pre-existing; conn.sql(q).limit(n) would fix); duckdb floor >=1.0 unproven below 1.5 (raise to >=1.5 or add a CI leg).
+<!-- SECTION:NOTES:END -->
