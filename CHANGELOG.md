@@ -3,6 +3,21 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased — provenance state ledger and eval replay
+
+### Added
+
+- State-reading figures are replayable (TASK-15). `qgis_render_map` and exports of
+  the loaded project record the loads, style calls (all of them, in order), project
+  load and successful `qgis_eval` calls that built their state in `depends_on`.
+  `qgis_export_session` replays each such figure as a block: a fresh QGIS, those
+  calls (loaded layer ids rebound to the replayed load), then the figure. A script
+  with evals prints each eval's sha256 and first lines and exits 3 unless run with
+  `--allow-eval`; `include_evals=False` drops them, and evals from figures outside
+  `DROPBOX_ROOT` need `trust_foreign=True`. The result reports `n_evals`. Any
+  figure made after an eval, and state-reading figures recorded over the plugin
+  transport, say so in `unrecorded_state`.
+
 ## Unreleased — figure provenance (sidecar core)
 
 ### Added
