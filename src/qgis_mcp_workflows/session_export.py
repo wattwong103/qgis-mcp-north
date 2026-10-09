@@ -575,7 +575,7 @@ def _fail(message: str, next_step: str) -> NoReturn:
 
 
 def export_session(output_py: str, figures: list[str] | None = None, folder: str | None = None,
-                   overwrite: bool = False) -> dict:
+                   include_evals: bool = True, trust_foreign: bool = False, overwrite: bool = False) -> dict:
     """Write a replay script for the given figures (or every figure in folder)."""
     if (figures is None) == (folder is None):
         _fail("qgis_export_session needs exactly one of figures or folder.",
@@ -592,6 +592,8 @@ def export_session(output_py: str, figures: list[str] | None = None, folder: str
         if not Path(folder).is_dir():
             _fail(f"{_clean(folder)} is not a folder.", "pass an existing folder, or figures=[...]")
     records, skipped, warnings = collect(figures, folder)
+    records, eval_warnings = keep_evals(records, include_evals, trust_foreign)
+    warnings = warnings + eval_warnings
     steps = plan_steps(records)
     if not steps:
         why = "; ".join(f"{_clean(s['figure'])}: {s['reason']}" for s in skipped[:5]) or "no sidecars found"
@@ -608,6 +610,7 @@ def export_session(output_py: str, figures: list[str] | None = None, folder: str
         "output_path": str(target),
         "n_figures": len(outputs),
         "n_calls": len(steps),
+        "n_evals": len(evals),
         "skipped": [{"figure": _clean(s["figure"]), "reason": s["reason"]} for s in skipped],
         "warnings": [_clean(w) for w in warnings],
     }
