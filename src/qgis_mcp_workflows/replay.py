@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 
-from qgis_mcp_workflows.provenance import ROOT_TOKEN, _relative_under, normalise
+from qgis_mcp_workflows.provenance import ROOT_TOKEN, _relative_under, fingerprint, normalise
 
 
 class ReplayError(Exception):
@@ -34,3 +34,22 @@ def resolve(path: str) -> str:
     if _relative_under(full, normalise(root)) is None:
         raise ReplayError(f"path leaves DROPBOX_ROOT: {path!r}")
     return full
+
+
+def check_inputs(inputs: list[dict]) -> list[str]:
+    """One line per source input that is missing or changed since it was recorded.
+
+    sha256 when the recording hashed it; otherwise size (mtime is not compared:
+    Dropbox sync rewrites it).
+    """
+    problems: list[str] = []
+    for entry in inputs:
+        now = fingerprint(resolve(entry["path"]))
+        recorded_sha, recorded_bytes = entry.get("sha256"), entry.get("bytes")
+        if now["missing"]:
+            problems.append(f"missing  {entry['path']}")
+        elif recorded_sha and now["sha256"] != recorded_sha:
+            problems.append(f"changed  {entry['path']} (sha256 differs)")
+        elif not recorded_sha and recorded_bytes is not None and now["bytes"] != recorded_bytes:
+            problems.append(f"changed  {entry['path']} (size {recorded_bytes} -> {now['bytes']})")
+    return problems
