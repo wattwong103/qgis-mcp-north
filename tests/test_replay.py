@@ -61,3 +61,39 @@ def test_check_inputs_compares_size_when_unhashed(tmp_path):
 def test_check_inputs_reports_missing(tmp_path):
     [line] = replay.check_inputs([{"path": "H:/other-machine/x.csv", "sha256": None, "bytes": 3}])
     assert line.startswith("missing")
+
+
+# --- Task 3: output_mapper ---------------------------------------------------------
+
+
+def test_out_dir_maps_portable_paths(tmp_path):
+    out = replay.output_mapper(["${DROPBOX_ROOT}/gufm/fig.png"], [], str(tmp_path / "out"), False, False)
+    target = out("${DROPBOX_ROOT}/gufm/fig.png")
+    assert target == str((tmp_path / "out" / "DROPBOX_ROOT" / "gufm" / "fig.png").resolve())
+    assert (tmp_path / "out" / "DROPBOX_ROOT" / "gufm").is_dir()   # parent created
+
+
+def test_out_dir_maps_absolute_paths_by_drive(tmp_path):
+    out = replay.output_mapper(["C:/tmp/a.png"], [], str(tmp_path / "out"), False, False)
+    assert out("C:/tmp/a.png") == str((tmp_path / "out" / "_abs" / "C" / "tmp" / "a.png").resolve())
+
+
+def test_out_dir_refuses_escape(tmp_path):
+    out = replay.output_mapper([], [], str(tmp_path / "out"), False, False)
+    with pytest.raises(replay.ReplayError, match="leaves --out-dir"):
+        out("${DROPBOX_ROOT}/../../../x.png")
+
+
+def test_in_place_refuses_overwriting_an_input(monkeypatch, tmp_path):
+    monkeypatch.setenv("DROPBOX_ROOT", str(tmp_path))
+    with pytest.raises(replay.ReplayError, match="recorded inputs"):
+        replay.output_mapper(["${DROPBOX_ROOT}/a.csv"], ["${DROPBOX_ROOT}/a.csv"], "", True, True)
+
+
+def test_in_place_needs_yes_to_overwrite(monkeypatch, tmp_path):
+    monkeypatch.setenv("DROPBOX_ROOT", str(tmp_path))
+    (tmp_path / "fig.png").write_bytes(b"old")
+    with pytest.raises(replay.ReplayError, match="--yes"):
+        replay.output_mapper(["${DROPBOX_ROOT}/fig.png"], [], "", True, False)
+    out = replay.output_mapper(["${DROPBOX_ROOT}/fig.png"], [], "", True, True)
+    assert out("${DROPBOX_ROOT}/fig.png") == provenance.normalise(str(tmp_path / "fig.png"))
