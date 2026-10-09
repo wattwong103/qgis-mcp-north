@@ -140,3 +140,45 @@ def test_paths_resolved_to_absolute(fake_executor):
     params = fake_executor.calls[0][1]
     assert os.path.isabs(params["template_qgz"])
     assert os.path.isabs(params["output_dir"])
+
+
+def test_layer_argument_reaches_the_plugin(fake_executor):
+    fake_executor.responses["batch_render"] = _ok_response(target_layer="wards")
+    qgis_batch_render(
+        template_qgz="/tmp/tpl.qgz", attribute="zone_id", values=["Z01"],
+        output_dir="/tmp/batch/", layer="wards",
+    )
+    _, params = fake_executor.calls[0]
+    assert params["layer"] == "wards"
+
+
+def test_result_names_the_filtered_layer_and_unavailable_layers(fake_executor):
+    fake_executor.responses["batch_render"] = _ok_response(
+        target_layer="wards", unavailable_layers=["aerial"]
+    )
+    result = qgis_batch_render(
+        template_qgz="/tmp/tpl.qgz", attribute="zone_id", values=["Z01"], output_dir="/tmp/batch/"
+    )
+    assert result.target_layer == "wards"
+    assert result.unavailable_layers == ["aerial"]
+
+
+def test_unavailable_layers_default_empty(fake_executor):
+    fake_executor.responses["batch_render"] = _ok_response()
+    result = qgis_batch_render(
+        template_qgz="/tmp/tpl.qgz", attribute="zone_id", values=["Z01"], output_dir="/tmp/batch/"
+    )
+    assert result.unavailable_layers == []
+    assert result.target_layer is None
+
+
+def test_compound_batch_passes_layer(fake_executor):
+    from qgis_mcp_workflows.compound import qgis_export
+
+    fake_executor.responses["batch_render"] = _ok_response(target_layer="wards")
+    qgis_export(
+        kind="batch", template_qgz="/tmp/tpl.qgz", attribute="zone_id", values=["Z01"],
+        output_dir="/tmp/batch/", layer="wards",
+    )
+    _, params = fake_executor.calls[0]
+    assert params["layer"] == "wards"

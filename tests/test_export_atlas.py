@@ -60,3 +60,13 @@ def test_atlas_missing_layout_raises(fake_executor, tmp_path):
             layout_name="nope",
             output_dir=str(tmp_path),
         )
+
+
+def test_atlas_reports_unavailable_layers(fake_executor, tmp_path):
+    fake_executor.responses["export_atlas"] = {
+        "output_dir": str(tmp_path), "output_path": str(tmp_path / "a.png"), "format": "png",
+        "n_pages": 1, "layout_name": "pref_atlas", "files": [str(tmp_path / "a.png")],
+        "unavailable_layers": ["aerial"],
+    }
+    result = qgis_export_atlas(qgz_path="/tmp/proj.qgz", layout_name="pref_atlas", output_dir=str(tmp_path))
+    assert result.unavailable_layers == ["aerial"]
