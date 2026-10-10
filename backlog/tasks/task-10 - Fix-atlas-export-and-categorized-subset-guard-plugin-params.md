@@ -1,9 +1,10 @@
 ---
 id: TASK-10
 title: 'Fix atlas export and categorized subset; guard plugin params in tests'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-06 22:00'
+updated_date: '2026-10-09 23:10'
 labels:
   - bug
   - upstream-review
@@ -39,3 +40,5 @@ Dropped after checking: the review's zonal_stats NULL overcount and CSV encoding
 Files: tests/plugin_contract.py + tests/conftest.py (handler-signature check in FakeExecutor), tests/test_handler_param_parity.py, tests/test_plugin_live_fixes.py (requires_headless), qgis_mcp_workflows_plugin/plugin.py (set_layer_style, export_atlas), src/qgis_mcp_workflows/server.py (od_csv, classes description), scripts/weekly_figures.py, docs/DESIGN.md, CHANGELOG.md.
 Validation: uv run --no-sync pytest tests/ -v; uv tool run ruff check src/ tests/; live headless tests on QGIS LTR 3.40 (M:).
 <!-- SECTION:PLAN:END -->
+
+Merged in PR #20 (wattwong103/qgis-mcp-north).

@@ -1,9 +1,10 @@
 ---
 id: TASK-6
 title: transport=auto starts degraded when no QGIS backend is reachable
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-01 19:14'
+updated_date: '2026-10-09 23:10'
 labels:
   - transport
 dependencies: []
@@ -24,3 +25,5 @@ Split out of TASK-4 (2026-10-02). With transport=auto, server._build_executor ra
 - [ ] #3 Explicit --transport=headless still fails fast
 - [ ] #4 Verified: MCP initialize + qgis_ping with QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER=/nonexistent
 <!-- AC:END -->
+
+Merged in PR #15 (wattwong103/qgis-mcp-north).

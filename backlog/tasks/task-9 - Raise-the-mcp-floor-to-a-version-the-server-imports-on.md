@@ -1,9 +1,10 @@
 ---
 id: TASK-9
 title: Raise the mcp floor to a version the server imports on
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-02 10:00'
+updated_date: '2026-10-09 23:10'
 labels:
   - deps
 dependencies: []
@@ -23,3 +24,5 @@ Found 2026-10-02 during TASK-7. pyproject declared mcp[cli]>=1.20.0, but the ser
 - [x] #2 Guard test fails if the floor is lowered to a known-bad version
 - [x] #3 uv.lock regenerated without moving any pinned package
 <!-- AC:END -->
+
+Merged in PR #19 (wattwong103/qgis-mcp-north).
