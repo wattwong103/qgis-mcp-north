@@ -1,9 +1,10 @@
 ---
 id: TASK-14
 title: Batch render target layer and non-blocking project reads
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-08 11:00'
+updated_date: '2026-10-09 23:10'
 labels:
   - bug
   - upstream-review
@@ -42,3 +43,5 @@ Files: qgis_mcp_workflows_plugin/plugin.py (_open_project, _unavailable_layers, 
 Validation: uv run --no-sync pytest tests/ -q; uv tool run ruff check src/ tests/; live headless on QGIS LTR 3.40.
 Dismissal is tested headlessly with a Python QDialog subclass named QgsHandleBadLayers; the real Desktop dialog (and its QGIS 4 class name) still needs a manual plugin-transport check.
 <!-- SECTION:PLAN:END -->
+
+Merged in PR #25 (wattwong103/qgis-mcp-north).

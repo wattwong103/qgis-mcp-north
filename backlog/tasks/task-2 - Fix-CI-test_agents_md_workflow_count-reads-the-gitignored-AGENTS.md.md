@@ -1,10 +1,10 @@
 ---
 id: TASK-2
 title: 'Fix CI: test_agents_md_workflow_count reads the gitignored AGENTS.md'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-09-13 18:42'
-updated_date: '2026-10-01 23:46'
+updated_date: '2026-10-09 23:10'
 labels:
   - ci
 dependencies: []
@@ -22,3 +22,5 @@ Pre-existing on main (red since 2026-09-12). tests/test_docs_consistency.py::tes
 <!-- AC:BEGIN -->
 - [ ] #1 pytest (py3.12) job green on main
 <!-- AC:END -->
+
+Merged in PR #17 (wattwong103/qgis-mcp-north).

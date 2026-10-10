@@ -1,10 +1,10 @@
 ---
 id: TASK-5
 title: 'install.py: link the plugin into QGIS4 profiles too'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-01 19:13'
-updated_date: '2026-10-01 19:45'
+updated_date: '2026-10-09 23:10'
 labels:
   - install
   - qgis4
@@ -25,3 +25,5 @@ install.py qgis_plugins_dir() hard-codes .../QGIS/QGIS3 on linux/darwin/win32, s
 - [x] #2 tests cover both majors
 - [x] #3 README manual-symlink note removed
 <!-- AC:END -->
+
+Merged in PR #14 (wattwong103/qgis-mcp-north).

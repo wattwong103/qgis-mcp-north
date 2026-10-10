@@ -1,9 +1,10 @@
 ---
 id: TASK-7
 title: Render tools error after a successful render
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-02 09:00'
+updated_date: '2026-10-09 23:10'
 labels:
   - mcp
   - render
@@ -25,3 +26,5 @@ Found 2026-10-02 during the QGIS 4 Desktop check (TASK-4). Calling qgis_render_c
 - [ ] #3 Regression test drives the real server registration (no QGIS needed)
 - [ ] #4 Verified end to end: qgis_render_choropleth over stdio MCP on assets/zones_tokyo23.gpkg returns success with an image block
 <!-- AC:END -->
+
+Merged in PR #18 (wattwong103/qgis-mcp-north).
