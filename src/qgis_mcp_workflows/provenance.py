@@ -33,7 +33,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from qgis_mcp_workflows import ledger
+from qgis_mcp_workflows import datasources, ledger
 from qgis_mcp_workflows.executors import executor_requests
 
 logger = logging.getLogger("qgis_mcp_workflows.provenance")
@@ -481,7 +481,7 @@ def _settle(entries: list[dict], before: dict, figures: list[str], machine_speci
 
 def _record(tool: str, module: str, call_args: dict, before: dict, prints: list[dict],
             implicit: list[dict], seq: int, requests_before: int, result: Any, elapsed: float,
-            depends_on: list[dict], notes: list[str]) -> None:
+            depends_on: list[dict], notes: list[str], extra_remote: list[dict]) -> None:
     figures = written_files(result)
     if not figures:
         return
@@ -501,7 +501,7 @@ def _record(tool: str, module: str, call_args: dict, before: dict, prints: list[
         "depends_on": depends_on,
         "inputs": prints,
         "implicit_inputs": implicit,
-        "remote": _remote(call_args, machine_specific),
+        "remote": _remote(call_args, machine_specific) + extra_remote,
         "unrecorded_state": unrecorded,
         "machine_specific": machine_specific,
         "outputs": [portable(f)[0] for f in figures],
@@ -572,6 +572,8 @@ def with_provenance(fn: Callable) -> Callable:
             call_args = dict(bound.arguments)
             explicit = input_paths(call_args)
             hidden = implicit_input_paths(fn.__name__, call_args)
+            found, source_notes, source_remote = datasources.discover(explicit)  # .shp siblings, project layers
+            hidden += found
             before = {path: snapshot(path) for _, path in explicit + hidden}
             prints = [{"argument": name, **fingerprint(path), "_path": path} for name, path in explicit]
             implicit = [{"argument": name, **fingerprint(path), "_path": path} for name, path in hidden]
@@ -580,6 +582,7 @@ def with_provenance(fn: Callable) -> Callable:
             depends_on, notes = ledger.snapshot(fn.__name__, call_args) if writes else ([], [])
             if depends_on and _desktop():
                 notes.append(ledger.DESKTOP_NOTE)
+            notes += source_notes
         except Exception:
             logger.warning("provenance: could not prepare a record for %s", fn.__name__, exc_info=True)
             return fn(*args, **kwargs)
@@ -595,12 +598,12 @@ def with_provenance(fn: Callable) -> Callable:
         if writes:
             try:
                 _record(fn.__name__, module, call_args, before, prints, implicit, seq,
-                        requests_before, result, time.monotonic() - started, depends_on, notes)
+                        requests_before, result, time.monotonic() - started, depends_on, notes, source_remote)
             except Exception:
                 logger.warning("provenance: recording failed for %s", fn.__name__, exc_info=True)
                 _drop_stale_sidecars(result)
         try:
-            entry = None if writes else _ledger_entry(fn.__name__, module, seq, call_args, prints, before)
+            entry = None if writes else _ledger_entry(fn.__name__, module, seq, call_args, prints + implicit, before)
             ledger.update(fn.__name__, call_args, entry, result)
         except Exception:
             logger.warning("provenance: ledger update failed for %s", fn.__name__, exc_info=True)

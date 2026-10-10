@@ -186,3 +186,55 @@ async def test_in_place_deck_append_is_flagged(server, fake_executor, root):
     assert template["changed_during_call"] is True
     assert template["sha256"] == before        # fingerprinted before the call, not after
     assert template["made_by"] is None         # not a link to the sidecar this call overwrites
+
+
+# --- TASK-16: project and shapefile datasources ----------------------------------------
+
+
+def _project_with_layers(root: Path, outside: Path) -> Path:
+    from xml.sax.saxutils import escape
+
+    gpkg = root / "data" / "zones.gpkg"
+    gpkg.parent.mkdir(parents=True, exist_ok=True)
+    gpkg.write_bytes(b"gpkg v1")
+    outside.write_bytes(b"elsewhere")
+    layers = [
+        ("ogr", "../data/zones.gpkg|layername=zones"),
+        ("postgres", "dbname='gis' host=db.internal user='north' password='hunter2' table=\"z\" (geom)"),
+        ("ogr", str(outside)),
+    ]
+    body = "".join(f"<maplayer><id>L{i}</id><datasource>{escape(s)}</datasource>"
+                   f"<provider>{p}</provider></maplayer>" for i, (p, s) in enumerate(layers))
+    project = root / "proj" / "p.qgs"
+    project.parent.mkdir(parents=True, exist_ok=True)
+    project.write_text(f"<qgis><projectlayers>{body}</projectlayers></qgis>", encoding="utf-8")
+    return project
+
+
+def _export_response(params):
+    Path(params["output_path"]).write_bytes(PNG)
+    return {"output_path": params["output_path"], "format": "png", "n_pages": 1, "layout_name": "A4"}
+
+
+async def test_project_datasources_reach_the_sidecar(server, fake_executor, root, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("elsewhere") / "far.gpkg"
+    project = _project_with_layers(root, outside)
+    fake_executor.responses["export_layout"] = _export_response
+    await server.mcp.call_tool("qgis_export_layout", {"qgz_path": str(project), "layout_name": "A4",
+                                                      "output_path": str(root / "a4.png")})
+    record = _sidecar(root / "a4.png")
+    [gpkg] = [i for i in record["implicit_inputs"] if i["argument"] == "qgz_path:datasource"]
+    assert gpkg["path"] == "${DROPBOX_ROOT}/data/zones.gpkg" and gpkg["sha256"]
+    [db] = record["remote"]
+    assert db["argument"] == "qgz_path:datasource" and "hunter2" not in db["value"] and "north" not in db["value"]
+    assert any("outside the project folder and DROPBOX_ROOT" in n for n in record["unrecorded_state"])
+
+
+async def test_a_shapefile_input_carries_its_siblings(server, fake_executor, root):
+    fake_executor.responses["render_choropleth"] = _choropleth_response
+    for ext in (".shp", ".dbf", ".prj"):
+        (root / f"zones{ext}").write_bytes(b"x")
+    await server.mcp.call_tool("qgis_render_choropleth", {"zones_path": str(root / "zones.shp"), "value_field": "n",
+                                                          "output_png": str(root / "c.png")})
+    arguments = sorted(i["argument"] for i in _sidecar(root / "c.png")["implicit_inputs"])
+    assert arguments == ["zones_path:.dbf", "zones_path:.prj"]
