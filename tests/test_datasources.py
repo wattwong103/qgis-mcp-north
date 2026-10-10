@@ -86,7 +86,22 @@ def test_qgz_without_exactly_one_project_file_is_noted(root, members):
     assert extra == [] and len(notes) == 1 and "one .qgs" in notes[0]
 
 
-@pytest.mark.parametrize("declaration", ['<!DOCTYPE qgis SYSTEM "x">', '<!ENTITY e "boom">'])
+QGIS_HEADER = "<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>" + chr(10)
+
+
+def test_the_fixed_doctype_qgis_writes_is_accepted(root):
+    _touch(root / "a.gpkg")
+    project = _touch(root / "p.qgs", (QGIS_HEADER + _qgs(("ogr", "./a.gpkg"))).encode("utf-8"))
+    extra, notes, _ = datasources.discover([("qgz_path", str(project))])
+    assert _args(extra) == ["qgz_path:datasource"] and notes == []
+
+
+@pytest.mark.parametrize("declaration", [
+    '<!DOCTYPE qgis SYSTEM "x">',
+    '<!ENTITY e "boom">',
+    "<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM' [<!ENTITY e 'boom'>]>",
+    QGIS_HEADER + '<!DOCTYPE qgis SYSTEM "again">',
+])
 def test_doctype_and_entity_documents_are_refused(root, declaration):
     _touch(root / "a.gpkg")
     project = _touch(root / "p.qgs", (declaration + _qgs(("ogr", "./a.gpkg"))).encode("utf-8"))

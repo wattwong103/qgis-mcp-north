@@ -27,6 +27,11 @@ MAX_PROJECT_BYTES = 64 * 1024 * 1024
 MAX_DATASOURCES = 200
 _ECHO = 200
 _DECLARATION = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)", re.IGNORECASE)
+# QGIS writes this exact declaration at the top of every project: no internal
+# subset, so it defines no entities and nothing is fetched. It alone is allowed.
+_QGIS_DOCTYPE = re.compile(
+    rb"\A(\xef\xbb\xbf)?\s*(<\?xml[^>]*\?>\s*)?"
+    rb"<!DOCTYPE\s+qgis\s+PUBLIC\s+(['\"])http://mrcc\.com/qgis\.dtd\3\s+(['\"])SYSTEM\4\s*>")
 _REMOTE_PROVIDERS = frozenset({
     "postgres", "postgresraster", "mssql", "oracle", "hana", "db2", "wms", "wfs", "wcs", "oapif",
     "arcgisfeatureserver", "arcgismapserver", "xyz", "vectortile", "sensorthings",
@@ -85,6 +90,7 @@ def read_project_xml(path: str) -> tuple[str | None, str | None]:
         return None, f"{name}: could not be read ({type(err).__name__}); datasources not recorded"
     if len(data) > MAX_PROJECT_BYTES:
         return None, f"{name}: project XML larger than {MAX_PROJECT_BYTES} bytes; datasources not recorded"
+    data = _QGIS_DOCTYPE.sub(lambda m: (m.group(1) or b"") + (m.group(2) or b""), data, count=1)
     if _DECLARATION.search(data):
         return None, f"{name}: has a DOCTYPE or ENTITY declaration; datasources not read"
     try:
