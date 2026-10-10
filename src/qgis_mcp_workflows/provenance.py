@@ -540,10 +540,24 @@ def _writes_files(fn: Callable) -> bool:
 
 
 def _ledger_entry(tool: str, module: str, seq: int, call_args: dict, prints: list[dict],
-                  before: dict) -> dict:
+                  before: dict, notes: list[str], remote: list[dict]) -> dict:
     _settle(prints, before, [], [])
-    return {"seq": seq, "call": {"tool": tool, "module": module, "arguments": _portable_arguments(call_args)},
-            "inputs": prints, "layer_id": None}
+    entry = {"seq": seq, "call": {"tool": tool, "module": module, "arguments": _portable_arguments(call_args)},
+             "inputs": prints, "layer_id": None}
+    if notes:
+        entry["notes"] = list(notes)
+    if remote:
+        entry["remote"] = list(remote)
+    return entry
+
+
+def _discover(explicit: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], list[str], list[dict]]:
+    """Datasources of the call's inputs; a failure costs only them, never the record."""
+    try:
+        return datasources.discover(explicit)
+    except Exception:
+        logger.warning("provenance: datasource discovery failed", exc_info=True)
+        return [], ["datasources not recorded: a project or shapefile input could not be read"], []
 
 
 def _desktop() -> bool:
@@ -572,7 +586,7 @@ def with_provenance(fn: Callable) -> Callable:
             call_args = dict(bound.arguments)
             explicit = input_paths(call_args)
             hidden = implicit_input_paths(fn.__name__, call_args)
-            found, source_notes, source_remote = datasources.discover(explicit)  # .shp siblings, project layers
+            found, source_notes, source_remote = _discover(explicit)  # .shp siblings, project layers
             hidden += found
             before = {path: snapshot(path) for _, path in explicit + hidden}
             prints = [{"argument": name, **fingerprint(path), "_path": path} for name, path in explicit]
@@ -583,6 +597,9 @@ def with_provenance(fn: Callable) -> Callable:
             if depends_on and _desktop():
                 notes.append(ledger.DESKTOP_NOTE)
             notes += source_notes
+            for dep in depends_on:  # a loaded project's unpinned layers stay visible on later figures
+                notes += [n for n in dep.get("notes", []) if n not in notes]
+                source_remote += [r for r in dep.get("remote", []) if r not in source_remote]
         except Exception:
             logger.warning("provenance: could not prepare a record for %s", fn.__name__, exc_info=True)
             return fn(*args, **kwargs)
@@ -603,7 +620,8 @@ def with_provenance(fn: Callable) -> Callable:
                 logger.warning("provenance: recording failed for %s", fn.__name__, exc_info=True)
                 _drop_stale_sidecars(result)
         try:
-            entry = None if writes else _ledger_entry(fn.__name__, module, seq, call_args, prints + implicit, before)
+            entry = None if writes else _ledger_entry(fn.__name__, module, seq, call_args, prints + implicit,
+                                                     before, source_notes, source_remote)
             ledger.update(fn.__name__, call_args, entry, result)
         except Exception:
             logger.warning("provenance: ledger update failed for %s", fn.__name__, exc_info=True)

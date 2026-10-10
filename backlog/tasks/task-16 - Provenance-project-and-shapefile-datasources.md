@@ -33,5 +33,6 @@ Fourth of four PRs (spec v2 §9). Fingerprint .shp siblings and the local dataso
 <!-- SECTION:NOTES:BEGIN -->
 Plan: docs/superpowers/plans/2026-10-10-datasources.md (executed inline).
 - Ruling: every real QGIS project starts with <!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'> (found by the live test), so exactly that declaration is accepted; any other DOCTYPE and every ENTITY are refused as spec section 9 intends.
-- Datasource notes of a project load used only as a state dependency are not carried into the figure's unrecorded_state (its files are fingerprinted in the dependency's inputs).
+- Final review (code/python/security, opus): fixed OGR/GDAL connection-string password leak, redact() bypasses and quadratic regex, malformed datasources dropping the record, POSIX backslash root escape, link (symlink/junction) escape, uncapped notes/remote and full-DOM parse, macOS realpath root, local /vsizip archives, project-load notes/remote now reach later state-reading figures.
+- Parked: per-call hashing byte budget; embedded-layer note; case-variant dedup on Windows; GDAL subdataset path extraction (GPKG:/NETCDF: are recorded as remote, not fingerprinted).
 <!-- SECTION:NOTES:END -->

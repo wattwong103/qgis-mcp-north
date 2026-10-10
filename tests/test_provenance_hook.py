@@ -238,3 +238,44 @@ async def test_a_shapefile_input_carries_its_siblings(server, fake_executor, roo
                                                           "output_png": str(root / "c.png")})
     arguments = sorted(i["argument"] for i in _sidecar(root / "c.png")["implicit_inputs"])
     assert arguments == ["zones_path:.dbf", "zones_path:.prj"]
+
+
+async def test_a_loaded_projects_sources_reach_a_later_map(server, fake_executor, root, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("elsewhere") / "far.gpkg"
+    project = _project_with_layers(root, outside)
+    fake_executor.responses["project_load"] = {
+        "project_path": str(project), "crs": "EPSG:4326", "extent": [0, 0, 1, 1],
+        "layers": [{"layer_id": "L0", "name": "zones", "geometry_type": "polygon", "visible": True}],
+        "layouts": [],
+    }
+
+    def render(params):
+        Path(params["output_png"]).write_bytes(PNG)
+        return {"output_path": params["output_png"], "width": 1, "height": 1, "dpi": 150,
+                "extent": [0, 0, 1, 1], "crs": "EPSG:4326", "n_layers": 1}
+
+    fake_executor.responses["render_layers_to_path"] = render
+    await server.mcp.call_tool("qgis_project_load", {"qgz_path": str(project)})
+    await server.mcp.call_tool("qgis_render_map", {"layer_ids": ["L0"], "output_png": str(root / "m.png")})
+    record = _sidecar(root / "m.png")
+    [load] = record["depends_on"]
+    assert any(i["argument"] == "qgz_path:datasource" for i in load["inputs"])
+    assert [r["argument"] for r in record["remote"]] == ["qgz_path:datasource"]
+    assert any("outside the project folder" in n for n in record["unrecorded_state"])
+
+
+async def test_a_datasource_failure_keeps_the_rest_of_the_record(server, fake_executor, root, monkeypatch):
+    from qgis_mcp_workflows import datasources
+
+    def broken(explicit):
+        raise ValueError("unexpected project content")
+
+    monkeypatch.setattr(datasources, "discover", broken)
+    png = await _render_with(server, fake_executor, root)
+    record = _sidecar(png)
+    assert any("datasources not recorded" in n for n in record["unrecorded_state"])
+
+
+async def _render_with(server, fake_executor, root):
+    fake_executor.responses["render_choropleth"] = _choropleth_response
+    return await _render(server, root, "d.png")

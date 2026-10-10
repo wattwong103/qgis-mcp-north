@@ -224,13 +224,16 @@ resolves outside the local `DROPBOX_ROOT` is *foreign*; its evals are dropped (a
 
 - `.shp` inputs also fingerprint existing `.dbf .shx .prj .cpg` siblings.
 - `.qgz` = zip: read only its single `.qgs` member, at most 64 MB, never `extractall`; `.qgs` = plain XML,
-  same cap. Refuse documents containing `<!DOCTYPE` or `<!ENTITY` (record as `unrecorded_state`).
+  same cap. Refuse documents containing `<!DOCTYPE` or `<!ENTITY` (record as `unrecorded_state`), except the
+  fixed `<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>` QGIS writes into every project (no internal
+  subset; found by the TASK-16 live test).
 - Datasources: strip `|layername=…` suffixes; parse `file:///…?…` (delimited text), `dbname='…'` (SQLite
   / GeoPackage), and paths relative to the project folder (`./`, `../`). Local regular files (`S_ISREG`) under
   the project folder or `DROPBOX_ROOT` are fingerprinted (`argument: "qgz_path:datasource"`). UNC and
   `file://host/` paths are never opened. Anything unparsed or outside those roots → `unrecorded_state`;
   databases and web services → `remote`, with `password`, `user`, `apikey`, `token`, URL userinfo and query
-  strings redacted.
+  strings redacted. GDAL/OGR connection strings (`PG:`, `MSSQL:`, `OCI:` …) count as databases. Links
+  (symlinks, junctions) below a root are never followed.
 
 ## 10. Configuration
 

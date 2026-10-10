@@ -196,3 +196,105 @@ def test_invalid_project_xml_is_noted(root):
 def test_redact_keeps_short_printable_text():
     redacted = datasources.redact("password='x" + chr(0x202E) + "' " + "y" * 500)
     assert chr(0x202E) not in redacted and len(redacted) <= 200 and "password=***" in redacted
+
+
+# --- final-review fixes ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("provider, source", [
+    ("ogr", "PG:dbname='gis' host=db user='SECRETUSER' password='SECRETPW'"),
+    ("gdal", "PG: dbname='r' host=h user='u' password='SECRETPW' table='t'"),
+    ("ogr", "MSSQL:server=db;database=gis;uid=SECRETUSER;pwd=SECRETPW"),
+    ("ogr", "OCI:SECRETUSER/SECRETPW@db"),
+])
+def test_ogr_connection_strings_are_remote_and_redacted(root, provider, source):
+    project = _touch(root / "p.qgs", _qgs((provider, source)).encode("utf-8"))
+    extra, notes, remote = datasources.discover([("qgz_path", str(project))])
+    text = " ".join(notes) + " ".join(r["value"] for r in remote)
+    assert extra == [] and len(remote) == 1 and "SECRET" not in text
+
+
+@pytest.mark.parametrize("source", [
+    "password=ab%26SECRET&x=1",
+    "password=%27SECRET",
+    "password='ab" + chr(92) + "'SECRET'",
+    "postgresql://u:SEC/RET@h/db",
+    "postgresql://u:SEC%2FRET%40x@h/db",
+    "pwd=SECRET;uid=SECRET",
+    "http-header:Authorization=Bearer SECRET&type=xyz",
+    "sslpassword=SECRET user_password=SECRET",
+    "url=https://h/t?apikey%3DSECRET",
+])
+def test_redact_resists_encoded_and_escaped_terminators(source):
+    redacted = datasources.redact(source)
+    assert "SECRET" not in redacted and "RET" not in redacted.replace("***", "")
+
+
+def test_redact_is_fast_on_long_sources():
+    import time
+
+    started = time.perf_counter()
+    datasources.redact("a" * 200_000 + "://x")
+    assert time.perf_counter() - started < 1.0
+
+
+def test_malformed_datasources_become_notes_not_errors(root):
+    project = _touch(root / "p.qgs", _qgs(("delimitedtext", "file://[abc/x.csv?type=csv"),
+                                          ("delimitedtext", "file:./x%00.csv")).encode("utf-8"))
+    extra, notes, _ = datasources.discover([("qgz_path", str(project))])
+    assert extra == [] and len(notes) == 2
+
+
+def _link(link: Path, target: Path) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        try:
+            import _winapi
+            _winapi.CreateJunction(str(target), str(link))
+        except (ImportError, OSError):
+            pytest.skip("cannot create a symlink or junction here")
+
+
+def test_a_link_below_the_root_is_not_followed(root):
+    _touch(root / ".." / f"{root.name}-outside" / "private.gpkg")
+    _link(root / "proj" / "link", root.parent / f"{root.name}-outside")
+    project = _touch(root / "proj" / "p.qgs", _qgs(("ogr", "./link/private.gpkg")).encode("utf-8"))
+    extra, notes, _ = datasources.discover([("qgz_path", str(project))])
+    assert extra == [] and "link" in notes[0]
+
+
+def test_dropbox_root_reached_through_its_real_path_counts_as_inside(tmp_path, monkeypatch):
+    real = tmp_path / "CloudStorage" / "Dropbox"
+    _link(tmp_path / "Dropbox", real)
+    monkeypatch.setenv("DROPBOX_ROOT", str(tmp_path / "Dropbox"))
+    data = _touch(real / "shared" / "x.gpkg")
+    project = _touch(tmp_path / "Dropbox" / "proj" / "p.qgs", _qgs(("ogr", str(data))).encode("utf-8"))
+    extra, notes, _ = datasources.discover([("qgz_path", str(project))])
+    assert len(extra) == 1 and notes == []
+
+
+def test_backslash_relative_paths_cannot_climb_out_on_posix(monkeypatch):
+    import posixpath
+
+    monkeypatch.setattr(datasources.os, "path", posixpath)
+    kind, value = datasources.classify("ogr", "..\\..\\..\\..\\etc\\passwd", "/home/u/Dropbox/proj")
+    assert kind == "file" and ".." not in value.split("/") and value == "/etc/passwd"
+
+
+def test_a_local_zip_archive_is_fingerprinted_not_called_remote(root):
+    archive = _touch(root / "data" / "x.zip")
+    project = _touch(root / "p.qgs", _qgs(("ogr", "/vsizip/./data/x.zip/x.shp")).encode("utf-8"))
+    extra, notes, remote = datasources.discover([("qgz_path", str(project))])
+    assert [provenance.normalise(p) for _, p in extra] == [provenance.normalise(str(archive))]
+    assert remote == [] and notes == []
+
+
+def test_every_kind_of_entry_is_capped(root, monkeypatch):
+    monkeypatch.setattr(datasources, "MAX_DATASOURCES", 3)
+    layers = [("postgres", f"dbname='g{i}' host=h") for i in range(10)]
+    project = _touch(root / "p.qgs", _qgs(*layers).encode("utf-8"))
+    _, notes, remote = datasources.discover([("qgz_path", str(project))])
+    assert len(remote) == 3 and any("more than 3" in n for n in notes)

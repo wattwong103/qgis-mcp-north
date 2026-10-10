@@ -13,7 +13,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `./` and `../` relative paths), as `<argument>:datasource` implicit inputs, so
   a replay stops when a project's data changed. Databases and web services are
   recorded as `remote` with credentials, URL userinfo and query strings
-  redacted; out-of-root, missing and unparsed sources are noted. The project XML
+  redacted (GDAL/OGR connection strings such as `PG:` included); out-of-root,
+  missing, linked and unparsed sources are noted, and a malformed source never
+  costs the call its sidecar. The project XML
   is read from the single `.qgs` member with a 64 MB cap enforced by reading;
   only QGIS's own fixed DOCTYPE is accepted, and UNC / `file://host/` paths are
   never opened.
