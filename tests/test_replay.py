@@ -607,3 +607,11 @@ def test_require_ok_fails_the_replay_when_an_eval_raised():
     assert replay.require_ok(ok) is ok
     with pytest.raises(QgisMcpWorkflowsError, match="replayed qgis_eval failed"):
         replay.require_ok(SimpleNamespace(exception="Traceback ..." + chr(10) + "AttributeError: 'NoneType'"))
+
+
+def test_a_project_database_layer_is_named_in_the_notes():
+    step = _record(1, ["x.png"])
+    step["remote"] = [{"argument": "qgz_path:datasource", "value": "dbname='gis' password=***",
+                       "note": "database or web service, not pinned"}]
+    assert "step 1: qgz_path:datasource: database or web service, not pinned (dbname='gis' password=***)" \
+        in session_export.notes_for([step])

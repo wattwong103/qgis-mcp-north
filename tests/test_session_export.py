@@ -217,3 +217,30 @@ async def test_include_evals_false_writes_a_script_without_them(server, fake_exe
                                         include_evals=False)
     assert result.n_evals == 0 and "server.qgis_eval(" not in (root / "r.py").read_text(encoding="utf-8")
     assert any("include_evals=False" in w for w in result.warnings)
+
+
+
+async def test_a_changed_project_datasource_stops_the_replay(server, fake_executor, root, monkeypatch, capsys):
+    from xml.sax.saxutils import escape
+
+    gpkg = root / "data" / "zones.gpkg"
+    gpkg.parent.mkdir(parents=True)
+    gpkg.write_bytes(b"gpkg v1")
+    project = root / "p.qgs"
+    project.write_text("<qgis><projectlayers><maplayer><datasource>" + escape("./data/zones.gpkg|layername=z")
+                       + "</datasource><provider>ogr</provider></maplayer></projectlayers></qgis>", encoding="utf-8")
+
+    def export(params):
+        Path(params["output_path"]).write_bytes(PNG)
+        return {"output_path": params["output_path"], "format": "png", "n_pages": 1, "layout_name": "A4"}
+
+    fake_executor.responses["export_layout"] = export
+    await server.mcp.call_tool("qgis_export_layout", {"qgz_path": str(project), "layout_name": "A4",
+                                                      "output_path": str(root / "a4.png")})
+    script = root / "replay.py"
+    server.qgis_export_session(output_py=str(script), figures=[str(root / "a4.png")])
+    gpkg.write_bytes(b"gpkg v2")                      # the data behind the project changed
+    fake_executor.calls.clear()
+    monkeypatch.setattr(replay, "_new_executor", lambda: fake_executor)
+    assert _run_script(script, monkeypatch, "--out-dir", str(root / "out")) == 2
+    assert "data/zones.gpkg" in capsys.readouterr().out and fake_executor.calls == []

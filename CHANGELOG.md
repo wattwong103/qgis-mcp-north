@@ -3,6 +3,23 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased — provenance: project and shapefile datasources
+
+### Added
+
+- Sidecars fingerprint the files an input brings along (TASK-16): a `.shp`'s
+  `.dbf .shx .prj .cpg` siblings, and the local datasources a `.qgz`/`.qgs`
+  references (`|layername=`, delimited-text `file:///` URLs, `dbname='…'`,
+  `./` and `../` relative paths), as `<argument>:datasource` implicit inputs, so
+  a replay stops when a project's data changed. Databases and web services are
+  recorded as `remote` with credentials, URL userinfo and query strings
+  redacted (GDAL/OGR connection strings such as `PG:` included); out-of-root,
+  missing, linked and unparsed sources are noted, and a malformed source never
+  costs the call its sidecar. The project XML
+  is read from the single `.qgs` member with a 64 MB cap enforced by reading;
+  only QGIS's own fixed DOCTYPE is accepted, and UNC / `file://host/` paths are
+  never opened.
+
 ## Unreleased — provenance state ledger and eval replay
 
 ### Added

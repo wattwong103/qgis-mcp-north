@@ -67,3 +67,32 @@ async def test_styled_map_replays_to_the_same_size(tmp_path, monkeypatch):
     assert done.returncode == 0, done.stdout + done.stderr
     replayed = tmp_path / "out" / "DROPBOX_ROOT" / "m.png"
     assert replayed.stat().st_size == (tmp_path / "m.png").stat().st_size
+
+
+async def test_a_qgis_written_project_has_its_datasource_fingerprinted(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("DROPBOX_ROOT", str(tmp_path))
+    provenance.reset_for_tests()
+    server = importlib.import_module("qgis_mcp_workflows.server")
+    zones = tmp_path / "zones.geojson"
+    zones.write_bytes(Path(ZONES).read_bytes())
+    qgz = tmp_path / "template.qgz"
+    executor = HeadlessExecutor()
+    executors.set_executor(executor)
+    try:
+        build = ("from qgis.core import QgsProject, QgsVectorLayer\n"
+                 "p = QgsProject.instance(); p.clear()\n"
+                 f"p.addMapLayer(QgsVectorLayer({str(zones)!r}, 'zones', 'ogr'))\n"
+                 f"ok = p.write({str(qgz)!r})\n")
+        written = executor.dispatch("execute_code", {"code": build, "return_vars": ["ok"]}, timeout=120)
+        assert written["return_values"]["ok"]
+        await server.mcp.call_tool("qgis_batch_render", {"template_qgz": str(qgz), "attribute": "zone_id",
+                                                         "values": ["Z01"], "output_dir": str(tmp_path / "batch")})
+    finally:
+        executor.shutdown()
+        executors.set_executor(None)
+    [sidecar] = (tmp_path / "batch").glob("*.provenance.json")
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    sources = [i for i in record["implicit_inputs"] if i["argument"] == "template_qgz:datasource"]
+    assert [s["path"] for s in sources] == ["${DROPBOX_ROOT}/zones.geojson"] and sources[0]["sha256"]

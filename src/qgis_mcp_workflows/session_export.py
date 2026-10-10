@@ -482,7 +482,11 @@ def notes_for(steps: list[dict]) -> list[str]:
                 notes.append(f"step {n}: machine-specific {_clean(entry.get('path'))}")
         for entry in step.get("remote") or []:
             if isinstance(entry, dict):
-                notes.append(f"step {n}: {_clean(entry.get('argument'))} tiles are fetched live and not pinned")
+                if entry.get("argument") == "basemap":
+                    notes.append(f"step {n}: {_clean(entry.get('argument'))} tiles are fetched live and not pinned")
+                else:  # a project layer on a database or web service
+                    notes.append(f"step {n}: {_clean(entry.get('argument'))}: {_clean(entry.get('note'))} "
+                                 f"({_clean(entry.get('value'))})")
     return notes
 
 
