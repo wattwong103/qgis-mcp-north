@@ -515,18 +515,24 @@ default is unchanged.
 **`qgis_render_from_duckdb`.** Runs a query against a DuckDB file and renders the
 result directly, for PFLOW's DuckDB stores (see §10 — `kichijoji.duckdb` is
 1.1 GB with ~10M waypoints) where exporting a CSV first costs both time and an
-intermediate file. Two safety properties are
+intermediate file. Four safety properties are
 load-bearing, not incidental:
 
 | Guard | Why |
 |---|---|
 | connection opened `read_only=True` | the target may be irreplaceable simulation output; a query must not be able to `DROP` or `DELETE` it |
 | query wrapped in `LIMIT max_features + 1` | a mistaken `SELECT *` against a multi-GB table must not pull it into memory; the extra row is how `row_limit_hit` is reported honestly rather than silently truncating |
+| exactly one `SELECT` (`duckdb.extract_statements`) | closing the wrapper's parenthesis and appending statements (`COPY ... TO`, `INSTALL`) is refused before anything runs (TASK-17) |
+| `enable_external_access = false`, then `lock_configuration = true`; extension autoinstall/autoload off | `read_only` protects only the database file: without this, SQL could read any file (`read_text`, `read_csv`, `ST_Read`), write files (`COPY ... TO`) or download extensions with the user's rights. The query comes from an LLM or a shared provenance sidecar, so DuckDB's file system, `ATTACH`, extension downloads and the network are off, and it cannot turn the setting back on (TASK-17). Known gap: PROJ behind `ST_Transform` opens files itself, so a `+init=<file>:<key>` CRS can still test whether a local file exists |
 
 Geometry must be named explicitly — `geometry_column` (WKT text) or the
 `lon_column`/`lat_column` pair — because a DuckDB table has no convention for
 where geometry lives. For a spatial `GEOMETRY` column, wrap it: `SELECT
-ST_AsText(geom) AS geom`.
+ST_AsText(geom) AS geom` (built into DuckDB 1.5). Other spatial functions
+(`ST_Centroid`, `ST_Transform`, ...) need the spatial extension, which is loaded
+from the local install before the lockdown and never downloaded. A view over an
+external file (`read_parquet(...)`) cannot be queried: the tool reads only tables
+stored in the database.
 
 Rendering is a separate plugin primitive, `render_wkt_features`, which takes
 `[{"wkt": ..., **attrs}]` and builds a memory layer. It is transport-agnostic on

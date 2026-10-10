@@ -146,6 +146,107 @@ def test_non_select_statement_is_rejected(fake_executor, db):
         "SELECT count(*) FROM zones").fetchone()[0] == 4
 
 
+# ── a query reaches nothing but the database (TASK-17) ──────────────────────
+# read_only protects the database file only. These queries come from an LLM or a
+# shared provenance sidecar, so SQL must not read, write or download anything else.
+
+
+def test_query_cannot_read_other_files(fake_executor, db, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOPSECRET", encoding="utf-8")
+    fake_executor.responses["render_wkt_features"] = _render_response()
+    with pytest.raises(QgisMcpWorkflowsError, match="only tables stored in the database"):
+        qgis_render_from_duckdb(
+            db_path=db, query=f"SELECT content AS geom FROM read_text('{secret.as_posix()}')",
+            output_png="/tmp/o.png", geometry_column="geom",
+        )
+    assert fake_executor.calls == []
+
+
+def test_a_view_over_an_external_file_gets_an_actionable_error(fake_executor, tmp_path):
+    csv = tmp_path / "zones.csv"
+    csv.write_text("zone_id,geom\nZ1,POINT (139.7 35.7)\n", encoding="utf-8")
+    path = tmp_path / "views.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute(f"CREATE VIEW v AS SELECT * FROM read_csv('{csv.as_posix()}')")
+    con.close()
+    with pytest.raises(QgisMcpWorkflowsError, match="only tables stored in the database") as err:
+        qgis_render_from_duckdb(db_path=str(path), query="SELECT * FROM v", output_png="/tmp/o.png",
+                                geometry_column="geom")
+    assert "Next:" in str(err.value)
+
+
+def test_closing_the_limit_wrapper_cannot_write_a_file(fake_executor, db, tmp_path):
+    escaped = tmp_path / "escaped.csv"
+    query = (f"SELECT geom FROM zones) AS z; COPY (SELECT 42 AS x) TO '{escaped.as_posix()}'; "
+             "SELECT * FROM (SELECT geom FROM zones")
+    fake_executor.responses["render_wkt_features"] = _render_response()
+    with pytest.raises(QgisMcpWorkflowsError, match="query failed"):
+        qgis_render_from_duckdb(db_path=db, query=query, output_png="/tmp/o.png", geometry_column="geom")
+    assert not escaped.exists()
+
+
+@pytest.mark.parametrize("query", [
+    "SELECT geom FROM zones; SELECT geom FROM zones",
+    "INSTALL httpfs",
+    "SET enable_external_access = true",
+])
+def test_only_one_select_statement_runs(fake_executor, db, query):
+    fake_executor.responses["render_wkt_features"] = _render_response()
+    with pytest.raises(QgisMcpWorkflowsError, match="one SELECT") as err:
+        qgis_render_from_duckdb(db_path=db, query=query, output_png="/tmp/o.png", geometry_column="geom")
+    assert "Next:" in str(err.value)
+
+
+def test_the_lockdown_cannot_be_undone_from_sql(db):
+    from qgis_mcp_workflows.server import _open_duckdb_locked
+
+    con = _open_duckdb_locked(duckdb, db)
+    try:
+        for sql in ("SET enable_external_access = true", "SET lock_configuration = false",
+                    "RESET enable_external_access"):
+            with pytest.raises(duckdb.Error, match=r"locked|Cannot"):
+                con.execute(sql)
+        assert con.execute("SELECT count(*) FROM zones").fetchone()[0] == 4
+    finally:
+        con.close()
+
+
+def test_the_locked_connection_refuses_statements_on_its_own(db, tmp_path):
+    """Second line of defence: what the one-SELECT check stops must also fail on the connection."""
+    from qgis_mcp_workflows.server import _open_duckdb_locked
+
+    target = (tmp_path / "out.csv").as_posix()
+    con = _open_duckdb_locked(duckdb, db)
+    try:
+        for sql in (f"COPY (SELECT 1) TO '{target}'", f"ATTACH '{(tmp_path / 'o.duckdb').as_posix()}' AS o",
+                    "LOAD httpfs"):
+            with pytest.raises(duckdb.Error, match=r"Permission|disabled|external"):
+                con.execute(sql)
+    finally:
+        con.close()
+    assert not (tmp_path / "out.csv").exists()
+
+
+def test_geometry_columns_still_convert_when_spatial_is_installed(fake_executor, tmp_path):
+    path = tmp_path / "spatial.duckdb"
+    con = duckdb.connect(str(path), config={"autoinstall_known_extensions": False})
+    try:
+        con.execute("LOAD spatial")   # never INSTALL here: tests must not download
+    except duckdb.Error:
+        con.close()
+        pytest.skip("DuckDB spatial extension is not installed on this machine")
+    con.execute("CREATE TABLE g AS SELECT 'Z1' AS zone_id, 1.0 AS trips, ST_Point(139.7, 35.7) AS geom")
+    con.close()
+    fake_executor.responses["render_wkt_features"] = _render_response("Point", 1)
+    # ST_AsText alone is built into DuckDB 1.5; ST_Centroid needs the preloaded spatial extension.
+    qgis_render_from_duckdb(db_path=str(path),
+                            query="SELECT zone_id, trips, ST_AsText(ST_Centroid(geom)) AS geom FROM g",
+                            output_png="/tmp/o.png", geometry_column="geom")
+    [(_, params)] = [c for c in fake_executor.calls if c[0] == "render_wkt_features"]
+    assert "POINT" in str(params)
+
+
 # ── errors name the fix ────────────────────────────────────────────────────
 
 

@@ -12,11 +12,12 @@ can run side-by-side; the LLM picks per request based on tool descriptions.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sys
 from logging.handlers import RotatingFileHandler
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -1317,6 +1318,57 @@ class DuckDbRenderResult(RenderResult):
     row_limit_hit: bool = False
 
 
+def _one_select(duckdb: Any, query: str) -> str:
+    """The query without a trailing ';' if it is exactly one SELECT, else a typed error.
+
+    One statement keeps the LIMIT wrapper intact: closing its parenthesis and
+    appending statements (COPY ... TO, INSTALL) is refused before anything runs.
+    """
+    from qgis_mcp_workflows.errors import QgisMcpWorkflowsError
+
+    text = query.strip().rstrip(";").strip()
+    try:
+        statements = duckdb.extract_statements(text)
+    except duckdb.Error as exc:
+        raise QgisMcpWorkflowsError(
+            f"DuckDB query failed: it does not parse as one SELECT statement ({exc}). "
+            "Next: fix the SQL; a WITH ... SELECT is fine."
+        ) from exc
+    if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
+        kinds = ", ".join(str(s.type).rsplit(".", 1)[-1] for s in statements) or "nothing"
+        raise QgisMcpWorkflowsError(
+            f"DuckDB query failed: it must be exactly one SELECT statement, got {kinds}. "
+            "Next: rewrite it as a single SELECT (a WITH ... SELECT is fine)."
+        )
+    return text
+
+
+def _open_duckdb_locked(duckdb: Any, path: str) -> Any:
+    """A read-only connection whose SQL cannot use DuckDB's file system or the network.
+
+    read_only alone protects only the database file: read_text/read_csv/ST_Read,
+    COPY ... TO, ATTACH and INSTALL/LOAD still reach the file system and the
+    network with the user's rights. The locally installed spatial extension is
+    loaded first, so spatial functions still work; then external access is turned
+    off and the configuration locked, so the query cannot turn it back on.
+
+    Known gap: PROJ (behind spatial's ST_Transform) opens files itself, so a
+    '+init=<file>:<key>' CRS can still tell whether a local file exists.
+    """
+    conn = duckdb.connect(path, read_only=True, config={
+        "autoinstall_known_extensions": False, "autoload_known_extensions": False,
+    })
+    try:
+        with contextlib.suppress(duckdb.Error):
+            conn.execute("LOAD spatial")  # local install only: autoinstall is off
+        conn.execute("SET enable_external_access = false")
+        conn.execute("SET lock_configuration = true")
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
 @_maybe_tool(
     annotations=ToolAnnotations(
         readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
@@ -1355,7 +1407,10 @@ def qgis_render_from_duckdb(
 
     The connection is opened read-only, so a query cannot alter the database, and
     the query is wrapped in a LIMIT so a mistaken `SELECT *` against a multi-GB
-    table cannot pull it all into memory.
+    table cannot pull it all into memory. The query must be one SELECT over
+    tables stored in the database: DuckDB's file readers, COPY, ATTACH, extension
+    downloads and network access are refused (a locally installed spatial
+    extension is loaded first).
     """
     import os
 
@@ -1384,9 +1439,9 @@ def qgis_render_from_duckdb(
             "Next: retry with geometry_column='geom', or lon_column='lon', lat_column='lat'."
         )
 
-    # read_only protects the caller's database from anything the query does.
+    query = _one_select(duckdb, query)
     try:
-        conn = duckdb.connect(abs_db, read_only=True)
+        conn = _open_duckdb_locked(duckdb, abs_db)
     except Exception as exc:
         raise QgisMcpWorkflowsError(
             f"Could not open {abs_db} read-only: {exc}. "
@@ -1394,11 +1449,18 @@ def qgis_render_from_duckdb(
         ) from exc
 
     try:
-        wrapped = f"SELECT * FROM ({query.rstrip().rstrip(';')}) AS _q LIMIT {int(max_features) + 1}"
+        wrapped = f"SELECT * FROM ({query}) AS _q LIMIT {int(max_features) + 1}"
         try:
             cursor = conn.execute(wrapped)
             columns = [d[0] for d in cursor.description]
             rows = cursor.fetchall()
+        except duckdb.PermissionException as exc:
+            raise QgisMcpWorkflowsError(
+                "DuckDB query failed: it reads outside the database (a file, a URL, or a view over one), "
+                "and this tool reads only tables stored in the database. "
+                "Next: query the stored tables, or materialise the view outside this tool "
+                "(CREATE TABLE t AS SELECT * FROM v)."
+            ) from exc
         except Exception as exc:
             raise QgisMcpWorkflowsError(
                 f"DuckDB query failed: {exc}. "

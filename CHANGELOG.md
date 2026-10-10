@@ -3,6 +3,21 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased — DuckDB queries reach only the database
+
+### Security
+
+- `qgis_render_from_duckdb` queries can no longer read or write other files
+  through DuckDB, download extensions or reach the network (TASK-17). `read_only` protected only the database itself:
+  `read_text`/`read_csv`/`ST_Read` read any file the user can, `COPY ... TO`
+  wrote files (reachable by closing the LIMIT wrapper's parenthesis), and
+  `INSTALL` downloaded extensions. The connection now loads the locally
+  installed spatial extension (so `ST_AsText(geom)` keeps working), then sets
+  `enable_external_access = false` and locks its configuration, with extension
+  autoinstall/autoload off; the query must be exactly one `SELECT`. A query
+  refused for reading outside the database says so, with a Next: step. Known
+  gap: PROJ behind `ST_Transform` opens files itself (`+init=<file>:<key>`).
+
 ## Unreleased — figure provenance (sidecar core)
 
 ### Added
