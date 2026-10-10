@@ -377,11 +377,11 @@ def test_git_state_takes_no_optional_locks_and_decodes_utf8(monkeypatch):
     assert all(kw.get("encoding") == "utf-8" and kw.get("errors") == "replace" for _, kw in seen)
 
 
-def test_tools_that_never_write_files_are_not_wrapped():
+def test_only_state_tools_are_wrapped_without_writing_files():
     from qgis_mcp_workflows import server
 
     assert provenance.with_provenance(server.qgis_layer_inspect) is server.qgis_layer_inspect
-    assert provenance.with_provenance(server.qgis_style_categorized) is server.qgis_style_categorized
+    assert provenance.with_provenance(server.qgis_style_categorized) is not server.qgis_style_categorized
     assert provenance.with_provenance(server.qgis_render_choropleth) is not server.qgis_render_choropleth
 
 

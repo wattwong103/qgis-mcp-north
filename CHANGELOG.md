@@ -3,6 +3,35 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased — provenance state ledger and eval replay
+
+### Added
+
+- State-reading figures are replayable (TASK-15). `qgis_render_map` and exports of
+  the loaded project record the loads, style calls (all of them, in order), project
+  load and successful `qgis_eval` calls that built their state in `depends_on`.
+  `qgis_export_session` replays each such figure as a block: a fresh QGIS, those
+  calls (loaded layer ids rebound to the replayed load), then the figure. A script
+  with evals prints each eval's sha256 and first lines and exits 3 unless run with
+  `--allow-eval`; `include_evals=False` drops them, and evals from figures outside
+  `DROPBOX_ROOT` need `trust_foreign=True`. The result reports `n_evals`. Any
+  figure made after an eval, and state-reading figures recorded over the plugin
+  transport, say so in `unrecorded_state`.
+- Replay scripts print each eval's size and a "N more lines not shown" marker,
+  `--show-evals` prints the full numbered code, and sidecar notes are printed only
+  after that decision. A replayed eval that fails stops the run (exit 1).
+  `trust_foreign` is decided from where a sidecar was found, not what it claims;
+  sidecars in shared folders inside `DROPBOX_ROOT` still count as local.
+
+### Fixed
+
+- On Windows, an export of the project that is already open now reuses it, with
+  its session styles, as documented; the plugin compared QGIS's forward-slash
+  `fileName()` with the server's backslash path and re-read the file every time.
+- Replay export refuses every Windows network spelling (`\/host`, `/\host`,
+  `\??\UNC\`, `\\?\UNC\`) and GDAL `/vsi…` paths, so neither the export nor
+  the script contacts another host.
+
 ## Unreleased — DuckDB queries reach only the database
 
 ### Security

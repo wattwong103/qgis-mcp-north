@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from qgis_mcp_workflows import provenance, replay
+from qgis_mcp_workflows import provenance, replay, session_export
 
 
 def test_resolve_expands_dropbox_root(monkeypatch, tmp_path):
@@ -174,7 +174,7 @@ def _reasons(skipped):
 
 def test_collect_reads_named_figures(tmp_path):
     fig = _sidecar(tmp_path, "a.png")
-    records, skipped, _ = replay.collect([str(fig)], None)
+    records, skipped, _ = session_export.collect([str(fig)], None)
     assert len(records) == 1 and skipped == []
 
 
@@ -188,7 +188,7 @@ def test_collect_skips_with_fixed_reasons(tmp_path):
     stale = _sidecar(tmp_path, "s.png")
     stale.write_bytes(b"changed by a script")
     nofile = tmp_path / "none.png"
-    records, skipped, _ = replay.collect([str(p) for p in (ok, hostile, badkey, unknown, state, stale, nofile)], None)
+    records, skipped, _ = session_export.collect([str(p) for p in (ok, hostile, badkey, unknown, state, stale, nofile)], None)
     assert len(records) == 1
     assert _reasons(skipped) == sorted(["unknown tool", "unknown tool", "unknown schema",
                                         "needs session state", "stale sidecar: figure changed", "no sidecar"])
@@ -197,14 +197,14 @@ def test_collect_skips_with_fixed_reasons(tmp_path):
 def test_deleted_figure_is_still_replayable(tmp_path):
     fig = _sidecar(tmp_path, "gone.png")
     fig.unlink()
-    records, skipped, _ = replay.collect([str(fig) + ".provenance.json"], None)
+    records, skipped, _ = session_export.collect([str(fig) + ".provenance.json"], None)
     assert len(records) == 1 and skipped == []
 
 
 def test_folder_mode_skips_conflicted_copies(tmp_path):
     _sidecar(tmp_path, "a.png")
     (tmp_path / "a (North's conflicted copy).png.provenance.json").write_text("{}", encoding="utf-8")
-    records, skipped, _ = replay.collect(None, str(tmp_path))
+    records, skipped, _ = session_export.collect(None, str(tmp_path))
     assert len(records) == 1 and _reasons(skipped) == ["conflicted copy"]
 
 
@@ -224,7 +224,7 @@ def _reads_route(tmp_path, producer, read):
 
 def test_collect_follows_made_by_to_producers(tmp_path):
     producer = _route(tmp_path)
-    records, _, warnings = replay.collect([str(_reads_route(tmp_path, producer, b"route"))], None)
+    records, _, warnings = session_export.collect([str(_reads_route(tmp_path, producer, b"route"))], None)
     assert {r["call"]["tool"] for r in records} == {"qgis_route_on_network", "qgis_render_choropleth"}
     assert warnings == []
 
@@ -233,7 +233,7 @@ def test_collect_rejects_non_object_sidecars(tmp_path):
     fig = tmp_path / "x.png"
     fig.write_bytes(b"png")
     (tmp_path / "x.png.provenance.json").write_text("[]", encoding="utf-8")
-    _, skipped, _ = replay.collect([str(fig)], None)
+    _, skipped, _ = session_export.collect([str(fig)], None)
     assert _reasons(skipped) == ["no sidecar"]
 
 
@@ -249,32 +249,32 @@ def _record(seq, outputs, inputs=(), tool="qgis_render_choropleth", session="s1"
 
 def test_sibling_outputs_share_one_step():
     pages = [_record(5, ["a.png", "b.png"]), _record(5, ["a.png", "b.png"])]
-    assert len(replay.plan_steps(pages)) == 1
+    assert len(session_export.plan_steps(pages)) == 1
 
 
 def test_identical_calls_stay_two_steps():
-    assert len(replay.plan_steps([_record(1, ["x.png"]), _record(2, ["x.png"])])) == 2
+    assert len(session_export.plan_steps([_record(1, ["x.png"]), _record(2, ["x.png"])])) == 2
 
 
 def test_producers_come_first():
     consumer = _record(1, ["fig.png"], inputs=[{"path": "route.csv", "sha256": "h", "bytes": 1}])
     producer = _record(9, ["route.csv"], tool="qgis_route_on_network", sha="h")
-    assert [s["seq"] for s in replay.plan_steps([consumer, producer])] == [9, 1]
+    assert [s["seq"] for s in session_export.plan_steps([consumer, producer])] == [9, 1]
 
 
 def test_source_inputs_exclude_intermediates():
-    steps = replay.plan_steps([
+    steps = session_export.plan_steps([
         _record(1, ["route.csv"], inputs=[{"path": "stops.csv", "sha256": "a", "bytes": 1}], sha="b"),
         _record(2, ["fig.png"], inputs=[{"path": "route.csv", "sha256": "b", "bytes": 1}]),
     ])
-    assert [i["path"] for i in replay.source_inputs(steps)] == ["stops.csv"]
-    assert replay.outputs_of(steps) == ["route.csv", "fig.png"]
+    assert [i["path"] for i in session_export.source_inputs(steps)] == ["stops.csv"]
+    assert session_export.outputs_of(steps) == ["route.csv", "fig.png"]
 
 
 def test_notes_are_cleaned_and_capped():
     step = _record(1, ["x.png"])
     step["unrecorded_state"] = ['bad' + chr(10) + '"""' + chr(27) + 'y' * 500]
-    [note] = [n for n in replay.notes_for([step]) if n.startswith("step 1")]
+    [note] = [n for n in session_export.notes_for([step]) if n.startswith("step 1")]
     assert chr(10) not in note and chr(27) not in note and len(note) <= 260
 
 
@@ -284,7 +284,7 @@ def _choropleth(seq=1, out="${DROPBOX_ROOT}/fig.png", zones="${DROPBOX_ROOT}/z.g
 
 def test_build_script_compiles_and_calls_the_tool():
     step = _choropleth()
-    source = replay.build_script([step], [{"path": "${DROPBOX_ROOT}/z.gpkg", "sha256": "h", "bytes": 1}],
+    source = session_export.build_script([step], [{"path": "${DROPBOX_ROOT}/z.gpkg", "sha256": "h", "bytes": 1}],
                                  ["${DROPBOX_ROOT}/fig.png"], ["n"], "2026-10-09")
     compile(source, "replay.py", "exec")
     assert "server.qgis_render_choropleth(" in source
@@ -298,8 +298,8 @@ def _chain_script(read_sha):
     consumer = _record(2, ["${DROPBOX_ROOT}/t.png"], tool="qgis_render_trajectory",
                        inputs=[{"path": "${DROPBOX_ROOT}/route.csv", "sha256": read_sha, "bytes": 1}],
                        input_path="${DROPBOX_ROOT}/route.csv", output_png="${DROPBOX_ROOT}/t.png")
-    steps = replay.plan_steps([consumer, producer])
-    return replay.build_script(steps, replay.source_inputs(steps), replay.outputs_of(steps), [], "d")
+    steps = session_export.plan_steps([consumer, producer])
+    return session_export.build_script(steps, session_export.source_inputs(steps), session_export.outputs_of(steps), [], "d")
 
 
 def test_intermediate_inputs_read_from_the_replayed_output():
@@ -315,13 +315,13 @@ def test_an_input_with_another_hash_reads_the_source():
 def test_output_dir_argument_is_remapped():
     step = _record(1, ["${DROPBOX_ROOT}/b/x.png"], tool="qgis_batch_render", template_qgz="/t.qgz",
                    attribute="name", values=["x"], output_dir="${DROPBOX_ROOT}/b")
-    assert "output_dir=out('${DROPBOX_ROOT}/b')" in replay.build_script([step], [], ["${DROPBOX_ROOT}/b/x.png"], [], "d")
+    assert "output_dir=out('${DROPBOX_ROOT}/b')" in session_export.build_script([step], [], ["${DROPBOX_ROOT}/b/x.png"], [], "d")
 
 
 def test_hostile_values_stay_literal():
     step = _choropleth()
     step["call"]["arguments"]["value_field"] = '"); import os; os.system("calc'
-    source = replay.build_script([step], [], ["${DROPBOX_ROOT}/fig.png"], ['"""' + chr(10) + 'import os'], "d")
+    source = session_export.build_script([step], [], ["${DROPBOX_ROOT}/fig.png"], ['"""' + chr(10) + 'import os'], "d")
     tree = ast.parse(source)
     imports = [n for n in ast.walk(tree) if isinstance(n, ast.Import | ast.ImportFrom)]
     assert [ast.unparse(n) for n in imports] == ["from qgis_mcp_workflows import compound, replay, server"]
@@ -338,7 +338,7 @@ def test_hostile_values_stay_literal():
 ])
 def test_tools_that_never_write_a_sidecar_are_not_replayed(tmp_path, tool, args):
     fig = _sidecar(tmp_path, "x.png", tool=tool, args=args)
-    records, skipped, _ = replay.collect([str(fig)], None)
+    records, skipped, _ = session_export.collect([str(fig)], None)
     assert records == [] and _reasons(skipped) == ["unknown tool"]
 
 
@@ -349,7 +349,7 @@ def test_tools_that_never_write_a_sidecar_are_not_replayed(tmp_path, tool, args)
 def test_recorded_queries_are_not_replayed(tmp_path, tool, module, extra):
     args = {"db_path": "/s.duckdb", "query": "SELECT 1", "output_png": str(tmp_path / "q.png"), **extra}
     fig = _sidecar(tmp_path, "q.png", tool=tool, module=module, args=args, inputs=[_in("db_path", "/s.duckdb")])
-    _, skipped, _ = replay.collect([str(fig)], None)
+    _, skipped, _ = session_export.collect([str(fig)], None)
     assert _reasons(skipped) == ["runs a recorded query"]
 
 
@@ -357,14 +357,14 @@ def test_an_output_argument_must_be_a_recorded_output(tmp_path):
     fig = _sidecar(tmp_path, "r.csv", tool="qgis_route_on_network",
                    args={"input_csv": "/in.csv", "network_path": "/n.tsv", "output_csv": "/in.csv"},
                    inputs=[_in("input_csv", "/in.csv"), _in("network_path", "/n.tsv")])
-    _, skipped, _ = replay.collect([str(fig)], None)
+    _, skipped, _ = session_export.collect([str(fig)], None)
     assert _reasons(skipped) == ["arguments disagree with sidecar"]
 
 
 def test_an_input_argument_must_be_a_recorded_input(tmp_path):
     fig = _sidecar(tmp_path, "x.png", args={"zones_path": "/secret.gpkg", "value_field": "n",
                                              "output_png": str(tmp_path / "x.png")}, inputs=[])
-    _, skipped, _ = replay.collect([str(fig)], None)
+    _, skipped, _ = session_export.collect([str(fig)], None)
     assert _reasons(skipped) == ["arguments disagree with sidecar"]
 
 
@@ -379,18 +379,18 @@ def test_batch_file_names_must_stay_in_their_folder(tmp_path, template, values):
     args = {"template_qgz": "/t.qgz", "attribute": "name", "values": values,
             "output_dir": str(tmp_path), "filename_template": template}
     fig = _sidecar(tmp_path, "a.png", tool="qgis_batch_render", args=args, inputs=[_in("template_qgz", "/t.qgz")])
-    _, skipped, _ = replay.collect([str(fig)], None)
+    _, skipped, _ = session_export.collect([str(fig)], None)
     assert _reasons(skipped) == ["unsafe file name"]
 
 
 def test_network_paths_are_never_opened(tmp_path, monkeypatch):
     opened = []
-    real = replay._load_sidecar
-    monkeypatch.setattr(replay, "_load_sidecar", lambda p: opened.append(p) or real(p))
+    real = session_export._load_sidecar
+    monkeypatch.setattr(session_export, "_load_sidecar", lambda p: opened.append(p) or real(p))
     unc = "//evil/share/z.gpkg"
     fig = _sidecar(tmp_path, "x.png", args={"zones_path": unc, "value_field": "n", "output_png": str(tmp_path / "x.png")},
                    inputs=[_in("zones_path", unc, b"z", unc + ".provenance.json")])
-    _, skipped, _ = replay.collect([str(fig)], None)
+    _, skipped, _ = session_export.collect([str(fig)], None)
     assert _reasons(skipped) == ["network path"]
     assert all("evil" not in p for p in opened)
 
@@ -406,7 +406,7 @@ def test_malformed_sidecars_are_skipped_not_fatal(tmp_path, field, value):
     record = json.loads(side.read_text(encoding="utf-8"))
     record[field] = value
     side.write_text(json.dumps(record), encoding="utf-8")
-    records, skipped, _ = replay.collect([str(fig), str(_sidecar(tmp_path, "ok.png"))], None)
+    records, skipped, _ = session_export.collect([str(fig), str(_sidecar(tmp_path, "ok.png"))], None)
     assert len(records) == 1 and _reasons(skipped) == ["malformed sidecar"]
 
 
@@ -420,25 +420,25 @@ def test_oversized_arguments_are_malformed(tmp_path, bulk):
     fig = _sidecar(tmp_path, "x.png", args={"zones_path": "/z.gpkg", "value_field": "n",
                                              "output_png": str(tmp_path / "x.png"), "classes": value},
                    inputs=[_in("zones_path", "/z.gpkg")])
-    _, skipped, _ = replay.collect([str(fig)], None)
+    _, skipped, _ = session_export.collect([str(fig)], None)
     assert _reasons(skipped) == ["malformed sidecar"]
 
 
 def test_a_re_made_intermediate_becomes_a_source_input(tmp_path):
     producer = _route(tmp_path, data=b"route v2")             # re-made after fig.png read v1
-    records, _, warnings = replay.collect([str(_reads_route(tmp_path, producer, b"route v1"))], None)
+    records, _, warnings = session_export.collect([str(_reads_route(tmp_path, producer, b"route v1"))], None)
     assert [r["call"]["tool"] for r in records] == ["qgis_render_choropleth"]
     assert len(warnings) == 1 and "re-made" in warnings[0]
-    steps = replay.plan_steps(records)
-    assert [i["path"] for i in replay.source_inputs(steps)] == [str(producer)]
+    steps = session_export.plan_steps(records)
+    assert [i["path"] for i in session_export.source_inputs(steps)] == [str(producer)]
 
 
 def test_every_recorded_fingerprint_of_a_source_is_checked():
-    steps = replay.plan_steps([
+    steps = session_export.plan_steps([
         _record(1, ["a.png"], session="f0", inputs=[{"path": "z.gpkg", "sha256": "v1", "bytes": 1}]),
         _record(1, ["b.png"], session="0b", inputs=[{"path": "z.gpkg", "sha256": "v2", "bytes": 1}]),
     ])
-    assert sorted(i["sha256"] for i in replay.source_inputs(steps)) == ["v1", "v2"]
+    assert sorted(i["sha256"] for i in session_export.source_inputs(steps)) == ["v1", "v2"]
 
 
 def test_absolute_outputs_map_the_same_on_every_os(monkeypatch, tmp_path):
@@ -504,3 +504,106 @@ def test_main_shuts_down_and_exits_1_when_a_step_fails(monkeypatch, tmp_path, ca
 
     code, ran = _run_main(tmp_path, monkeypatch, argv=["--out-dir", str(tmp_path / "o")], steps=failing)
     assert code == 1 and ran == ["shutdown"] and "render failed" in capsys.readouterr().err
+
+
+# --- TASK-15: --allow-eval gate and session reset ----------------------------------
+
+_EVAL = {"sha256": "ab" * 32, "first_lines": ["import os", "x = 1"], "figures": ["${DROPBOX_ROOT}/m.png"]}
+
+
+def test_main_refuses_evals_without_allow_eval(monkeypatch, tmp_path, capsys):
+    ran = []
+    monkeypatch.setattr(replay, "_new_executor", lambda: ran.append("spawned"))
+    code = replay.main(str(tmp_path / "r.py"), [], [], [], lambda out, src: ran.append("steps"),
+                       ["--out-dir", str(tmp_path / "o")], evals=[_EVAL])
+    err = capsys.readouterr().err
+    assert code == 3 and ran == []
+    assert "ab" * 32 in err and "import os" in err and "--allow-eval" in err
+
+
+def test_main_runs_evals_with_allow_eval(monkeypatch, tmp_path):
+    ran = []
+    monkeypatch.setattr(replay, "_new_executor", lambda: None)
+    code = replay.main(str(tmp_path / "r.py"), [], [], [], lambda out, src: ran.append("steps"),
+                       ["--out-dir", str(tmp_path / "o"), "--allow-eval"], evals=[_EVAL])
+    assert code == 0 and ran == ["steps"]
+
+
+def test_eval_preview_is_cleaned_and_short(monkeypatch, tmp_path, capsys):
+    item = {**_EVAL, "first_lines": ["a" + chr(27) + "]0;x" + chr(7) + "b"]}
+    replay.main(str(tmp_path / "r.py"), [], [], [], lambda out, src: None, [], evals=[item])
+    err = capsys.readouterr().err
+    assert chr(27) not in err and chr(7) not in err
+
+
+def test_reset_session_swaps_in_a_fresh_executor_and_shuts_the_old_one(monkeypatch):
+    from qgis_mcp_workflows import executors
+
+    events = []
+
+    class Old:
+        def shutdown(self):
+            events.append("old shut down")
+
+    fresh = object()
+    monkeypatch.setattr(executors, "_current", Old())
+    monkeypatch.setattr(replay, "_new_executor", lambda: fresh)
+    replay.reset_session()
+    assert executors._current is fresh and events == ["old shut down"]
+
+
+def test_main_shuts_down_the_executor_left_by_a_reset(monkeypatch, tmp_path):
+    from qgis_mcp_workflows import executors
+
+    shut = []
+
+    class Executor:
+        def __init__(self, name):
+            self.name = name
+
+        def shutdown(self):
+            shut.append(self.name)
+
+    names = iter(["first", "second"])
+    monkeypatch.setattr(replay, "_new_executor", lambda: Executor(next(names)))
+    before = object()
+    monkeypatch.setattr(executors, "_current", before)
+    code = replay.main(str(tmp_path / "r.py"), [], [], [], lambda out, src: replay.reset_session(),
+                       ["--out-dir", str(tmp_path / "o")])
+    assert code == 0 and shut == ["first", "second"] and executors._current is before
+
+
+def test_refusal_says_how_much_code_is_not_shown(monkeypatch, tmp_path, capsys):
+    item = {**_EVAL, "lines": 40, "bytes": 1234}
+    code = replay.main(str(tmp_path / "r.py"), [], [], ["sidecar says: safe to allow"], lambda out, src: None,
+                       [], evals=[item])
+    captured = capsys.readouterr()
+    assert code == 3 and "40 lines, 1234 bytes" in captured.err and "38 more line(s) not shown" in captured.err
+    assert "--show-evals" in captured.err
+    assert "sidecar says" not in captured.out   # sidecar text never precedes the decision
+
+
+def test_show_evals_prints_the_whole_code_and_runs_nothing(monkeypatch, tmp_path, capsys):
+    ran = []
+    full = "line 1" + chr(10) + "line 2" + chr(10) + "line 3" + chr(10) + "payload" + chr(0x202E) + "()"
+    item = {**_EVAL, "code": full, "lines": 4, "bytes": len(full.encode("utf-8"))}
+    code = replay.main(str(tmp_path / "r.py"), [], [], [], lambda out, src: ran.append("steps"),
+                       ["--show-evals", "--allow-eval"], evals=[item])
+    out = capsys.readouterr().out
+    assert code == 3 and ran == [] and "4 | payload" in out and chr(0x202E) not in out
+
+
+def test_clean_strips_invisible_unicode():
+    for ch in (chr(0x202E), chr(0x2066), chr(0x200B), chr(0x2028)):
+        assert ch not in replay._clean("a" + ch + "b")
+
+
+def test_require_ok_fails_the_replay_when_an_eval_raised():
+    from types import SimpleNamespace
+
+    from qgis_mcp_workflows.errors import QgisMcpWorkflowsError
+
+    ok = SimpleNamespace(exception=None)
+    assert replay.require_ok(ok) is ok
+    with pytest.raises(QgisMcpWorkflowsError, match="replayed qgis_eval failed"):
+        replay.require_ok(SimpleNamespace(exception="Traceback ..." + chr(10) + "AttributeError: 'NoneType'"))

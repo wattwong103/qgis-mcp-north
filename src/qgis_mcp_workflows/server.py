@@ -630,6 +630,7 @@ class SessionExportResult(BaseModel):
     output_path: str
     n_figures: int
     n_calls: int
+    n_evals: int
     skipped: list[SkippedFigure]
     warnings: list[str]
 
@@ -3027,6 +3028,8 @@ def qgis_export_session(
     output_py: Annotated[str, Field(description="Absolute path for the replay script (.py). Refused if it exists unless overwrite=True.")],
     figures: Annotated[list[str] | None, Field(description="Figure files (or their .provenance.json sidecars) to replay. Exactly one of figures / folder.")] = None,
     folder: Annotated[str | None, Field(description="Replay every figure with a sidecar in this folder (not recursive).")] = None,
+    include_evals: Annotated[bool, Field(description="Replay recorded qgis_eval calls (the script still refuses to run them without --allow-eval).")] = True,
+    trust_foreign: Annotated[bool, Field(description="Keep evals from sidecars found outside DROPBOX_ROOT or not where they claim to be. A sidecar in a shared folder inside DROPBOX_ROOT counts as local: read the evals (--show-evals) before --allow-eval.")] = False,
     overwrite: Annotated[bool, Field(description="Replace an existing output_py.")] = False,
 ) -> SessionExportResult:
     """Write a script that re-makes figures from their provenance sidecars. Delivery tool.
@@ -3035,15 +3038,20 @@ def qgis_export_session(
     after source data changed. Follows made_by chains back to source data.
     The script checks source inputs (exit 2 if they changed, unless --force),
     writes to replay_<date>/ beside itself unless --in-place, and resolves
-    ${DROPBOX_ROOT} on whichever machine runs it.
+    ${DROPBOX_ROOT} on whichever machine runs it. State-reading figures
+    (render_map, exports of the loaded project) replay the recorded loads,
+    styles and evals first; a script with evals exits 3 unless run with
+    --allow-eval.
 
-    Returns: ``SessionExportResult`` — script path, files and calls replayed,
-    and skipped figures with fixed reasons (no sidecar, stale sidecar, unknown
-    tool, needs session state, ...).
+    Returns: ``SessionExportResult`` — script path, files, calls and evals
+    replayed, and skipped figures with fixed reasons (no sidecar, stale sidecar,
+    unknown tool, needs session state, invalid depends_on, ...).
     """
-    from qgis_mcp_workflows.replay import export_session
+    from qgis_mcp_workflows.session_export import export_session
 
-    return SessionExportResult(**export_session(output_py, figures=figures, folder=folder, overwrite=overwrite))
+    return SessionExportResult(**export_session(output_py, figures=figures, folder=folder,
+                                                include_evals=include_evals, trust_foreign=trust_foreign,
+                                                overwrite=overwrite))
 
 
 # ---------------------------------------------------------------------------
@@ -3051,11 +3059,6 @@ def qgis_export_session(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False, idempotentHint=False, destructiveHint=True, openWorldHint=True
-    )
-)
 def qgis_eval(
     code: Annotated[str, Field(description="PyQGIS source to execute.")],
     return_vars: Annotated[list[str] | None, Field(description="Local variable names to capture from the executed scope and return JSON-serialized.")] = None,
@@ -3092,6 +3095,15 @@ def qgis_eval(
         return_values=result.get("return_values") if return_vars is not None else None,
         exception=exception_text,
     )
+
+
+# Registered through the provenance hook so successful evals enter the state
+# ledger (spec §6); the module keeps the plain function for Python callers.
+mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=False, destructiveHint=True, openWorldHint=True
+    )
+)(with_provenance(qgis_eval))
 
 
 # Trigger compound-mode tool registration if env var requested it.

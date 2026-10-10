@@ -147,3 +147,73 @@ def test_export_fails_when_nothing_can_be_replayed(server, root):
 async def test_export_session_is_marked_destructive(server):
     [tool] = [t for t in await server.mcp.list_tools() if t.name == "qgis_export_session"]
     assert field(tool.annotations, "destructiveHint") is True   # overwrite=True replaces a file
+
+
+# --- TASK-15: state-reading figures and evals -----------------------------------------
+
+
+def _layer_responses(fake_executor, ids):
+    queue = list(ids)
+    fake_executor.responses["add_vector_layer"] = lambda p: {"id": queue.pop(0), "name": "zones"}
+    fake_executor.responses["get_layer_info"] = {
+        "type": "vector_2", "crs": "EPSG:4326", "extent": {"xmin": 0, "ymin": 0, "xmax": 1, "ymax": 1},
+        "feature_count": 4, "fields": [{"name": "zone_id", "type": "String", "n_unique": 4}],
+    }
+    fake_executor.responses["set_layer_style"] = {"ok": True, "n_classes": 1, "classes": []}
+
+    def render(params):
+        Path(params["output_png"]).write_bytes(PNG)
+        return {"output_path": params["output_png"], "width": 1, "height": 1, "dpi": 150,
+                "extent": [0, 0, 1, 1], "crs": "EPSG:4326", "n_layers": 1}
+
+    fake_executor.responses["render_layers_to_path"] = render
+
+
+async def test_render_map_round_trip_restyles_a_b_a_on_the_new_layer(server, fake_executor, root, monkeypatch):
+    _layer_responses(fake_executor, ["L1", "L9"])            # the replay's load returns a different id
+    zones = root / "zones.geojson"
+    zones.write_text("{}", encoding="utf-8")
+    await server.mcp.call_tool("qgis_load_layer", {"path": str(zones)})
+    for field_name in ("a", "b", "a"):
+        await server.mcp.call_tool("qgis_style_categorized", {"layer_id": "L1", "field": field_name})
+    await server.mcp.call_tool("qgis_render_map", {"layer_ids": ["L1"], "output_png": str(root / "map.png")})
+    script = root / "replay.py"
+    result = server.qgis_export_session(output_py=str(script), figures=[str(root / "map.png")])
+    assert (result.n_calls, result.n_evals, result.skipped) == (1, 0, [])
+    fake_executor.calls.clear()
+    monkeypatch.setattr(replay, "_new_executor", lambda: fake_executor)
+    assert _run_script(script, monkeypatch, "--out-dir", str(root / "out")) == 0
+    styles = [p for c, p in fake_executor.calls if c == "set_layer_style"]
+    assert [(p["layer_id"], p["field"]) for p in styles] == [("L9", "a"), ("L9", "b"), ("L9", "a")]
+    [render] = [p for c, p in fake_executor.calls if c == "render_layers_to_path"]
+    assert render["layer_ids"] == ["L9"]
+    assert render["output_png"] == str((root / "out" / "DROPBOX_ROOT" / "map.png").resolve())
+
+
+async def test_eval_round_trip_needs_allow_eval(server, fake_executor, root, monkeypatch, capsys):
+    _layer_responses(fake_executor, ["L1", "L2", "L3"])
+    fake_executor.responses["execute_code"] = {"executed": True, "stdout": ""}
+    (root / "z.geojson").write_text("{}", encoding="utf-8")  # a source input the replay checks
+    await server.mcp.call_tool("qgis_eval", {"code": "x = 1"})
+    await server.mcp.call_tool("qgis_load_layer", {"path": str(root / "z.geojson")})
+    await server.mcp.call_tool("qgis_render_map", {"layer_ids": ["L1"], "output_png": str(root / "m.png")})
+    script = root / "replay.py"
+    assert server.qgis_export_session(output_py=str(script), figures=[str(root / "m.png")]).n_evals == 1
+    fake_executor.calls.clear()
+    monkeypatch.setattr(replay, "_new_executor", lambda: fake_executor)
+    assert _run_script(script, monkeypatch, "--out-dir", str(root / "out")) == 3
+    assert fake_executor.calls == [] and "x = 1" in capsys.readouterr().err
+    assert _run_script(script, monkeypatch, "--out-dir", str(root / "out"), "--allow-eval") == 0
+    assert next(c for c, _ in fake_executor.calls) == "execute_code"
+
+
+async def test_include_evals_false_writes_a_script_without_them(server, fake_executor, root):
+    _layer_responses(fake_executor, ["L1"])
+    fake_executor.responses["execute_code"] = {"executed": True, "stdout": ""}
+    await server.mcp.call_tool("qgis_eval", {"code": "x = 1"})
+    await server.mcp.call_tool("qgis_load_layer", {"path": str(root / "z.geojson")})
+    await server.mcp.call_tool("qgis_render_map", {"layer_ids": ["L1"], "output_png": str(root / "m.png")})
+    result = server.qgis_export_session(output_py=str(root / "r.py"), figures=[str(root / "m.png")],
+                                        include_evals=False)
+    assert result.n_evals == 0 and "server.qgis_eval(" not in (root / "r.py").read_text(encoding="utf-8")
+    assert any("include_evals=False" in w for w in result.warnings)

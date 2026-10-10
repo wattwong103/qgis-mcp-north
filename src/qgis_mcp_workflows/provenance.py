@@ -33,6 +33,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from qgis_mcp_workflows import ledger
 from qgis_mcp_workflows.executors import executor_requests
 
 logger = logging.getLogger("qgis_mcp_workflows.provenance")
@@ -160,6 +161,7 @@ def reset_for_tests() -> None:
         _hash_cache.clear()
     _static_facts = None
     _qgis_facts.clear()
+    ledger.reset()
 
 
 INPUT_ARGS = frozenset({
@@ -467,20 +469,27 @@ def _remote(args: dict, machine_specific: list[dict]) -> list[dict]:
     return [{"argument": "basemap", "value": basemap, "note": "tiles are fetched live and not pinned"}]
 
 
-def _record(tool: str, module: str, call_args: dict, before: dict, prints: list[dict],
-            implicit: list[dict], seq: int, requests_before: int, result: Any, elapsed: float) -> None:
-    figures = written_files(result)
-    if not figures:
-        return
-    machine_specific: list[dict] = []
-    for entry in prints + implicit:
+def _settle(entries: list[dict], before: dict, figures: list[str], machine_specific: list[dict]) -> None:
+    """Finish input fingerprints after the call: drift, producer link, machine-specific flag."""
+    for entry in entries:
         path = entry.pop("_path")
         entry["changed_during_call"] = snapshot(path) != before[path]
         # An input this call overwrote must not link to the sidecar it is replacing.
         entry["made_by"] = None if path in figures else _made_by(path, entry["sha256"])
         _flag(machine_specific, path)
+
+
+def _record(tool: str, module: str, call_args: dict, before: dict, prints: list[dict],
+            implicit: list[dict], seq: int, requests_before: int, result: Any, elapsed: float,
+            depends_on: list[dict], notes: list[str]) -> None:
+    figures = written_files(result)
+    if not figures:
+        return
+    machine_specific: list[dict] = []
+    _settle(prints + implicit, before, figures, machine_specific)
     written = {portable(f)[0] for f in figures}
     unrecorded = [f"input overwritten by this call: {e['argument']}" for e in prints if e["path"] in written]
+    unrecorded += notes
     for figure in figures:
         _flag(machine_specific, figure)
     shared = {
@@ -489,7 +498,7 @@ def _record(tool: str, module: str, call_args: dict, before: dict, prints: list[
         "created": _utc(time.time()),
         "call": {"tool": tool, "module": module, "arguments": _portable_arguments(call_args)},
         "result_summary": result_summary(result),
-        "depends_on": [],
+        "depends_on": depends_on,
         "inputs": prints,
         "implicit_inputs": implicit,
         "remote": _remote(call_args, machine_specific),
@@ -530,9 +539,25 @@ def _writes_files(fn: Callable) -> bool:
     )
 
 
+def _ledger_entry(tool: str, module: str, seq: int, call_args: dict, prints: list[dict],
+                  before: dict) -> dict:
+    _settle(prints, before, [], [])
+    return {"seq": seq, "call": {"tool": tool, "module": module, "arguments": _portable_arguments(call_args)},
+            "inputs": prints, "layer_id": None}
+
+
+def _desktop() -> bool:
+    """Recording over the plugin transport: the user can edit the map in QGIS between calls."""
+    from qgis_mcp_workflows import executors
+
+    return type(executors._current).__name__ == "PluginExecutor"
+
+
 def with_provenance(fn: Callable) -> Callable:
-    """Wrap a tool so each successful MCP call leaves a sidecar per written file."""
-    if not _writes_files(fn):
+    """Wrap a tool so each successful MCP call leaves a sidecar per written file
+    and keeps the session state ledger (spec §6) current."""
+    writes = _writes_files(fn)
+    if not writes and fn.__name__ not in ledger.TRACKED:
         return fn
     signature = inspect.signature(fn)
     module = "compound" if fn.__module__.endswith(".compound") else "server"
@@ -552,17 +577,33 @@ def with_provenance(fn: Callable) -> Callable:
             implicit = [{"argument": name, **fingerprint(path), "_path": path} for name, path in hidden]
             seq = _next_seq()
             requests_before = executor_requests()
+            depends_on, notes = ledger.snapshot(fn.__name__, call_args) if writes else ([], [])
+            if depends_on and _desktop():
+                notes.append(ledger.DESKTOP_NOTE)
         except Exception:
             logger.warning("provenance: could not prepare a record for %s", fn.__name__, exc_info=True)
             return fn(*args, **kwargs)
         started = time.monotonic()
-        result = fn(*args, **kwargs)  # a failing call records nothing
         try:
-            _record(fn.__name__, module, call_args, before, prints, implicit, seq,
-                    requests_before, result, time.monotonic() - started)
+            result = fn(*args, **kwargs)  # a failing call records nothing
         except Exception:
-            logger.warning("provenance: recording failed for %s", fn.__name__, exc_info=True)
-            _drop_stale_sidecars(result)
+            # The plugin opens a project before it can fail (no such layout, bad file):
+            # QGIS may now hold another project, so the ledger stops vouching for one.
+            if ledger.kind(fn.__name__, call_args) in ("project", "export"):
+                ledger.forget_project()
+            raise
+        if writes:
+            try:
+                _record(fn.__name__, module, call_args, before, prints, implicit, seq,
+                        requests_before, result, time.monotonic() - started, depends_on, notes)
+            except Exception:
+                logger.warning("provenance: recording failed for %s", fn.__name__, exc_info=True)
+                _drop_stale_sidecars(result)
+        try:
+            entry = None if writes else _ledger_entry(fn.__name__, module, seq, call_args, prints, before)
+            ledger.update(fn.__name__, call_args, entry, result)
+        except Exception:
+            logger.warning("provenance: ledger update failed for %s", fn.__name__, exc_info=True)
         return result
 
     return wrapper
