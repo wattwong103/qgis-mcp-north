@@ -1,7 +1,7 @@
 ---
 id: TASK-16
 title: Provenance — project and shapefile datasources
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-08 12:00'
 labels:
@@ -22,8 +22,16 @@ Fourth of four PRs (spec v2 §9). Fingerprint .shp siblings and the local dataso
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 .shp siblings fingerprinted
-- [ ] #2 .qgz and .qgs datasources parsed (|layername, file:///?…, dbname=, ./ and ../); unparsed or out-of-root → unrecorded_state; databases/web → remote with credentials redacted
-- [ ] #3 DOCTYPE/ENTITY documents refused; size cap enforced; UNC and file://host never opened (tests)
-- [ ] #4 pytest + ruff green; CHANGELOG
+- [x] #1 .shp siblings fingerprinted
+- [x] #2 .qgz and .qgs datasources parsed (|layername, file:///?…, dbname=, ./ and ../); unparsed or out-of-root → unrecorded_state; databases/web → remote with credentials redacted
+- [x] #3 DOCTYPE/ENTITY documents refused; size cap enforced; UNC and file://host never opened (tests)
+- [x] #4 pytest + ruff green; CHANGELOG
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Plan: docs/superpowers/plans/2026-10-10-datasources.md (executed inline).
+- Ruling: every real QGIS project starts with <!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'> (found by the live test), so exactly that declaration is accepted; any other DOCTYPE and every ENTITY are refused as spec section 9 intends.
+- Datasource notes of a project load used only as a state dependency are not carried into the figure's unrecorded_state (its files are fingerprinted in the dependency's inputs).
+<!-- SECTION:NOTES:END -->
