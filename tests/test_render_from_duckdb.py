@@ -100,7 +100,8 @@ def test_attributes_of_any_duckdb_type_cross_the_wire(fake_executor, tmp_path):
         "CREATE TABLE t AS SELECT 139.70 AS lon, 35.70 AS lat, 12.5 AS v, "
         "DATE '2026-10-20' AS d, TIMESTAMP '2026-10-20 08:30:00' AS ts, "
         "'5b9f1d0e-1c2a-4d3e-9f00-0123456789ab'::UUID AS u, INTERVAL 90 SECOND AS dt, "
-        "NULL::DECIMAL(9,2) AS missing"
+        "NULL::DECIMAL(9,2) AS missing, '\\xAA\\xBB'::BLOB AS raw, [1, 2] AS xs, "
+        "{'w': 2.5, 'when': DATE '2026-10-21'} AS s"
     )
     con.close()
     fake_executor.responses["render_wkt_features"] = _render_response("Point", 1)
@@ -116,6 +117,9 @@ def test_attributes_of_any_duckdb_type_cross_the_wire(fake_executor, tmp_path):
     assert feat["u"] == "5b9f1d0e-1c2a-4d3e-9f00-0123456789ab"
     assert feat["dt"] == "0:01:30"
     assert feat["missing"] is None
+    assert feat["raw"] == "<BLOB 2 bytes>"  # never the bytes themselves
+    assert feat["xs"] == [1, 2]  # a LIST stays a JSON list, as before
+    assert feat["s"] == {"w": 2.5, "when": "2026-10-21"}  # items converted inside
 
 
 def test_the_fake_executor_refuses_what_the_wire_cannot_send(fake_executor):

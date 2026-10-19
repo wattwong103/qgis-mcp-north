@@ -11,8 +11,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (TASK-18). Its sidecar ran `git` with the server's stdin inherited; mcp's
   stdio transport always has a read pending there, so git blocked at startup
   until the client next wrote (often only its 1800 s tool-timeout cancel), and
-  every other call queued behind it. git now runs with stdin closed, and a test
-  requires `stdin=` on every subprocess the server spawns.
+  every other call queued behind it. git now runs with stdin closed and a timeout
+  that holds on Windows (no second, unbounded wait after the kill), and a test
+  requires `stdin=subprocess.DEVNULL` or `PIPE` on every subprocess the server or
+  plugin spawns.
 - Qualitative ColorBrewer palettes work. QGIS's default style has none of
   Set1/2/3, Paired, Dark2, Pastel1/2, Accent, so `qgis_style_categorized`'s own
   default `"Set2"` was always drawn as Spectral, and trajectory modes took QGIS's
@@ -20,12 +22,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   resolve to their ColorBrewer colours in categorized styles, diagram maps and
   trajectory modes; trajectory renders are byte-identical across runs.
 - A palette that cannot be honoured is refused with a `Next:` hint instead of
-  replaced: an unknown name in any tool, and more categories than a qualitative
-  scheme has (Set2: 8). A plugin error that carries its own `Next:` hint no
-  longer gets a second, generic one.
+  replaced: an unknown name in any tool (names are case-sensitive, so `"set2"`,
+  which used to become Spectral, is now refused with the list of names), and
+  more categories or graduated classes than a named qualitative scheme has
+  (Set2: 8). A plugin error that carries its own `Next:` hint no longer gets a
+  second, generic one.
 - `qgis_render_from_duckdb` sends DECIMAL columns (DuckDB's type for literals
-  such as `139.70`) as numbers, dates and times as ISO text, and other values
+  such as `139.70`) as numbers, dates and times as ISO text, LIST/STRUCT/MAP as
+  JSON with their items converted, a BLOB as `<BLOB n bytes>`, and other values
   JSON cannot carry (UUID, INTERVAL, ...) as text, instead of failing the render.
+
+### Changed
+
+- `qgis_style_categorized` has no fixed default palette: with none given the
+  plugin uses Set2 for up to 8 categories, else Spectral, so a bare call on the
+  23 wards still works. Trajectory modes follow the same rule, coloured by
+  their sorted order: deterministic for one input, but a mode's colour can
+  differ between files with different sets of modes.
 
 ### Tests
 

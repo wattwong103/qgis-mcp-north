@@ -1101,7 +1101,7 @@ def qgis_project_load(
 def qgis_style_categorized(
     layer_id: Annotated[str, Field(description="layer_id from qgis_load_layer or qgis_project_load.")],
     field: Annotated[str, Field(description="Field name to categorize on (string-typed).")],
-    palette: Annotated[str, Field(description='ColorBrewer palette name, e.g. "Set2", "Paired", "Dark2". Qualitative schemes have a fixed number of colours (Set2: 8, Paired: 12); more categories are refused, so pass classes= or a continuous ramp such as "Spectral".')] = "Set2",
+    palette: Annotated[str | None, Field(description='ColorBrewer palette name, e.g. "Set2", "Paired", "Dark2", or a continuous ramp such as "Spectral". Default: Set2 while there are at most 8 categories, else Spectral. A named qualitative scheme has a fixed number of colours (Set2: 8, Paired: 12); more categories are refused, so pass classes= or a continuous ramp.')] = None,
     classes: Annotated[list[str] | None, Field(description="Optional subset/order of category values to render; every other value (and NULL) shares one grey 'all other values' class.")] = None,
 ) -> StyleResult:
     """Apply categorical (one-color-per-value) symbology to a vector layer.
@@ -1326,7 +1326,9 @@ def _wire_value(value: Any) -> Any:
 
     DECIMAL (DuckDB's type for literals like 139.70 and for SUMs of them) becomes
     a float so graduated styling still sees a number; dates and times become ISO
-    text; anything else JSON cannot carry (UUID, INTERVAL, BLOB, ...) becomes text.
+    text; LIST/STRUCT/MAP stay JSON with their items converted; a BLOB becomes a
+    short marker (its bytes as text could outgrow the plugin's message cap);
+    anything else JSON cannot carry (UUID, INTERVAL, ...) becomes text.
     """
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -1334,6 +1336,12 @@ def _wire_value(value: Any) -> Any:
         return float(value)
     if isinstance(value, (_dt.date, _dt.time)):  # datetime is a date
         return value.isoformat()
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return f"<BLOB {memoryview(value).nbytes} bytes>"
+    if isinstance(value, (list, tuple)):
+        return [_wire_value(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _wire_value(v) for k, v in value.items()}
     return str(value)
 
 

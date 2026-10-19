@@ -85,6 +85,27 @@ def test_an_unknown_palette_is_refused_not_replaced(headless, tmp_path, style):
         _style(headless, path, "v", color_ramp="NoSuchRamp", **style)
 
 
+def test_no_palette_means_set2_for_a_few_categories(headless, tmp_path):
+    path = _points_geojson(tmp_path / "modes.geojson", "mode", ["bus", "rail", "walk"])
+    response, _ = _style(headless, path, "mode", style_type="categorized", color_ramp=None)
+    assert [c["color"] for c in response["classes"]] == SET2[:3]
+
+
+def test_no_palette_means_a_continuous_ramp_for_many_categories(headless, tmp_path):
+    # 23 wards with no palette worked in 1.15.0 and must keep working.
+    path = _points_geojson(tmp_path / "nine.geojson", "k", NINE)
+    response, drawn = _style(headless, path, "k", style_type="categorized", color_ramp=None)
+    colors = [c["color"] for c in response["classes"]]
+    assert len(set(colors)) == 9
+    assert drawn == dict(zip(NINE, colors, strict=True))
+
+
+def test_graduated_refuses_more_classes_than_a_qualitative_palette_has(headless, tmp_path):
+    path = _points_geojson(tmp_path / "v.geojson", "v", list(range(20)))
+    with pytest.raises(ExecutorError, match=r"'Set2' has 8 colours for 9 classes.*Next: ask for at most 8"):
+        _style(headless, path, "v", style_type="graduated", color_ramp="Set2", classes=9, mode="equal_interval")
+
+
 def test_a_qgis_style_ramp_still_resolves(headless, tmp_path):
     path = _points_geojson(tmp_path / "v.geojson", "v", [1, 2, 3, 4])
     response, _ = _style(headless, path, "v", style_type="graduated", color_ramp="YlOrRd",
@@ -92,19 +113,22 @@ def test_a_qgis_style_ramp_still_resolves(headless, tmp_path):
     assert len(response["breaks"]) == 4
 
 
-async def test_trajectory_mode_colours_are_the_same_on_every_render(tmp_path, monkeypatch):
+@pytest.fixture
+def server_on(headless, tmp_path, monkeypatch):
+    """The MCP server module, dispatching to the module's one headless QGIS."""
     monkeypatch.setenv("DROPBOX_ROOT", str(tmp_path))
-    server = importlib.import_module("qgis_mcp_workflows.server")
-    executor = HeadlessExecutor()
-    executors.set_executor(executor)
+    executors.set_executor(headless)
     try:
-        for name in ("first.png", "second.png"):
-            await server.mcp.call_tool("qgis_render_trajectory", {
-                "input_path": TRAJECTORY, "output_png": str(tmp_path / name),
-                "mode_col": "transport_mode", "width": 400, "height": 300})
+        yield importlib.import_module("qgis_mcp_workflows.server")
     finally:
-        executor.shutdown()
         executors.set_executor(None)
+
+
+async def test_trajectory_mode_colours_are_the_same_on_every_render(server_on, tmp_path):
+    for name in ("first.png", "second.png"):
+        await server_on.mcp.call_tool("qgis_render_trajectory", {
+            "input_path": TRAJECTORY, "output_png": str(tmp_path / name),
+            "mode_col": "transport_mode", "width": 400, "height": 300})
     digests = {hashlib.sha256(Path(tmp_path / n).read_bytes()).hexdigest() for n in ("first.png", "second.png")}
     assert len(digests) == 1
 
@@ -119,18 +143,10 @@ def _two_series(path):
     return str(path)
 
 
-async def test_diagram_map_renders_with_a_qualitative_palette(tmp_path, monkeypatch):
+async def test_diagram_map_renders_with_a_qualitative_palette(server_on, tmp_path):
     # Dark2 used to fall back to Spectral here too; now it resolves (or is refused).
-    monkeypatch.setenv("DROPBOX_ROOT", str(tmp_path))
-    server = importlib.import_module("qgis_mcp_workflows.server")
     layer = _two_series(tmp_path / "series.geojson")
-    executor = HeadlessExecutor()
-    executors.set_executor(executor)
-    try:
-        await server.mcp.call_tool("qgis_render_diagram_map", {
-            "layer_path": layer, "value_fields": ["pop", "jobs"], "palette": "Dark2",
-            "output_png": str(tmp_path / "d.png"), "width": 400, "height": 300})
-    finally:
-        executor.shutdown()
-        executors.set_executor(None)
+    await server_on.mcp.call_tool("qgis_render_diagram_map", {
+        "layer_path": layer, "value_fields": ["pop", "jobs"], "palette": "Dark2",
+        "output_png": str(tmp_path / "d.png"), "width": 400, "height": 300})
     assert (tmp_path / "d.png").stat().st_size > 0

@@ -283,20 +283,33 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
+_GIT_TIMEOUT_S = 5
+
+
 def _git(root: Path, *args: str) -> str | None:
     """git output, or None if git failed. --no-optional-locks: never take
     index.lock away from another session committing in the same repo.
 
     stdin=DEVNULL: over stdio the MCP server's stdin always has a read pending,
     and on Windows a child inheriting it blocks until the client next writes.
+    The timeout is enforced here, not by subprocess.run: on Windows run() waits
+    again, with no timeout, after killing a git launcher whose child still
+    holds the pipe.
     """
     try:
-        done = subprocess.run(["git", "--no-optional-locks", "-C", str(root), *args],
-                              stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8",
-                              errors="replace", timeout=5)
-    except (OSError, subprocess.SubprocessError):
+        proc = subprocess.Popen(["git", "--no-optional-locks", "-C", str(root), *args],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                encoding="utf-8", errors="replace")
+    except OSError:
         return None
-    return done.stdout.strip() if done.returncode == 0 else None
+    try:
+        out, _ = proc.communicate(timeout=_GIT_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()  # never read the pipe again: a launcher's child may keep it open
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=1)
+        return None
+    return out.strip() if proc.returncode == 0 else None
 
 
 def _git_state() -> dict:
