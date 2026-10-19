@@ -13,6 +13,8 @@ can run side-by-side; the LLM picks per request based on tool descriptions.
 from __future__ import annotations
 
 import contextlib
+import datetime as _dt
+import decimal
 import logging
 import os
 import sys
@@ -1099,7 +1101,7 @@ def qgis_project_load(
 def qgis_style_categorized(
     layer_id: Annotated[str, Field(description="layer_id from qgis_load_layer or qgis_project_load.")],
     field: Annotated[str, Field(description="Field name to categorize on (string-typed).")],
-    palette: Annotated[str, Field(description='ColorBrewer palette name, e.g. "Set2", "Paired", "Dark2".')] = "Set2",
+    palette: Annotated[str, Field(description='ColorBrewer palette name, e.g. "Set2", "Paired", "Dark2". Qualitative schemes have a fixed number of colours (Set2: 8, Paired: 12); more categories are refused, so pass classes= or a continuous ramp such as "Spectral".')] = "Set2",
     classes: Annotated[list[str] | None, Field(description="Optional subset/order of category values to render; every other value (and NULL) shares one grey 'all other values' class.")] = None,
 ) -> StyleResult:
     """Apply categorical (one-color-per-value) symbology to a vector layer.
@@ -1319,6 +1321,22 @@ class DuckDbRenderResult(RenderResult):
     row_limit_hit: bool = False
 
 
+def _wire_value(value: Any) -> Any:
+    """A DuckDB result value the plugin can receive as JSON.
+
+    DECIMAL (DuckDB's type for literals like 139.70 and for SUMs of them) becomes
+    a float so graduated styling still sees a number; dates and times become ISO
+    text; anything else JSON cannot carry (UUID, INTERVAL, BLOB, ...) becomes text.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, decimal.Decimal):
+        return float(value)
+    if isinstance(value, (_dt.date, _dt.time)):  # datetime is a date
+        return value.isoformat()
+    return str(value)
+
+
 def _one_select(duckdb: Any, query: str) -> str:
     """The query without a trailing ';' if it is exactly one SELECT, else a typed error.
 
@@ -1509,7 +1527,7 @@ def qgis_render_from_duckdb(
             wkt = f"POINT ({float(lon)} {float(lat)})"
         feat = {"wkt": wkt}
         for c in attr_cols:
-            feat[c] = row[idx[c]]
+            feat[c] = _wire_value(row[idx[c]])
         features.append(feat)
 
     if not features:

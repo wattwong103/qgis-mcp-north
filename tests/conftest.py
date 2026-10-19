@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import socket
 import subprocess
 from collections.abc import Callable
@@ -90,6 +91,9 @@ class FakeExecutor:
     def dispatch(self, command: str, params: dict | None = None, timeout: int | None = None) -> Any:
         # Every FakeExecutor test is also a contract test against plugin.py.
         plugin_contract.check_dispatch(command, params)
+        # ...and against the wire: both executors json.dumps the message, so a
+        # value they cannot send (a DuckDB Decimal, a datetime) fails here too.
+        json.dumps({"type": command, "params": params or {}})
         self.calls.append((command, params))
         if command not in self.responses:
             raise AssertionError(

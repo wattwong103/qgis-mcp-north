@@ -3,6 +3,35 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.15.1 — 2026-10-20 — fixes from the live trial
+
+### Fixed
+
+- The first figure of an MCP session no longer hangs the server on Windows
+  (TASK-18). Its sidecar ran `git` with the server's stdin inherited; mcp's
+  stdio transport always has a read pending there, so git blocked at startup
+  until the client next wrote (often only its 1800 s tool-timeout cancel), and
+  every other call queued behind it. git now runs with stdin closed, and a test
+  requires `stdin=` on every subprocess the server spawns.
+- Qualitative ColorBrewer palettes work. QGIS's default style has none of
+  Set1/2/3, Paired, Dark2, Pastel1/2, Accent, so `qgis_style_categorized`'s own
+  default `"Set2"` was always drawn as Spectral, and trajectory modes took QGIS's
+  random default colours (no two renders, and no replay, matched). They now
+  resolve to their ColorBrewer colours in categorized styles, diagram maps and
+  trajectory modes; trajectory renders are byte-identical across runs.
+- A palette that cannot be honoured is refused with a `Next:` hint instead of
+  replaced: an unknown name in any tool, and more categories than a qualitative
+  scheme has (Set2: 8). A plugin error that carries its own `Next:` hint no
+  longer gets a second, generic one.
+- `qgis_render_from_duckdb` sends DECIMAL columns (DuckDB's type for literals
+  such as `139.70`) as numbers, dates and times as ISO text, and other values
+  JSON cannot carry (UUID, INTERVAL, ...) as text, instead of failing the render.
+
+### Tests
+
+- `FakeExecutor` now JSON-encodes every dispatch like both real transports, so
+  a tool that sends an unencodable value fails its unit tests.
+
 ## v1.15.0 — 2026-10-20 — figure provenance and upstream review fixes
 
 Figure provenance (sidecars, qgis_export_session replay, the session ledger and eval gate, project and shapefile datasources), the DuckDB lockdown, and the fixes from the 2026-10 review of upstream nkarasiak/qgis-mcp. Each section below was one task.

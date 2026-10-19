@@ -27,6 +27,7 @@ from qgis.core import (
     QgsClassificationJenks,
     QgsClassificationPrettyBreaks,
     QgsClassificationQuantile,
+    QgsColorBrewerColorRamp,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsExpression,
@@ -1215,6 +1216,12 @@ class QgisMCPServer(QObject):
     # outside the subset (and NULL). ColorBrewer Greys-3 middle.
     _OTHER_CATEGORY_LABEL: ClassVar[str] = "all other values"
     _OTHER_CATEGORY_COLOR: ClassVar[str] = "#bdbdbd"
+    # ColorBrewer's qualitative schemes: one distinct colour per category, a fixed
+    # number of them. QGIS ships them (QgsColorBrewerColorRamp) but its default
+    # style has none, so they are resolved by name in _resolve_color_ramp.
+    _QUALITATIVE_SCHEMES: ClassVar[tuple] = (
+        "Accent", "Dark2", "Paired", "Pastel1", "Pastel2", "Set1", "Set2", "Set3",
+    )
 
     @staticmethod
     def _is_null(value):
@@ -1615,26 +1622,49 @@ class QgisMCPServer(QObject):
         xform = QgsCoordinateTransform(src_crs, dest, QgsProject.instance())
         return xform.transformBoundingBox(rect)
 
-    def _resolve_color_ramp(self, name, diverging=False):
-        """Resolve a color-ramp name to a QgsColorRamp.
+    def _resolve_color_ramp(self, name):
+        """Resolve a palette name to a QgsColorRamp, or refuse it.
 
         Order: vendored scientific ramp (colormaps.build_ramp) → QGIS default
-        style ramp (keeps YlOrRd/Blues/Spectral working) → a sane default
-        (vik when diverging, else Spectral). Unknown names never raise.
+        style ramp (YlOrRd, Blues, Spectral, ...) → a ColorBrewer scheme QGIS
+        ships but its default style lacks (Set2, Paired, Dark2, ...), at its
+        largest variant. An unknown name raises: a stand-in ramp would draw the
+        figure in colours nobody asked for, and say nothing.
         """
         from . import colormaps
 
         ramp = colormaps.build_ramp(name)
-        if ramp is not None:
-            return ramp
-        ramp = QgsStyle.defaultStyle().colorRamp(name)
-        if ramp is not None:
-            return ramp
-        if diverging:
-            fallback = colormaps.build_ramp("vik")
-            if fallback is not None:
-                return fallback
-        return QgsStyle.defaultStyle().colorRamp("Spectral")
+        if ramp is None:
+            ramp = QgsStyle.defaultStyle().colorRamp(name)
+        if ramp is None and name in QgsColorBrewerColorRamp.listSchemeNames():
+            variants = QgsColorBrewerColorRamp.listSchemeVariants(name)
+            ramp = QgsColorBrewerColorRamp(name, max(variants))
+        if ramp is None:
+            raise Exception(
+                f"Unknown palette {name!r}. Next: use a ColorBrewer name (YlOrRd, Blues, RdBu, "
+                f"Set2, Paired, Dark2), a scientific colormap ({', '.join(sorted(colormaps.COLORMAPS))}), "
+                "or another ramp from QGIS's default style"
+            )
+        return ramp
+
+    def _category_colors(self, palette, n, what, fix):
+        """``n`` colours for ``n`` categories, ``what`` naming them in errors.
+
+        A qualitative scheme gives its first ``n`` colours and refuses more
+        categories than it has (``fix`` is the hint, ``{k}`` its size); any other
+        ramp is sampled evenly from end to end.
+        """
+        ramp = self._resolve_color_ramp(palette)
+        if palette in self._QUALITATIVE_SCHEMES and isinstance(ramp, QgsColorBrewerColorRamp):
+            size = ramp.count()
+            if n > size:
+                raise Exception(
+                    f"Palette {palette!r} has {size} colours for {n} {what}. "
+                    f"Next: {fix.format(k=size)}, or use a continuous palette such as 'Spectral' or 'viridis'"
+                )
+            return [ramp.color(ramp.value(i)) for i in range(n)]
+        step = max(n - 1, 1)
+        return [ramp.color(i / step) for i in range(n)]
 
     def _build_graduated_renderer(
         self, layer, field, *, n_classes, mode, palette, diverging=False, center=0.0
@@ -1647,7 +1677,7 @@ class QgisMCPServer(QObject):
         midpoint (``mode`` is ignored). See colormaps.diverging_breaks.
         """
         symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-        ramp = self._resolve_color_ramp(palette, diverging=diverging)
+        ramp = self._resolve_color_ramp(palette)
 
         if not diverging:
             renderer = QgsGraduatedSymbolRenderer(field)
@@ -2408,15 +2438,18 @@ class QgisMCPServer(QObject):
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
 
     def _apply_categorical_by_mode(self, layer, field):
-        """Build a categorized renderer one color per unique value of field."""
+        """One colour per unique value of field: Set2 for up to 8 modes, else Spectral.
+
+        The caller names no palette, so the choice is fixed here; left to QGIS,
+        each symbol would get a random default colour and no replay would match.
+        """
         unique = sorted({str(f.attribute(field)) for f in layer.getFeatures()})
-        ramp = QgsStyle.defaultStyle().colorRamp("Set2")
+        palette = "Set2" if len(unique) <= 8 else "Spectral"
+        colors = self._category_colors(palette, len(unique), "modes", "")
         categories = []
-        for i, val in enumerate(unique):
+        for val, color in zip(unique, colors):
             symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-            if ramp:
-                color = ramp.color(i / max(1, len(unique) - 1)) if len(unique) > 1 else ramp.color(0.5)
-                symbol.setColor(color)
+            symbol.setColor(color)
             categories.append(QgsRendererCategory(val, symbol, val))
         renderer = QgsCategorizedSymbolRenderer(field, categories)
         layer.setRenderer(renderer)
@@ -2818,9 +2851,8 @@ class QgisMCPServer(QObject):
                 pass
             layer.setRenderer(QgsSingleSymbolRenderer(base))
 
-            ramp = self._resolve_color_ramp(palette)
             n = len(value_fields)
-            colors = [ramp.color((i / (n - 1)) if n > 1 else 0.0) for i in range(n)]
+            colors = self._category_colors(palette, n, "value fields", "chart at most {k} value_fields")
 
             diagram = QgsPieDiagram() if diagram_type == "pie" else QgsHistogramDiagram()
             ds = QgsDiagramSettings()
@@ -3223,8 +3255,6 @@ class QgisMCPServer(QObject):
             unique_values = sorted(
                 layer.uniqueValues(idx), key=lambda x: str(x) if x is not None else ""
             )
-            ramp = self._resolve_color_ramp(color_ramp)
-
             # Count features per value in a single pass (cheap for typical N).
             counts: dict = {}
             for f in layer.getFeatures():
@@ -3235,12 +3265,14 @@ class QgisMCPServer(QObject):
             if classes_subset is not None:
                 listed = self._order_category_subset(unique_values, classes_subset)
 
+            colors = self._category_colors(
+                color_ramp, len(listed), "categories",
+                "pass classes=[...] with at most {k} values (the rest share one grey class)",
+            )
             categories = []
             class_entries = []
-            n = max(len(listed) - 1, 1)
-            for i, value in enumerate(listed):
+            for value, color in zip(listed, colors):
                 symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-                color = ramp.color(i / n)
                 symbol.setColor(color)
                 label = str(value) if value is not None else "NULL"
                 categories.append(QgsRendererCategory(value, symbol, label))

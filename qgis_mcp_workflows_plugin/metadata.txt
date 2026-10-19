@@ -18,7 +18,7 @@ about=Companion QGIS plugin for the qgis-mcp-workflows MCP server. Exposes a TCP
 
     Default socket port: 9877 (vs upstream nkarasiak/qgis-mcp on 9876).
 
-version=1.15.0
+version=1.15.1
 author=North
 email=
 tags=mcp,ai,claude,llm,workflows,transportation,research,pflow,gufm,drm
@@ -30,7 +30,10 @@ category=Plugins
 icon=icons/icon.png
 experimental=True
 deprecated=False
-changelog=1.15.0 : Figure provenance. Every file a tool writes gets a .provenance.json sidecar,
+changelog=1.15.1 : Qualitative ColorBrewer palettes (Set2, Paired, Dark2, ...) resolve instead of
+    silently becoming Spectral; trajectory mode colours are fixed, not random; unknown
+    palettes and too many categories are refused with a hint.
+ 1.15.0 : Figure provenance. Every file a tool writes gets a .provenance.json sidecar,
     and qgis_export_session writes a replay script from them. Plugin: atlas export and
     batch render fixes, project reads that never block on the unavailable-layers dialog,
     QGIS 4 (PyQt6) support, and _open_project reuses an already open project on Windows.

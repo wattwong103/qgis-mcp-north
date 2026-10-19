@@ -66,10 +66,9 @@ class ExecutorError(QgisMcpWorkflowsError):
     """Generic plugin-side error (unmapped)."""
 
     def __init__(self, command: str, message: str) -> None:
-        super().__init__(
-            f"Plugin command '{command}' failed: {message}. "
-            f"Next: inspect inputs, then retry. If persistent, escape via qgis_eval."
-        )
+        # A plugin message that already says what to do keeps that one hint.
+        hint = "" if "Next:" in message else " Next: inspect inputs, then retry. If persistent, escape via qgis_eval."
+        super().__init__(f"Plugin command '{command}' failed: {message}.{hint}")
         self.command = command
         self.message = message
 

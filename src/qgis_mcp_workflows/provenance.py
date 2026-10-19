@@ -285,10 +285,15 @@ def _package_version(name: str) -> str:
 
 def _git(root: Path, *args: str) -> str | None:
     """git output, or None if git failed. --no-optional-locks: never take
-    index.lock away from another session committing in the same repo."""
+    index.lock away from another session committing in the same repo.
+
+    stdin=DEVNULL: over stdio the MCP server's stdin always has a read pending,
+    and on Windows a child inheriting it blocks until the client next writes.
+    """
     try:
         done = subprocess.run(["git", "--no-optional-locks", "-C", str(root), *args],
-                              capture_output=True, encoding="utf-8", errors="replace", timeout=5)
+                              stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8",
+                              errors="replace", timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
     return done.stdout.strip() if done.returncode == 0 else None
