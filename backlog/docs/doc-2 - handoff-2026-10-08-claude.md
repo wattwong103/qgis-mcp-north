@@ -78,7 +78,7 @@ Compare our fork with upstream nkarasiak/qgis-mcp (v0.15.0; we forked at v0.2.1 
 - Whether DuckDB figures should become replayable behind --allow-eval now that the tool is hardened (#29).
 
 ## Owner next
-North merged #30 (2026-10-10); #31 remains. Claude: next session picks a parked follow-up or the style_qml design (tranche E remainder).
+North merged #30 and #31 (2026-10-10). Claude: next session picks a parked follow-up or the style_qml design (tranche E remainder). Superseded by the 2026-10-20 handoff.
 
 Status: DONE_WITH_CONCERNS
 - Codex cross-harness review not run on #20–#31 (not usable on this account).

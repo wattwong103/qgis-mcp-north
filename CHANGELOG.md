@@ -3,9 +3,13 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased — provenance: project and shapefile datasources
+## v1.15.0 — 2026-10-20 — figure provenance and upstream review fixes
 
-### Added
+Figure provenance (sidecars, qgis_export_session replay, the session ledger and eval gate, project and shapefile datasources), the DuckDB lockdown, and the fixes from the 2026-10 review of upstream nkarasiak/qgis-mcp. Each section below was one task.
+
+### Provenance: project and shapefile datasources
+
+#### Added
 
 - Sidecars fingerprint the files an input brings along (TASK-16): a `.shp`'s
   `.dbf .shx .prj .cpg` siblings, and the local datasources a `.qgz`/`.qgs`
@@ -20,9 +24,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only QGIS's own fixed DOCTYPE is accepted, and UNC / `file://host/` paths are
   never opened.
 
-## Unreleased — provenance state ledger and eval replay
+### Provenance state ledger and eval replay
 
-### Added
+#### Added
 
 - State-reading figures are replayable (TASK-15). `qgis_render_map` and exports of
   the loaded project record the loads, style calls (all of them, in order), project
@@ -40,7 +44,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `trust_foreign` is decided from where a sidecar was found, not what it claims;
   sidecars in shared folders inside `DROPBOX_ROOT` still count as local.
 
-### Fixed
+#### Fixed
 
 - On Windows, an export of the project that is already open now reuses it, with
   its session styles, as documented; the plugin compared QGIS's forward-slash
@@ -49,9 +53,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `\??\UNC\`, `\\?\UNC\`) and GDAL `/vsi…` paths, so neither the export nor
   the script contacts another host.
 
-## Unreleased — DuckDB queries reach only the database
+### DuckDB queries reach only the database
 
-### Security
+#### Security
 
 - `qgis_render_from_duckdb` queries can no longer read or write other files
   through DuckDB, download extensions or reach the network (TASK-17). `read_only` protected only the database itself:
@@ -64,9 +68,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   refused for reading outside the database says so, with a Next: step. Known
   gap: PROJ behind `ST_Transform` opens files itself (`+init=<file>:<key>`).
 
-## Unreleased — figure provenance (sidecar core)
+### Figure provenance (sidecar core)
 
-### Added
+#### Added
 
 - Every file a tool writes through MCP gets `<file>.provenance.json`: the call
   with all arguments, inputs fingerprinted before the call (sha256 up to 256 MB),
@@ -95,9 +99,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `install.py` writes `DROPBOX_ROOT` into GUI MCP client configs (never into the
   tracked `.mcp.json`).
 
-## Unreleased — batch render and project reads
+### Batch render and project reads
 
-### Fixed
+#### Fixed
 
 - `qgis_batch_render` filters the right layer: `layer=` (name or id), else the
   top-most visible vector layer in the template's layer tree, named in the new
@@ -123,9 +127,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unavailable and reported in a new `unavailable_layers` field. A failed read
   now carries QGIS's own error text.
 
-## Unreleased — tool errors on mcp 2.x
+### Tool errors on mcp 2.x
 
-### Fixed
+#### Fixed
 
 - Tool errors keep their message and `Next:` hint on mcp >= 2.1, which shows
   clients only "Error executing tool <name>" for any exception that is not the
@@ -139,15 +143,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `PluginUnavailableError` instead of a bare `ConnectionError`. Installs from
   `install.py --remote` resolve mcp 2.x; the locked 1.26 was unaffected.
 
-### Tests
+#### Tests
 
 - The suite passes on mcp 2.3 as well as the locked 1.26: result fields are
   read through `tests/mcp_compat.py` (2.x renamed `mimeType` / `structuredContent`
   / `isError` to snake_case).
 
-## Unreleased — upstream review fixes
+### Upstream review fixes
 
-### Fixed
+#### Fixed
 
 - `qgis_export_atlas` with `format="pdf"` no longer fails after writing the PDF.
   The static `QgsLayoutExporter.exportToPdf(atlas, ...)` returns `(result,
@@ -166,7 +170,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `scripts/weekly_figures.py` demo mode sends `render_link_density` the
   aggregated `density` dict it takes instead of pre-v1.2 trajectory params.
 
-### Tests
+#### Tests
 
 - `FakeExecutor` checks every dispatch against `plugin.py`'s command table
   (read from the AST): unknown commands, missing required params, and keys a
@@ -178,9 +182,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   read the colour each feature actually draws with from the renderer, and
   count the PDF's pages.
 
-## Unreleased — macOS QGIS 4
+### macOS QGIS 4
 
-### Fixed
+#### Fixed
 
 - Headless on macOS finds QGIS 4 bundles (`<QGIS*.app>/Contents/MacOS/python`,
   the wrapper that sets `PYTHONHOME`). QGIS 3 `bin/python3` stays preferred.
@@ -199,7 +203,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `CallToolResult` with the image block and the structured result (wrapped as
   `{"result": ...}` for the compound tools, whose return type is a Union).
 
-### Changed
+#### Changed
 
 - Minimum `mcp` raised to 1.21.1 (was 1.20.0). The server does not import on
   1.20.0 or 1.21.0 (FastMCP `InvalidSignature` on the tools' `Annotated`
