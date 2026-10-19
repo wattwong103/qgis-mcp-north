@@ -48,3 +48,10 @@ Known limit: writes still sitting in a `-wal` at record time are checkpointed in
 
 Estimate: ~120 lines of code, ~180 lines of tests.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Reviews (code, python, security; fresh context, read-only; 2026-10-20). HIGH (code and security, independently): a header-only acceptance passed an edit committed after the WAL switch that still sat in an unrecorded `-wal`, and printed "its data is as recorded". Fixed: the acceptance also requires header format bytes 1 or 2 and no non-empty `-wal`/`-journal` unless recorded with the same hash; otherwise "changed ... writes may be pending". MEDIUM fixed: export dedup key includes sqlite_sha256 (a co-exported sidecar could swap in a forged one); a recorded `-wal` that is gone is a note; `is_sqlite` stats first (FIFO/device never opened) and `_regular_stat` treats a NUL path as missing; cache resets in mtime-sensitive tests; tests for a project datasource's `-wal`, a non-SQLite `-wal`, unknown format bytes, and main printing the note. LOW fixed: `accepted=` keyword-only, per-input WAL notes, helpers before `discover`, `closing()` for sqlite3, teardown reset, a `-wal` link never followed.
+Parked: a symlinked database whose WAL lives beside the link target; masking 24-27/92-95 changes whether SQLite trusts the in-header page count (28-31 still hashed; only matters for files whose size disagrees with it); a stale non-empty `-wal` of a checkpointed, still-open database reads as pending (conservative).
+<!-- SECTION:NOTES:END -->

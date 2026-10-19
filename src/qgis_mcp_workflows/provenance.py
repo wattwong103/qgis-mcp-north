@@ -112,7 +112,7 @@ def _utc(ts: float) -> str:
 def _regular_stat(path: str) -> os.stat_result | None:
     try:
         st = os.stat(path)
-    except OSError:
+    except (OSError, ValueError):  # ValueError: a NUL in the path
         return None
     return st if stat.S_ISREG(st.st_mode) else None
 
@@ -132,6 +132,13 @@ _SQLITE_VOLATILE = ((18, 20), (24, 28), (92, 100))
 
 
 def is_sqlite(path: str) -> bool:
+    """Whether ``path`` is a regular file starting with the SQLite magic.
+
+    Stats first, like fingerprint(): a FIFO, device or pipe named by a tool
+    argument is never opened (it could block, or read the server's stdin).
+    """
+    if _regular_stat(path) is None:
+        return False
     try:
         with open(path, "rb") as fh:
             return fh.read(len(SQLITE_MAGIC)) == SQLITE_MAGIC

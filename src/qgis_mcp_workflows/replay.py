@@ -20,6 +20,7 @@ from typing import Any
 
 from qgis_mcp_workflows.provenance import (
     ROOT_TOKEN,
+    _regular_stat,
     _relative_under,
     fingerprint,
     normalise,
@@ -57,32 +58,70 @@ def _clean(text: Any) -> str:
     return _printable(text)[:_TEXT_MAX]
 
 
-def check_inputs(inputs: list[dict], notes: list[str] | None = None) -> list[str]:
+_SQLITE_SIDE_FILES = ("-wal", "-journal")
+
+
+def _sqlite_data_unchanged(path: str, entry: dict, now: dict, recorded: dict[str, str | None]) -> bool:
+    """Whether an SQLite input whose bytes changed still holds the recorded data.
+
+    Only a header-only change qualifies: the masked hashes agree, the header's
+    file-format bytes are 1 or 2 (rollback or WAL), and no -wal or -journal holds
+    writes the main file's hash cannot see, unless that file was recorded as is.
+    """
+    if not entry.get("sqlite_sha256") or now.get("sqlite_sha256") != entry["sqlite_sha256"]:
+        return False
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(20)
+    except OSError:
+        return False
+    if len(head) < 20 or head[18] not in (1, 2) or head[19] not in (1, 2):
+        return False
+    for suffix in _SQLITE_SIDE_FILES:
+        side = path + suffix
+        if not os.path.lexists(side):
+            continue
+        st = _regular_stat(side)
+        if st is None or (st.st_size > 0 and recorded.get(_same(side)) != fingerprint(side)["sha256"]):
+            return False
+    return True
+
+
+def check_inputs(inputs: list[dict], *, accepted: list[str] | None = None) -> list[str]:
     """One line per source input that is missing or changed since it was recorded.
 
     sha256 when both the recording and this machine hashed it; otherwise size
-    (mtime is not compared: Dropbox sync rewrites it). An SQLite file whose
-    bytes differ only in its volatile header (QGIS switched a GeoPackage to WAL)
-    passes, with a line added to ``notes``.
+    (mtime is not compared: Dropbox sync rewrites it). Two changes pass with a
+    line in ``accepted`` instead: an SQLite file whose bytes differ only in its
+    header (QGIS switched a GeoPackage to WAL), and a recorded -wal that is gone
+    (checkpointed into its database, whose own check covers the data).
     """
+    recorded = {_same(resolve(e["path"])): e.get("sha256") for e in inputs}
     problems: list[str] = []
+    notes: list[str] = []
     for entry in inputs:
-        now = fingerprint(resolve(entry["path"]))
+        path = resolve(entry["path"])
+        now = fingerprint(path)
         shown = _clean(entry["path"])
         recorded_sha, recorded_bytes = entry.get("sha256"), entry.get("bytes")
         both_hashed = bool(recorded_sha and now["sha256"])
-        recorded_sqlite = entry.get("sqlite_sha256")
-        if now["missing"]:
+        if now["missing"] and entry["path"].endswith("-wal"):
+            notes.append(f"{shown}: the recorded -wal is gone; its database's own check covers the data")
+        elif now["missing"]:
             problems.append(f"missing  {shown}")
         elif both_hashed and now["sha256"] != recorded_sha:
-            if recorded_sqlite and now.get("sqlite_sha256") == recorded_sqlite:
-                if notes is not None:
-                    notes.append(f"{shown}: header-only change (SQLite journal mode or version stamp); "
-                                 "its data is as recorded")
-                continue
-            problems.append(f"changed  {shown} (sha256 differs)")
+            if _sqlite_data_unchanged(path, entry, now, recorded):
+                notes.append(f"{shown}: header-only change (SQLite journal mode or version stamp); "
+                             "its data is as recorded")
+            elif entry.get("sqlite_sha256") and now.get("sqlite_sha256") == entry["sqlite_sha256"]:
+                problems.append(f"changed  {shown} (header changed and writes may be pending in its "
+                                "-wal or -journal; check the data, then --force)")
+            else:
+                problems.append(f"changed  {shown} (sha256 differs)")
         elif not both_hashed and recorded_bytes is not None and now["bytes"] != recorded_bytes:
             problems.append(f"changed  {shown} (size {recorded_bytes} -> {now['bytes']})")
+    if accepted is not None:
+        accepted.extend(notes)
     return problems
 
 
@@ -226,7 +265,7 @@ def main(script: str, inputs: list[dict], outputs: list[str], notes: list[str],
         if args.in_place and args.force:
             raise ReplayError("--in-place cannot be combined with --force")
         accepted: list[str] = []
-        problems = check_inputs(inputs, notes=accepted)
+        problems = check_inputs(inputs, accepted=accepted)
         for line in accepted:
             print(f"note: {line}")
         if problems:

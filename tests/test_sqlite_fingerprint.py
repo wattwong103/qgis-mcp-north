@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -29,22 +30,28 @@ ZONES_GPKG = Path(__file__).resolve().parents[1] / "assets" / "zones_tokyo23.gpk
 @pytest.fixture(autouse=True)
 def _fresh_cache():
     provenance.reset_for_tests()
+    yield
+    provenance.reset_for_tests()
 
 
-def _db(path: Path, rows=(("a", 1), ("b", 2))) -> Path:
-    con = sqlite3.connect(path)
-    con.execute("PRAGMA journal_mode=DELETE")
-    con.execute("CREATE TABLE t (k TEXT, v INTEGER)")
-    con.executemany("INSERT INTO t VALUES (?, ?)", rows)
-    con.commit()
-    con.close()
+def _db(path: Path) -> Path:
+    with closing(sqlite3.connect(path)) as con:
+        con.execute("PRAGMA journal_mode=DELETE")
+        con.execute("CREATE TABLE t (k TEXT, v INTEGER)")
+        con.executemany("INSERT INTO t VALUES (?, ?)", [("a", 1), ("b", 2)])
+        con.commit()
     return path
 
 
 def _to_wal(path: Path) -> None:
-    con = sqlite3.connect(path)
-    con.execute("PRAGMA journal_mode=WAL")
-    con.close()
+    with closing(sqlite3.connect(path)) as con:
+        con.execute("PRAGMA journal_mode=WAL")
+
+
+def _edit(path: Path, sql: str) -> None:
+    with closing(sqlite3.connect(path)) as con:
+        con.execute(sql)
+        con.commit()
 
 
 def test_switching_to_wal_changes_the_bytes_but_not_the_sqlite_hash(tmp_path):
@@ -52,6 +59,7 @@ def test_switching_to_wal_changes_the_bytes_but_not_the_sqlite_hash(tmp_path):
     before = provenance.fingerprint(str(db))
     _to_wal(db)
     assert db.read_bytes()[18:20] == b"\x02\x02"  # the switch really happened
+    provenance.reset_for_tests()  # NTFS mtime is coarse: never read the cached hash
     after = provenance.fingerprint(str(db))
 
     assert after["sha256"] != before["sha256"]
@@ -61,10 +69,8 @@ def test_switching_to_wal_changes_the_bytes_but_not_the_sqlite_hash(tmp_path):
 def test_a_data_change_changes_the_sqlite_hash(tmp_path):
     db = _db(tmp_path / "z.sqlite")
     before = provenance.fingerprint(str(db))["sqlite_sha256"]
-    con = sqlite3.connect(db)
-    con.execute("UPDATE t SET v = 99 WHERE k = 'a'")
-    con.commit()
-    con.close()
+    _edit(db, "UPDATE t SET v = 99 WHERE k = 'a'")
+    provenance.reset_for_tests()
     assert provenance.fingerprint(str(db))["sqlite_sha256"] != before
 
 
@@ -94,19 +100,16 @@ def test_replay_accepts_a_header_only_change_and_says_so(tmp_path):
     _to_wal(db)
     provenance.reset_for_tests()
     notes: list[str] = []
-    assert replay.check_inputs([entry], notes=notes) == []
+    assert replay.check_inputs([entry], accepted=notes) == []
     assert len(notes) == 1 and "header-only change" in notes[0] and "z.gpkg" in notes[0]
 
 
 def test_replay_still_refuses_a_data_change(tmp_path):
     db = _db(tmp_path / "z.gpkg")
     entry = _recorded(db)
-    con = sqlite3.connect(db)
-    con.execute("DELETE FROM t WHERE k = 'b'")
-    con.commit()
-    con.close()
+    _edit(db, "DELETE FROM t WHERE k = 'b'")
     provenance.reset_for_tests()
-    [line] = replay.check_inputs([entry], notes=[])
+    [line] = replay.check_inputs([entry], accepted=[])
     assert line.startswith("changed") and "sha256 differs" in line
 
 
@@ -118,6 +121,40 @@ def test_a_sidecar_without_the_field_keeps_the_byte_comparison(tmp_path):
     provenance.reset_for_tests()
     [line] = replay.check_inputs([entry])
     assert "sha256 differs" in line
+
+
+def test_a_header_change_with_writes_pending_in_the_wal_is_refused(tmp_path):
+    # Review HIGH: switched to WAL and edited, the edit can sit in z.gpkg-wal while
+    # the main file differs only in its header; that must not pass as unchanged.
+    db = _db(tmp_path / "z.gpkg")
+    entry = _recorded(db)
+    con = sqlite3.connect(db)
+    try:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA wal_autocheckpoint=0")
+        con.execute("INSERT INTO t VALUES ('c', 3)")
+        con.commit()
+        assert (tmp_path / "z.gpkg-wal").stat().st_size > 0
+        provenance.reset_for_tests()
+        notes: list[str] = []
+        [line] = replay.check_inputs([entry], accepted=notes)
+        assert line.startswith("changed") and "-wal" in line
+        assert notes == []
+    finally:
+        con.close()
+
+
+def test_a_recorded_wal_that_is_gone_is_a_note_not_a_refusal(tmp_path):
+    # QGIS deletes the -wal when its last connection closes; whether the data
+    # moved into the main file is the main file's check to say.
+    gone = {"path": str(tmp_path / "z.gpkg-wal"), "sha256": "ab" * 32, "bytes": 32}
+    notes: list[str] = []
+    assert replay.check_inputs([gone], accepted=notes) == []
+    assert len(notes) == 1 and "z.gpkg-wal" in notes[0]
+
+
+def test_is_sqlite_never_opens_what_is_not_a_regular_file(tmp_path):
+    assert provenance.is_sqlite(str(tmp_path)) is False  # a directory: stat first, no open
 
 
 def test_the_script_inputs_carry_the_sqlite_hash():
@@ -143,6 +180,57 @@ def test_no_wal_input_without_pending_writes(tmp_path, wal):
         (tmp_path / "z.gpkg-wal").write_bytes(wal)
     extra, notes, _ = datasources.discover([("zones_path", str(db))])
     assert extra == [] and notes == []
+
+
+def test_a_wal_beside_a_file_that_is_not_sqlite_is_ignored(tmp_path):
+    csv = tmp_path / "v.csv"
+    csv.write_bytes(b"k,v\na,1\n")
+    (tmp_path / "v.csv-wal").write_bytes(b"\x00" * 32)
+    assert datasources.discover([("value_csv", str(csv))])[0] == []
+
+
+def test_a_project_datasource_brings_its_pending_wal(tmp_path, monkeypatch):
+    from tests.test_datasources import _qgs
+
+    monkeypatch.setenv("DROPBOX_ROOT", str(tmp_path))
+    _db(tmp_path / "z.gpkg")
+    (tmp_path / "z.gpkg-wal").write_bytes(b"\x00" * 32)
+    qgs = tmp_path / "p.qgs"
+    qgs.write_text(_qgs(("ogr", "./z.gpkg|layername=t")), encoding="utf-8")
+    extra, notes, _ = datasources.discover([("template_qgz", str(qgs))])
+    assert [(a, Path(p).name) for a, p in extra] == [
+        ("template_qgz:datasource", "z.gpkg"), ("template_qgz:datasource:wal", "z.gpkg-wal")]
+    assert any(n.startswith("template_qgz:datasource:") and "-wal" in n for n in notes)
+
+
+def test_a_co_exported_sidecar_cannot_swap_in_another_sqlite_hash():
+    honest = {"path": "${DROPBOX_ROOT}/z.gpkg", "sha256": "aa", "bytes": 4, "sqlite_sha256": "bb"}
+    forged = {**honest, "sqlite_sha256": "ff"}
+    found = source_inputs([{"inputs": [forged]}, {"inputs": [honest]}])
+    assert sorted(i["sqlite_sha256"] for i in found) == ["bb", "ff"]  # both are checked
+
+
+def test_a_header_with_unknown_format_bytes_is_not_header_only(tmp_path):
+    db = _db(tmp_path / "z.gpkg")
+    entry = _recorded(db)
+    data = bytearray(db.read_bytes())
+    data[18:20] = b"\x07\x07"  # masked, but no journal mode SQLite knows
+    db.write_bytes(bytes(data))
+    provenance.reset_for_tests()
+    [line] = replay.check_inputs([entry], accepted=[])
+    assert line.startswith("changed")
+
+
+def test_main_prints_an_accepted_header_only_change(tmp_path, monkeypatch, capsys):
+    from tests.test_replay import _run_main
+
+    db = _db(tmp_path / "z.gpkg")
+    entry = _recorded(db)
+    _to_wal(db)
+    provenance.reset_for_tests()
+    code, _ = _run_main(tmp_path, monkeypatch, inputs=[entry], argv=["--out-dir", str(tmp_path / "o")])
+    assert code == 0
+    assert "header-only change" in capsys.readouterr().out
 
 
 @requires_headless

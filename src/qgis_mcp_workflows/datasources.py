@@ -271,6 +271,28 @@ def _project(argument: str, path: str, root: str, add: Callable[..., bool],
             notes.append(f"{argument}: unparsed datasource ({_echo(provider) or 'no provider'}): {redact(source)}")
 
 
+def wal_note(argument: str) -> str:
+    return (f"{argument}: SQLite writes were pending in its -wal file; once they are checkpointed into the "
+            "database, the replay reports it changed even if its data did not (check it, then --force)")
+
+
+def pending_wal(path: str) -> str | None:
+    """The ``-wal`` file of an SQLite database when it may hold writes, else None.
+
+    In WAL mode recent writes live there until a checkpoint, so the main file's
+    hash alone would miss them. A -wal that is a link is never followed.
+    """
+    from qgis_mcp_workflows.provenance import _regular_stat, is_sqlite
+
+    if not is_sqlite(path):
+        return None
+    wal = path + "-wal"
+    if os.path.islink(wal):
+        return None
+    st = _regular_stat(wal)
+    return wal if st is not None and st.st_size > 0 else None
+
+
 def discover(explicit: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], list[str], list[dict]]:
     """(extra (argument, path) inputs, unrecorded notes, remote entries) for a call's explicit inputs."""
     from qgis_mcp_workflows.provenance import _regular_stat, normalise
@@ -300,27 +322,9 @@ def discover(explicit: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], li
                 add(sibling_argument, sibling)
         elif lowered.endswith((".qgz", ".qgs")) and _regular_stat(path) is not None:
             _project(argument, path, root, add, notes, remote)
-    for argument, path in list(explicit) + list(extra):
+    # A snapshot: add() appends to extra, and a -wal it adds is never rescanned.
+    for argument, path in [*explicit, *extra]:
         wal = pending_wal(path)
         if wal is not None and add(f"{argument}:wal", wal):
-            notes.append(WAL_NOTE)
+            notes.append(wal_note(argument))
     return extra, list(dict.fromkeys(notes)), remote
-
-
-WAL_NOTE = ("an SQLite input had writes pending in its -wal file; once they are checkpointed into the "
-            "main file, the replay reports the input changed even if its data did not (check it, then --force)")
-
-
-def pending_wal(path: str) -> str | None:
-    """The ``-wal`` file of an SQLite database when it holds writes, else None.
-
-    In WAL mode recent writes live there until a checkpoint, so the main file's
-    hash alone would miss them.
-    """
-    from qgis_mcp_workflows.provenance import _regular_stat, is_sqlite
-
-    if not is_sqlite(path):
-        return None
-    wal = path + "-wal"
-    st = _regular_stat(wal)
-    return wal if st is not None and st.st_size > 0 else None

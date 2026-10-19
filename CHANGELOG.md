@@ -14,13 +14,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the byte sha256 then differed and every figure that read the file exited 2.
   Fingerprints of SQLite files now carry `sqlite_sha256` (the header's volatile
   fields zeroed); the replay accepts a match and prints a note, and a real data
-  change still stops it. Sidecars without the field compare bytes, as before.
+  change still stops it. A match is not enough when a `-wal` or `-journal`
+  beside the file holds writes that were not recorded (an edit committed after
+  the switch can sit there while the main file differs only in its header), or
+  when the header's format bytes are not a known journal mode. Sidecars without
+  the field compare bytes, as before.
 
 ### Added
 
 - A non-empty `-wal` file beside an SQLite input is fingerprinted as an
   implicit input (`<argument>:wal`), with a note: writes pending there are part
-  of the data, and a later checkpoint changes the main file.
+  of the data, and a later checkpoint changes the main file. A recorded `-wal`
+  that is gone at replay (QGIS deletes it on close) is a note, not a refusal:
+  the database's own check covers its data.
+- `is_sqlite` and every fingerprint stat first, so a FIFO, device or pipe named
+  by a tool argument is never opened; a NUL in a path is treated as missing.
 
 ## v1.15.1 — 2026-10-20 — fixes from the live trial
 
