@@ -1,7 +1,7 @@
 ---
 id: TASK-19
 title: Replay ignores SQLite header-only changes (GeoPackage WAL switch)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-10-20 05:00'
 labels:
@@ -24,12 +24,12 @@ North's decision (2026-10-20): record a second hash for SQLite inputs with the v
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 An input that starts with the SQLite magic (`SQLite format 3\0`, any extension: .gpkg, .sqlite, .db, .mbtiles) gets `sqlite_sha256`: sha256 of the file with header bytes 18-19, 24-27 and 92-99 zeroed; under the same size cap and cache as `sha256`; absent for other files
-- [ ] #2 The replay input check passes an input whose `sha256` differs but whose recorded and current `sqlite_sha256` agree, and prints one note naming it ("header-only change"); a data change still fails with exit 2; sidecars without the field keep the byte comparison
-- [ ] #3 `qgis_export_session` carries `sqlite_sha256` into the script's INPUTS
-- [ ] #4 A SQLite input with a non-empty `<file>-wal` gets that file as an implicit input (`<argument>:wal`, raw hash) and a note that a later checkpoint changes the main file
-- [ ] #5 Live test: the trial's scenario (rollback-journal gpkg → batch_render through a QGIS-written project → replay) exits 0 with the note
-- [ ] #6 DESIGN §5 and the provenance spec describe the field; CHANGELOG; full suite and ruff
+- [x] #1 An input that starts with the SQLite magic (`SQLite format 3\0`, any extension: .gpkg, .sqlite, .db, .mbtiles) gets `sqlite_sha256`: sha256 of the file with header bytes 18-19, 24-27 and 92-99 zeroed; under the same size cap and cache as `sha256`; absent for other files
+- [x] #2 The replay input check passes an input whose `sha256` differs but whose recorded and current `sqlite_sha256` agree, and prints one note naming it ("header-only change"); a data change still fails with exit 2; sidecars without the field keep the byte comparison
+- [x] #3 `qgis_export_session` carries `sqlite_sha256` into the script's INPUTS
+- [x] #4 A SQLite input with a non-empty `<file>-wal` gets that file as an implicit input (`<argument>:wal`, raw hash) and a note that a later checkpoint changes the main file
+- [x] #5 Live test: the trial's scenario (rollback-journal gpkg → batch_render through a QGIS-written project → replay) exits 0 with the note
+- [x] #6 DESIGN §5 and the provenance spec describe the field; CHANGELOG; full suite and ruff
 <!-- AC:END -->
 
 ## Implementation Plan

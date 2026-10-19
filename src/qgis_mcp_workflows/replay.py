@@ -57,11 +57,13 @@ def _clean(text: Any) -> str:
     return _printable(text)[:_TEXT_MAX]
 
 
-def check_inputs(inputs: list[dict]) -> list[str]:
+def check_inputs(inputs: list[dict], notes: list[str] | None = None) -> list[str]:
     """One line per source input that is missing or changed since it was recorded.
 
     sha256 when both the recording and this machine hashed it; otherwise size
-    (mtime is not compared: Dropbox sync rewrites it).
+    (mtime is not compared: Dropbox sync rewrites it). An SQLite file whose
+    bytes differ only in its volatile header (QGIS switched a GeoPackage to WAL)
+    passes, with a line added to ``notes``.
     """
     problems: list[str] = []
     for entry in inputs:
@@ -69,9 +71,15 @@ def check_inputs(inputs: list[dict]) -> list[str]:
         shown = _clean(entry["path"])
         recorded_sha, recorded_bytes = entry.get("sha256"), entry.get("bytes")
         both_hashed = bool(recorded_sha and now["sha256"])
+        recorded_sqlite = entry.get("sqlite_sha256")
         if now["missing"]:
             problems.append(f"missing  {shown}")
         elif both_hashed and now["sha256"] != recorded_sha:
+            if recorded_sqlite and now.get("sqlite_sha256") == recorded_sqlite:
+                if notes is not None:
+                    notes.append(f"{shown}: header-only change (SQLite journal mode or version stamp); "
+                                 "its data is as recorded")
+                continue
             problems.append(f"changed  {shown} (sha256 differs)")
         elif not both_hashed and recorded_bytes is not None and now["bytes"] != recorded_bytes:
             problems.append(f"changed  {shown} (size {recorded_bytes} -> {now['bytes']})")
@@ -217,7 +225,10 @@ def main(script: str, inputs: list[dict], outputs: list[str], notes: list[str],
     try:
         if args.in_place and args.force:
             raise ReplayError("--in-place cannot be combined with --force")
-        problems = check_inputs(inputs)
+        accepted: list[str] = []
+        problems = check_inputs(inputs, notes=accepted)
+        for line in accepted:
+            print(f"note: {line}")
         if problems:
             print("source inputs differ from the recording:")
             for line in problems:

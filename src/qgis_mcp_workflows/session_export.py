@@ -461,6 +461,8 @@ def source_inputs(steps: list[dict]) -> list[dict]:
             if not isinstance(path, str) or path in replayed:
                 continue
             item = {"path": path, "sha256": entry.get("sha256"), "bytes": entry.get("bytes")}
+            if isinstance(entry.get("sqlite_sha256"), str):  # lets the replay pass a header-only change
+                item["sqlite_sha256"] = entry["sqlite_sha256"]
             found.setdefault((path, item["sha256"], item["bytes"]), item)
     return list(found.values())
 

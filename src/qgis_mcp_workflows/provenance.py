@@ -87,7 +87,7 @@ def portable(path: str) -> tuple[str, str | None]:
     return norm, "outside DROPBOX_ROOT"
 
 
-_hash_cache: dict[tuple[str, int, int], str] = {}
+_hash_cache: dict[tuple[str, int, int], tuple[str, str | None]] = {}
 _cache_lock = threading.Lock()
 
 
@@ -122,19 +122,55 @@ def snapshot(path: str) -> tuple[int, int] | None:
     return None if st is None else (st.st_size, st.st_mtime_ns)
 
 
-def _sha256(path: str, st: os.stat_result) -> str | None:
+SQLITE_MAGIC = b"SQLite format 3\x00"
+_SQLITE_HEADER = 100
+# Header fields SQLite rewrites with no data change: the file-format write/read
+# versions (switched by journal_mode=WAL, as QGIS does when it opens a GeoPackage
+# for update), the change counter, version-valid-for, and the writing library's
+# version number.
+_SQLITE_VOLATILE = ((18, 20), (24, 28), (92, 100))
+
+
+def is_sqlite(path: str) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(len(SQLITE_MAGIC)) == SQLITE_MAGIC
+    except OSError:
+        return False
+
+
+def _masked_sqlite_header(head: bytes) -> bytes:
+    masked = bytearray(head)
+    for start, end in _SQLITE_VOLATILE:
+        masked[start:end] = bytes(end - start)
+    return bytes(masked)
+
+
+def _hashes(path: str, st: os.stat_result) -> tuple[str | None, str | None]:
+    """(sha256, sqlite_sha256) in one read; the second only for an SQLite file.
+
+    sqlite_sha256 hashes the file with the volatile header fields zeroed, so a
+    journal-mode switch leaves it unchanged while any data page change does not.
+    """
     if st.st_size > hash_cap_bytes():
-        return None
+        return None, None
     key = (normalise(path), st.st_size, st.st_mtime_ns)
     with _cache_lock:
         cached = _hash_cache.get(key)
     if cached is not None:
         return cached
     digest = hashlib.sha256()
+    masked = None
     with open(path, "rb") as fh:
+        head = fh.read(_SQLITE_HEADER)
+        digest.update(head)
+        if len(head) == _SQLITE_HEADER and head.startswith(SQLITE_MAGIC):
+            masked = hashlib.sha256(_masked_sqlite_header(head))
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
-    value = digest.hexdigest()
+            if masked is not None:
+                masked.update(chunk)
+    value = (digest.hexdigest(), masked.hexdigest() if masked is not None else None)
     with _cache_lock:
         _hash_cache[key] = value
     return value
@@ -147,12 +183,15 @@ def fingerprint(path: str) -> dict:
         return {"path": stored, "bytes": None, "mtime": None, "sha256": None,
                 "hashed": False, "missing": True}
     try:
-        digest = _sha256(path, st)
+        digest, sqlite_digest = _hashes(path, st)
     except OSError as err:  # locked by Dropbox/QGIS: record it unhashed, never fail the call
         return {"path": stored, "bytes": st.st_size, "mtime": _utc(st.st_mtime), "sha256": None,
                 "hashed": False, "missing": False, "error": str(err)}
-    return {"path": stored, "bytes": st.st_size, "mtime": _utc(st.st_mtime), "sha256": digest,
-            "hashed": digest is not None, "missing": False}
+    entry = {"path": stored, "bytes": st.st_size, "mtime": _utc(st.st_mtime), "sha256": digest,
+             "hashed": digest is not None, "missing": False}
+    if sqlite_digest is not None:
+        entry["sqlite_sha256"] = sqlite_digest
+    return entry
 
 
 def reset_for_tests() -> None:

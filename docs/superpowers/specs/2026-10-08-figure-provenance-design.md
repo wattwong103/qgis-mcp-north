@@ -108,6 +108,7 @@ extras, transport, mcp, python, platform, QGIS profile folder.
   lists longer than 50 items — so a replay can be diffed against what the original produced.
 - `implicit_inputs`: files a tool used without an argument naming them (the bundled `sekilab_blank.pptx` when
   `template_pptx=None`), fingerprinted like inputs.
+- `sqlite_sha256` (since 1.15.2, optional, on any fingerprint of a file starting with the SQLite magic): sha256 with header bytes 18-19, 24-27 and 92-99 zeroed. SQLite rewrites those without a data change (QGIS opening a GeoPackage for update switches it to WAL), so the replay accepts a changed `sha256` when both sides' `sqlite_sha256` agree, and prints a note. A non-empty `-wal` file is an implicit input `<argument>:wal`.
 - `call.module` is `server` or `compound`; compound calls keep the compound tool and its discriminator.
 - Free-text fields come from our own code, never from file contents.
 
