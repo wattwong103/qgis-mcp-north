@@ -15,7 +15,34 @@ gradient ramp, not a 256-entry LUT.
 
 from __future__ import annotations
 
+import unicodedata
+import zlib
 from typing import NamedTuple
+
+
+def layer_color_key(source: str) -> str:
+    """What fixes an unstyled layer's colour: its file name, plus the sublayer.
+
+    Separator-agnostic (a path recorded on Windows keys the same on macOS);
+    ``|subset=`` and other options are dropped, ``|layername=`` is kept so the
+    layers of one GeoPackage can differ.
+    """
+    file_part, _, options = source.partition("|")
+    key = file_part.replace(chr(92), "/").rstrip("/").rsplit("/", 1)[-1]
+    for option in options.split("|"):
+        if option.startswith("layername="):
+            key += "|" + option
+    return key
+
+
+def stable_index(name: str, n: int) -> int:
+    """An index in ``range(n)`` fixed by ``name`` on every machine and in every process.
+
+    crc32 of the NFC UTF-8 bytes: Python's hash() is salted per process, and
+    macOS hands out decomposed (NFD) file names where Windows composes them.
+    """
+    data = unicodedata.normalize("NFC", name).encode("utf-8", "surrogatepass")
+    return zlib.crc32(data) % n
 
 # name -> [(position 0..1, (r, g, b)), ...], monotonic in position, 0.0 .. 1.0.
 COLORMAPS: dict[str, list[tuple[float, tuple[int, int, int]]]] = {

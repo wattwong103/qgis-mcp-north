@@ -10,7 +10,6 @@ import socket
 import struct
 import sys
 import traceback
-import zlib
 from collections import deque
 from datetime import datetime, timezone
 from typing import ClassVar
@@ -621,14 +620,9 @@ class QgisMCPServer(QObject):
         if not name:
             name = os.path.basename(path)
 
-        options = QgsVectorLayer.LayerOptions()
-        options.loadDefaultStyle = False  # loaded below, to learn whether the file has one
-        layer = QgsVectorLayer(path, name, provider, options)
+        layer = self._new_vector_layer(path, name, provider)
         if not layer.isValid():
             raise Exception(f"Layer is not valid: {path}")
-        _message, has_style = layer.loadDefaultStyle()
-        if not has_style:  # a .qml beside the file, or a style stored in the GeoPackage, wins
-            self._apply_stable_default_colour(layer, path)
 
         QgsProject.instance().addMapLayer(layer)
         QgsMessageLog.logMessage(f"Vector layer added: {name}", self.LOG_TAG, MSG_INFO)
@@ -1569,18 +1563,44 @@ class QgisMCPServer(QObject):
         transient_ids.append(bm.id())
         return bm
 
-    def _apply_stable_default_colour(self, layer, source):
+    def _new_vector_layer(self, path, name, provider="ogr"):
+        """A vector layer drawn in its own default style, or in a colour fixed by its file name.
+
+        File layers (ogr) load their default style here rather than in the
+        constructor, to learn whether one exists: a .qml beside the file or a
+        style stored in the GeoPackage wins. Other providers keep the
+        constructor's behaviour (a service may bring its own renderer).
+        """
+        if provider != "ogr":
+            return QgsVectorLayer(path, name, provider)
+        options = QgsVectorLayer.LayerOptions()
+        options.loadDefaultStyle = False
+        layer = QgsVectorLayer(path, name, provider, options)
+        if layer.isValid():
+            _, has_style = layer.loadDefaultStyle()
+            if not has_style:
+                self._apply_stable_default_color(layer, path)
+        return layer
+
+    def _apply_stable_default_color(self, layer, source):
         """Swap QGIS's random default colour for one fixed by the file name.
 
-        Set2 indexed by zlib.crc32 of the base name, so one file draws in one
-        colour in every session, on every machine and in every replay (Python's
-        hash() is salted per process). The rest of QGIS's default symbol stays.
+        ColorBrewer Set2 (built directly, so a profile ramp named "Set2" cannot
+        change it) at colormaps.stable_index of the file name: one file, one
+        colour, in every session, on every machine and in every replay. A project
+        that turned random colours off keeps the default colour it chose.
         """
-        symbol = QgsSymbol.defaultSymbol(layer.geometryType())
-        if symbol is None:  # a table without geometry
+        from . import colormaps
+
+        settings = getattr(QgsProject.instance(), "styleSettings", lambda: None)()
+        randomizes = getattr(settings, "randomizeDefaultSymbolColor", None)
+        if randomizes is not None and not randomizes():
             return
-        ramp = self._resolve_color_ramp("Set2")
-        index = zlib.crc32(os.path.basename(source).encode("utf-8")) % ramp.count()
+        symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+        if symbol is None:  # no geometry, or a geometry type QGIS has no default symbol for
+            return
+        ramp = QgsColorBrewerColorRamp("Set2", 8)
+        index = colormaps.stable_index(colormaps.layer_color_key(source), ramp.count())
         symbol.setColor(ramp.color(ramp.value(index)))
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
 
@@ -3591,7 +3611,7 @@ class QgisMCPServer(QObject):
         try:
             layers = []
             for p in layer_paths or []:
-                lyr = QgsVectorLayer(p, os.path.basename(p), "ogr")
+                lyr = self._new_vector_layer(p, os.path.basename(p))
                 if not lyr.isValid():
                     lyr = QgsRasterLayer(p, os.path.basename(p))
                 if not lyr.isValid():

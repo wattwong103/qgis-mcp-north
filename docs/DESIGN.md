@@ -133,7 +133,7 @@ Chains into: `qgis_load_layer`, `qgis_render_choropleth`, `qgis_render_trajector
 
 #### `qgis_load_layer(path: str, name: str | None = None, crs: str | None = None) → LoadedLayer`
 
-Load a layer into the active project (plugin mode) or the headless QGIS app. Returns a layer_id used by styling and render tools. `crs` overrides the file's CRS if specified (e.g., for shapefiles missing `.prj`). A vector layer without its own default style (`.qml` beside it, or stored in the GeoPackage) draws in Set2[`crc32(file name) % 8`] with QGIS's default symbol otherwise, so an unstyled figure looks the same in every session and replay (QGIS's own default colour is random).
+Load a layer into the active project (plugin mode) or the headless QGIS app. Returns a layer_id used by styling and render tools. `crs` overrides the file's CRS if specified (e.g., for shapefiles missing `.prj`). An unstyled file layer (no `.qml` beside it, no default style stored in its GeoPackage) keeps QGIS's default symbol but takes its colour from ColorBrewer Set2 at `crc32` of its NFC file name (plus `|layername=`), so it looks the same in every session, machine and replay; QGIS's own default colour is random. The same applies to `qgis_compose_layout`'s `layer_paths`. A project with random colours turned off keeps its chosen default colour. Files that share a name (`A/links.gpkg`, `B/links.gpkg`) share a colour: style one explicitly.
 
 ```python
 LoadedLayer = LayerInfo | {"layer_id": str}
