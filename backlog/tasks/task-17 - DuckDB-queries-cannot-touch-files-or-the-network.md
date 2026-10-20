@@ -1,9 +1,10 @@
 ---
 id: TASK-17
 title: DuckDB queries cannot touch files or the network
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-09 23:20'
+updated_date: '2026-10-20 03:50'
 labels:
   - security
   - duckdb

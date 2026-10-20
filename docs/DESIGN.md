@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.14.0**, 2026-09-13
+Status: **v1.15.0**, 2026-10-20
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -612,6 +612,8 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 **v1.13 — GUFM leftovers.** ✅ Shipped 2026-09-12. Closed §8 items 3, 5, 6, 9, 13 against GUFM (not PFLOW MFS): Tokyo 23-ward + L3 mesh GeoPackages, Sekimoto-lab blank PPTX default, JAXA LULC raster underlays + published 15-class palette, KSJ `N03_007` as `zone_id`. Palette `gufm` from the Theory Companion. Recipes: `docs/gufm-usage.md`.
 
 **v1.14 — GUFM DRM routing.** ✅ Shipped 2026-09-12. `qgis_route_on_network` snaps stop sequences onto GUFM `drm_inner_tokyo.tsv` / `rail_inner_tokyo.tsv` (or a line GeoJSON/GPKG) and writes a routed CSV for `qgis_render_trajectory`. MCP-side networkx; TSV stays in the GUFM tree (57 MB, not copied).
+
+**v1.15 — figure provenance and upstream review fixes.** ✅ Shipped 2026-10-20. Every file a tool writes gets a `.provenance.json` sidecar (§5); `qgis_export_session` turns sidecars into a replay script that checks its source inputs, replays state-reading figures from the session ledger, and runs recorded `qgis_eval` code only with `--allow-eval`. Project and shapefile datasources are fingerprinted; `qgis_render_from_duckdb` reaches only tables stored in the database. Also: the upstream-review tool fixes (atlas export, `classes`, batch render, unavailable-layer dialogs), typed errors that survive mcp 2.x, and the macOS QGIS 4 headless launcher.
 
 ---
 

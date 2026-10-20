@@ -1,9 +1,10 @@
 ---
 id: TASK-16
 title: Provenance — project and shapefile datasources
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-08 12:00'
+updated_date: '2026-10-20 03:50'
 labels:
   - feature
   - provenance
