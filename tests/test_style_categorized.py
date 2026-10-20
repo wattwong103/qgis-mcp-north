@@ -44,6 +44,14 @@ def test_palette_mapped_to_color_ramp(fake_executor):
     assert params["color_ramp"] == "Set2"
 
 
+def test_no_palette_lets_the_plugin_pick_one_that_fits(fake_executor):
+    # A bare call on 23 wards worked in 1.15.0; with "Set2" as the default it
+    # would now be refused, so the plugin chooses: Set2 up to 8 values, else Spectral.
+    fake_executor.responses["set_layer_style"] = _ok_response()
+    qgis_style_categorized(layer_id="L1", field="ward")
+    assert fake_executor.calls[0][1]["color_ramp"] is None
+
+
 def test_missing_field_raises_field_not_found(fake_executor):
     def fail(_params):
         raise ExecutorError("set_layer_style", "Field not found: nope")

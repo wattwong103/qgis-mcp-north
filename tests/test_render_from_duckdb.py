@@ -91,6 +91,45 @@ def test_lon_lat_columns_become_point_wkt(fake_executor, db):
     assert set(feats[0]) == {"wkt", "trip_id", "speed"}
 
 
+def test_attributes_of_any_duckdb_type_cross_the_wire(fake_executor, tmp_path):
+    # Found live 2026-10-20: DuckDB types 139.70 as DECIMAL, json.dumps refused
+    # the Decimal, and the whole render failed with an unhinted TypeError.
+    path = tmp_path / "typed.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute(
+        "CREATE TABLE t AS SELECT 139.70 AS lon, 35.70 AS lat, 12.5 AS v, "
+        "DATE '2026-10-20' AS d, TIMESTAMP '2026-10-20 08:30:00' AS ts, "
+        "'5b9f1d0e-1c2a-4d3e-9f00-0123456789ab'::UUID AS u, INTERVAL 90 SECOND AS dt, "
+        "NULL::DECIMAL(9,2) AS missing, '\\xAA\\xBB'::BLOB AS raw, [1, 2] AS xs, "
+        "{'w': 2.5, 'when': DATE '2026-10-21'} AS s"
+    )
+    con.close()
+    fake_executor.responses["render_wkt_features"] = _render_response("Point", 1)
+    qgis_render_from_duckdb(
+        db_path=str(path), query="SELECT * FROM t", output_png="/tmp/o.png",
+        lon_column="lon", lat_column="lat", value_field="v",
+    )
+    feat = fake_executor.calls[0][1]["features"][0]
+    assert feat["wkt"] == "POINT (139.7 35.7)"
+    assert feat["v"] == 12.5 and isinstance(feat["v"], float)  # graduated styling needs a number
+    assert feat["d"] == "2026-10-20"
+    assert feat["ts"] == "2026-10-20T08:30:00"
+    assert feat["u"] == "5b9f1d0e-1c2a-4d3e-9f00-0123456789ab"
+    assert feat["dt"] == "0:01:30"
+    assert feat["missing"] is None
+    assert feat["raw"] == "<BLOB 2 bytes>"  # never the bytes themselves
+    assert feat["xs"] == [1, 2]  # a LIST stays a JSON list, as before
+    assert feat["s"] == {"w": 2.5, "when": "2026-10-21"}  # items converted inside
+
+
+def test_the_fake_executor_refuses_what_the_wire_cannot_send(fake_executor):
+    from decimal import Decimal
+
+    fake_executor.responses["remove_layer"] = {}
+    with pytest.raises(TypeError, match="Decimal"):
+        fake_executor.dispatch("remove_layer", {"layer_id": Decimal("1.5")})
+
+
 def test_max_features_caps_rows_and_reports_it(fake_executor, db):
     fake_executor.responses["render_wkt_features"] = _render_response("Point", 50)
     result = qgis_render_from_duckdb(

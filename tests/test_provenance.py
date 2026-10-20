@@ -349,27 +349,30 @@ def test_made_by_ignores_a_malformed_producer_sidecar(tmp_path, content):
     assert provenance._made_by(str(f), hashlib.sha256(b"x").hexdigest()) is None
 
 
-def test_git_state_failure_is_unknown_not_clean(monkeypatch):
-    class Failed:
-        returncode = 128
-        stdout = ""
+class FakeGit:
+    """Stands in for subprocess.Popen in provenance._git."""
 
-    monkeypatch.setattr(provenance.subprocess, "run", lambda *a, **k: Failed())
+    def __init__(self, argv, *, stdout="", returncode=0, **kwargs):
+        self.argv, self.kwargs = argv, kwargs
+        self._stdout, self.returncode = stdout, returncode
+
+    def communicate(self, timeout=None):
+        return self._stdout, None
+
+
+def test_git_state_failure_is_unknown_not_clean(monkeypatch):
+    monkeypatch.setattr(provenance.subprocess, "Popen", lambda argv, **k: FakeGit(argv, returncode=128))
     assert provenance._git_state() in ({"git": None, "git_dirty": None},)
 
 
 def test_git_state_takes_no_optional_locks_and_decodes_utf8(monkeypatch):
     seen: list[tuple[list, dict]] = []
 
-    class Ok:
-        returncode = 0
-        stdout = ""
-
-    def run(argv, **kwargs):
+    def popen(argv, **kwargs):
         seen.append((argv, kwargs))
-        return Ok()
+        return FakeGit(argv)
 
-    monkeypatch.setattr(provenance.subprocess, "run", run)
+    monkeypatch.setattr(provenance.subprocess, "Popen", popen)
     provenance._git_state()
     if not seen:
         pytest.skip("package is not a git checkout here")

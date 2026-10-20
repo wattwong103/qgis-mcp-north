@@ -28,6 +28,22 @@ def test_every_typed_error_is_an_sdk_tool_error():
     assert issubclass(QgisMcpWorkflowsError, _sdk_tool_error())
 
 
+def test_a_plugin_message_with_its_own_hint_keeps_only_that_hint():
+    from qgis_mcp_workflows.errors import ExecutorError
+
+    err = ExecutorError("set_layer_style", "'Set2' has 8 colours for 9 categories. Next: pass classes=[...]")
+    assert str(err).count("Next:") == 1
+    assert "Next: pass classes=[...]" in str(err)
+
+
+def test_a_plugin_message_without_a_hint_gets_the_generic_one():
+    from qgis_mcp_workflows.errors import ExecutorError
+
+    err = ExecutorError("render", "boom")
+    assert str(err).startswith("Plugin command 'render' failed: boom.")
+    assert "Next: inspect inputs, then retry" in str(err)
+
+
 def test_compound_argument_error_is_a_tool_error_with_a_next_hint():
     from qgis_mcp_workflows.compound import qgis_inspect
 
