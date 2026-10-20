@@ -3,6 +3,18 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.15.3 — 2026-10-20 — unstyled layers draw in a fixed colour
+
+### Fixed
+
+- A layer loaded with `qgis_load_layer` and rendered without styling no longer
+  takes QGIS's random default colour (TASK-20): the same GeoPackage loaded twice
+  and rendered twice came out green, then purple, so no replay of such a figure
+  matched. An unstyled vector layer now draws in ColorBrewer Set2, picked by
+  `crc32` of its file name: one file, one colour, in every session, on every
+  machine and in every replay. A layer with its own default style (a `.qml`
+  beside it, a style stored in the GeoPackage) keeps it.
+
 ## v1.15.2 — 2026-10-20 — replays survive a GeoPackage switched to WAL
 
 ### Fixed

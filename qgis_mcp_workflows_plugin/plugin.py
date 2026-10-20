@@ -10,6 +10,7 @@ import socket
 import struct
 import sys
 import traceback
+import zlib
 from collections import deque
 from datetime import datetime, timezone
 from typing import ClassVar
@@ -620,9 +621,14 @@ class QgisMCPServer(QObject):
         if not name:
             name = os.path.basename(path)
 
-        layer = QgsVectorLayer(path, name, provider)
+        options = QgsVectorLayer.LayerOptions()
+        options.loadDefaultStyle = False  # loaded below, to learn whether the file has one
+        layer = QgsVectorLayer(path, name, provider, options)
         if not layer.isValid():
             raise Exception(f"Layer is not valid: {path}")
+        _message, has_style = layer.loadDefaultStyle()
+        if not has_style:  # a .qml beside the file, or a style stored in the GeoPackage, wins
+            self._apply_stable_default_colour(layer, path)
 
         QgsProject.instance().addMapLayer(layer)
         QgsMessageLog.logMessage(f"Vector layer added: {name}", self.LOG_TAG, MSG_INFO)
@@ -1562,6 +1568,21 @@ class QgisMCPServer(QObject):
         project.addMapLayer(bm)
         transient_ids.append(bm.id())
         return bm
+
+    def _apply_stable_default_colour(self, layer, source):
+        """Swap QGIS's random default colour for one fixed by the file name.
+
+        Set2 indexed by zlib.crc32 of the base name, so one file draws in one
+        colour in every session, on every machine and in every replay (Python's
+        hash() is salted per process). The rest of QGIS's default symbol stays.
+        """
+        symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+        if symbol is None:  # a table without geometry
+            return
+        ramp = self._resolve_color_ramp("Set2")
+        index = zlib.crc32(os.path.basename(source).encode("utf-8")) % ramp.count()
+        symbol.setColor(ramp.color(ramp.value(index)))
+        layer.setRenderer(QgsSingleSymbolRenderer(symbol))
 
     def _style_underlay_vector(self, layer):
         """Mute default QGIS brown fill so underlays don't hide the data."""

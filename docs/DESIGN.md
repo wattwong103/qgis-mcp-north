@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.15.2**, 2026-10-20
+Status: **v1.15.3**, 2026-10-20
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -133,7 +133,7 @@ Chains into: `qgis_load_layer`, `qgis_render_choropleth`, `qgis_render_trajector
 
 #### `qgis_load_layer(path: str, name: str | None = None, crs: str | None = None) → LoadedLayer`
 
-Load a layer into the active project (plugin mode) or the headless QGIS app. Returns a layer_id used by styling and render tools. `crs` overrides the file's CRS if specified (e.g., for shapefiles missing `.prj`).
+Load a layer into the active project (plugin mode) or the headless QGIS app. Returns a layer_id used by styling and render tools. `crs` overrides the file's CRS if specified (e.g., for shapefiles missing `.prj`). A vector layer without its own default style (`.qml` beside it, or stored in the GeoPackage) draws in Set2[`crc32(file name) % 8`] with QGIS's default symbol otherwise, so an unstyled figure looks the same in every session and replay (QGIS's own default colour is random).
 
 ```python
 LoadedLayer = LayerInfo | {"layer_id": str}
