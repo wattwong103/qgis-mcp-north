@@ -449,8 +449,8 @@ def outputs_of(steps: list[dict]) -> list[str]:
 def source_inputs(steps: list[dict]) -> list[dict]:
     """Inputs the script checks: every recorded fingerprint not read from a replayed step.
 
-    Keyed by (path, sha256, bytes): two calls that read different versions of
-    one file are both checked, so at least one of them reports the change.
+    Keyed by (path, sha256, bytes, sqlite_sha256): two calls that read different
+    versions of one file are both checked, so at least one of them reports the change.
     """
     found: dict[tuple, dict] = {}
     for step in steps:
@@ -461,7 +461,11 @@ def source_inputs(steps: list[dict]) -> list[dict]:
             if not isinstance(path, str) or path in replayed:
                 continue
             item = {"path": path, "sha256": entry.get("sha256"), "bytes": entry.get("bytes")}
-            found.setdefault((path, item["sha256"], item["bytes"]), item)
+            if isinstance(entry.get("sqlite_sha256"), str):  # lets the replay pass a header-only change
+                item["sqlite_sha256"] = entry["sqlite_sha256"]
+            # In the key: a co-exported sidecar claiming another sqlite_sha256 for the
+            # same bytes adds a check instead of replacing the honest one.
+            found.setdefault((path, item["sha256"], item["bytes"], item.get("sqlite_sha256")), item)
     return list(found.values())
 
 
