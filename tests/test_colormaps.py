@@ -7,9 +7,48 @@ constructs a QgsColorRamp) is QGIS-only and verified live, not here.
 
 from __future__ import annotations
 
+import unicodedata
+
 import pytest
 
-from qgis_mcp_workflows_plugin.colormaps import COLORMAPS, DIVERGING, diverging_breaks
+from qgis_mcp_workflows_plugin.colormaps import (
+    COLORMAPS,
+    DIVERGING,
+    diverging_breaks,
+    layer_color_key,
+    stable_index,
+)
+
+# ── stable default colour for unstyled layers (TASK-20) ─────────────────────
+
+
+def test_stable_index_is_the_crc32_of_the_name():
+    # Golden: zones_tokyo23.gpkg drew in Set2[4] #a6d854 in the 2026-10-20 live render.
+    assert stable_index("zones_tokyo23.gpkg", 8) == 4
+
+
+def test_stable_index_is_the_same_for_composed_and_decomposed_names():
+    # macOS hands out decomposed (NFD) names, Windows composed (NFC) ones.
+    nfc = "ガード下.gpkg"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfc != nfd
+    assert stable_index(nfc, 8) == stable_index(nfd, 8)
+
+
+def test_stable_index_survives_a_lone_surrogate():
+    assert 0 <= stable_index("bad" + chr(0xDCFF) + ".gpkg", 8) < 8
+
+
+@pytest.mark.parametrize(("source", "key"), [
+    ("H:/Dropbox/gufm/zones.gpkg", "zones.gpkg"),
+    ("H:" + chr(92) + "Dropbox" + chr(92) + "zones.gpkg", "zones.gpkg"),
+    ("/Users/n/Dropbox/gufm/zones.gpkg", "zones.gpkg"),
+    ("H:/d/zones.gpkg|layername=wards", "zones.gpkg|layername=wards"),
+    ("H:/d/zones.gpkg|layername=wards|subset=\"a\" = '1/2'", "zones.gpkg|layername=wards"),
+    ("H:/d/zones.gpkg|subset=x/y", "zones.gpkg"),
+])
+def test_the_colour_key_is_the_file_name_and_its_sublayer(source, key):
+    assert layer_color_key(source) == key
 
 EXPECTED_SEQUENTIAL = {"viridis", "cividis", "magma", "batlow", "gufm"}
 EXPECTED_DIVERGING = {"vik", "roma", "balance", "RdBu", "BrBG"}
