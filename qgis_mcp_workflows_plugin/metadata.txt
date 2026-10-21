@@ -18,7 +18,7 @@ about=Companion QGIS plugin for the qgis-mcp-workflows MCP server. Exposes a TCP
 
     Default socket port: 9877 (vs upstream nkarasiak/qgis-mcp on 9876).
 
-version=1.15.3
+version=1.15.4
 author=North
 email=
 tags=mcp,ai,claude,llm,workflows,transportation,research,pflow,gufm,drm
@@ -30,7 +30,8 @@ category=Plugins
 icon=icons/icon.png
 experimental=True
 deprecated=False
-changelog=1.15.3 : Unstyled layers draw in a colour fixed by their file name, not a random one.
+changelog=1.15.4 : Render tools and decks create the folder they write into.
+ 1.15.3 : Unstyled layers draw in a colour fixed by their file name, not a random one.
  1.15.2 : Replays accept a GeoPackage that QGIS switched to WAL (header-only change).
  1.15.1 : Qualitative ColorBrewer palettes (Set2, Paired, Dark2, ...) resolve instead of
     silently becoming Spectral; trajectory mode colours are fixed, not random; unknown

@@ -3036,6 +3036,7 @@ def qgis_figures_to_pptx(
             slide_titles.append(title_text)
             slide.shapes.add_picture(fig, Inches(0.5), Inches(1.5), height=Inches(5.5))
 
+    os.makedirs(os.path.dirname(abs_pptx), exist_ok=True)  # a new weekly folder is normal
     prs.save(abs_pptx)
     return PptxResult(
         pptx_path=abs_pptx,

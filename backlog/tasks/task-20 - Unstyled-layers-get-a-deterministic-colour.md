@@ -1,7 +1,7 @@
 ---
 id: TASK-20
 title: Unstyled layers get a deterministic colour
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-10-20 12:00'
 labels:

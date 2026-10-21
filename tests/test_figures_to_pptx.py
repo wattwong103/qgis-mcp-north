@@ -31,6 +31,18 @@ def test_creates_pptx_with_one_slide_per_image(tmp_path: Path):
     assert result.n_slides_total == 1
 
 
+def test_the_deck_folder_is_created(tmp_path: Path):
+    # Like the render tools (TASK-21): a deck in a new weekly folder must not fail.
+    from qgis_mcp_workflows.server import qgis_figures_to_pptx
+
+    img = _make_png(tmp_path / "fig1.png")
+    out = tmp_path / "decks" / "2026-W43" / "weekly.pptx"
+
+    qgis_figures_to_pptx(figure_paths=[str(img)], pptx_path=str(out))
+
+    assert out.stat().st_size > 0
+
+
 # T2 — title_and_image layout uses captions[i] as slide title
 def test_title_and_image_uses_caption_as_title(tmp_path: Path):
     from pptx import Presentation
