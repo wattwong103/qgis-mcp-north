@@ -3,6 +3,17 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.15.4 — 2026-10-22 — output folders are created
+
+### Fixed
+
+- The render tools (`qgis_render_map`, `qgis_render_choropleth`, trajectory,
+  OD flows, link density, diagram, catchment, DuckDB) and `qgis_figures_to_pptx`
+  create the folder they write into, as spatial join, zonal stats and the atlas
+  and batch exports already did (TASK-21). Before, a new folder failed with
+  "Failed to save render … Next: inspect inputs", which hid the cause; a save
+  that still fails now says what to check.
+
 ## v1.15.3 — 2026-10-20 — unstyled layers draw in a fixed colour
 
 ### Fixed

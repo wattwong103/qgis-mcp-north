@@ -1984,8 +1984,20 @@ class QgisMCPServer(QObject):
             title=kwargs.get("title"),
             legend_items=kwargs.get("legend_items") or None,
         )
+        parent = os.path.dirname(output_png)
+        if parent and not os.path.isdir(parent):  # as spatial_join, atlas and batch exports do
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except OSError as err:
+                raise Exception(
+                    "Cannot create the folder %s for %s (%s). Next: pick a folder path that is "
+                    "not an existing file and has no characters such as ? or *" % (parent, output_png, err)
+                ) from err
         if not img.save(output_png):
-            raise Exception("Failed to save render to %s" % output_png)
+            raise Exception(
+                "Failed to save render to %s. Next: check the folder is writable and the "
+                "file is not open elsewhere, and use a .png path" % output_png
+            )
 
     def render_choropleth(
         self,

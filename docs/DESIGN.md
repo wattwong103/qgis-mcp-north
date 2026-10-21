@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.15.3**, 2026-10-20
+Status: **v1.15.4**, 2026-10-22
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -745,8 +745,9 @@ Schema: `origin, destination, trip_count, avg_distance_km`
 Zone IDs: mix of `PRF##` (prefecture) and `MFS##` (mesh).
 
 **Pre-rendered point GPKGs** (50,000-feature samples)
-`H:\Dropbox\PFLOW\docs\maps\taxi_{city}_{type}_{pickups,dropoffs}.gpkg`
-`H:\Dropbox\PFLOW\docs\maps\truck_{operation}_{origins,destinations}.gpkg`
+`H:\Dropbox\PFLOW\20_taxi\docs\maps\taxi_{city}_{type}_{pickups,dropoffs}.gpkg`
+`H:\Dropbox\PFLOW\20_taxi\docs\maps\truck_{operation}_{origins,destinations}.gpkg`
+(moved from `PFLOW\docs\maps\` on 2026-10-20.)
 Useful as "load_layer + render_map" smoke-test fixtures.
 
 **Japan basemap shapefiles** — Global Map Japan v2 bundle (EPSG:4326)
