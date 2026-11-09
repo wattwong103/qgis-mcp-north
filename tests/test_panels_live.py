@@ -6,10 +6,13 @@ panel's centre pixel is A's fill colour and can be compared with the ramp.
 
 from __future__ import annotations
 
+import importlib
 import json
+from pathlib import Path
 
 import pytest
 
+from qgis_mcp_workflows import executors
 from qgis_mcp_workflows.errors import ExecutorError
 from qgis_mcp_workflows.executors.headless import HeadlessExecutor
 from tests.conftest import requires_headless
@@ -180,3 +183,34 @@ def test_no_matching_keys_is_an_error(headless, zones, tmp_path):
     with pytest.raises(ExecutorError, match=r"JOIN_NO_MATCH on zone_id.*13101\.0.*Next:"):
         _compose(headless, zones, tmp_path / "none.png", [{"values": {"13101.0": 1.0}, "group": 0}], [_group()])
 
+
+TINY_ZONES = str(Path(__file__).parent / "fixtures" / "tiny_zones.geojson")
+
+
+@pytest.fixture
+def server_on(headless, tmp_path, monkeypatch):
+    """The MCP server module, dispatching to the module's one headless QGIS."""
+    monkeypatch.setenv("DROPBOX_ROOT", str(tmp_path))
+    executors.set_executor(headless)
+    try:
+        yield importlib.import_module("qgis_mcp_workflows.server")
+    finally:
+        executors.set_executor(None)
+
+
+async def test_fig_spatial_shape_through_the_mcp_tool(server_on, tmp_path):
+    shares = tmp_path / "shares.csv"
+    shares.write_text("zone_id,origin_sim_s,origin_obs_s,dest_sim_s,dest_obs_s\n"
+                      "Z01,0.10,0.12,0.30,0.25\nZ02,0.20,0.18,0.10,0.15\n"
+                      "Z03,0.30,0.35,0.40,0.45\nZ04,0.40,0.35,0.20,0.15\n", encoding="utf-8")
+    out = tmp_path / "fig_spatial.pdf"
+    await server_on.mcp.call_tool("qgis_compose_panels", {
+        "zones_path": TINY_ZONES, "value_csv": str(shares),
+        "value_fields": ["origin_sim_s", "origin_obs_s", "dest_sim_s", "dest_obs_s"],
+        "rows": 2, "cols": 2, "output_path": str(out), "share_scale": "row", "palettes": ["Reds", "Blues"],
+        "cap_percentile": 98, "row_labels": ["Origins\nR² = 0.79", "Destinations\nR² = 0.69"],
+        "column_titles": ["Simulated", "Observed (PT)"], "tick_format": ".1%",
+        "width_mm": 152.4, "height_mm": 137.2})
+    assert out.read_bytes()[:4] == b"%PDF"
+    sidecar = json.loads(Path(str(out) + ".provenance.json").read_text(encoding="utf-8"))
+    assert {e["argument"] for e in sidecar["inputs"]} == {"zones_path", "value_csv"}
