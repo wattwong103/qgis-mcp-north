@@ -111,6 +111,24 @@ def test_blank_and_nan_cells_stay_out_of_the_scale(fake_executor, tmp_path):
     assert (result.groups[0].vmin, result.groups[0].vmax) == (0.0, 2.0)
 
 
+def test_a_csv_that_is_not_utf8_is_refused(fake_executor, tmp_path):
+    # Japanese CSVs are often CP932; the open() error would reach the client untyped.
+    path = tmp_path / "cp932.csv"
+    path.write_bytes("zone_id,name,v\n13101,千代田区,1.0\n".encode("cp932"))
+    with pytest.raises(InvalidArgumentError, match=r"UTF-8.*Next:"):
+        _call(str(path), tmp_path, value_fields=["v"], rows=1, cols=1)
+    assert fake_executor.calls == []
+
+
+def test_repeated_keys_are_refused(fake_executor, tmp_path):
+    # One row per OD pair would otherwise keep each zone's last row and draw a wrong map.
+    path = tmp_path / "long.csv"
+    path.write_text("zone_id,v\n13101,1.0\n13102,2.0\n13101,3.0\n", encoding="utf-8")
+    with pytest.raises(InvalidArgumentError, match=r"13101.*one row per zone.*Next:"):
+        _call(str(path), tmp_path, value_fields=["v"], rows=1, cols=1)
+    assert fake_executor.calls == []
+
+
 def test_a_single_panel_works(fake_executor, csv_path, tmp_path):
     fake_executor.responses["compose_panels"] = _plugin_result
     result = _call(csv_path, tmp_path, value_fields=["a"], rows=1, cols=1, share_scale="all")

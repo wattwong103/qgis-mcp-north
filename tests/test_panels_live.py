@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -184,6 +187,105 @@ def test_no_matching_keys_is_an_error(headless, zones, tmp_path):
         _compose(headless, zones, tmp_path / "none.png", [{"values": {"13101.0": 1.0}, "group": 0}], [_group()])
 
 
+def test_the_default_extent_frames_only_the_drawn_zones(headless, zones, tmp_path):
+    # fig_spatial draws 23 wards out of a larger szone layer: hidden zones must not set the frame.
+    out = tmp_path / "frame.png"
+    res = _compose(headless, zones, out, [{"values": {"A": 1.0}, "group": 0}], [_group()], extent=None)
+    assert _centre(headless, out, res["panel_boxes_mm"][0]) == _expected(headless, "Reds", 1.0)
+
+
+CUSTOM_CRS_ZONES = r'''
+from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransformContext, QgsFeature, QgsGeometry,
+                       QgsVectorFileWriter, QgsVectorLayer)
+crs = QgsCoordinateReferenceSystem()
+crs.createFromProj("+proj=tmerc +lat_0=0 +lon_0=0 +k=1 +x_0=12345 +y_0=0 +ellps=GRS80 +units=m +no_defs")
+mem = QgsVectorLayer("Polygon?field=zone_id:string", "z", "memory")
+mem.setCrs(crs)
+f = QgsFeature(mem.fields())
+f.setGeometry(QgsGeometry.fromWkt("POLYGON((0 0, 1000 0, 1000 1000, 0 1000, 0 0))"))
+f.setAttributes(["A"])
+mem.dataProvider().addFeatures([f])
+opts = QgsVectorFileWriter.SaveVectorOptions()
+opts.driverName = "ESRI Shapefile"
+QgsVectorFileWriter.writeAsVectorFormatV3(mem, PATH, QgsCoordinateTransformContext(), opts)
+back = QgsVectorLayer(PATH, "back", "ogr")
+result = {"valid": back.crs().isValid(), "authid": back.crs().authid()}
+'''
+
+
+def test_zones_without_an_authority_crs_stay_in_place(headless, tmp_path):
+    shp = str(tmp_path / "custom.shp")
+    crs = _run(headless, CUSTOM_CRS_ZONES, PATH=shp)
+    assert crs == {"valid": True, "authid": ""}  # the case under test: a CRS QGIS cannot name
+    out = tmp_path / "custom.png"
+    res = _compose(headless, shp, out, [{"values": {"A": 1.0}, "group": 0}], [_group()],
+                   extent=[0.0, 0.0, 1000.0, 1000.0])
+    assert _centre(headless, out, res["panel_boxes_mm"][0]) == _expected(headless, "Reds", 1.0)
+
+
+JAPANESE_FAMILIES = r'''
+from qgis.PyQt.QtGui import QFontDatabase
+try:
+    JP = QFontDatabase.WritingSystem.Japanese
+except AttributeError:
+    JP = QFontDatabase.Japanese
+try:
+    result = len(QFontDatabase.families(JP))
+except TypeError:
+    result = len(QFontDatabase().families(JP))
+'''
+
+
+def test_japanese_titles_get_a_font_headless(zones, tmp_path):
+    # Probe 2026-11-10: a fresh headless QGIS sees one family (Open Sans) and no Japanese one,
+    # so "港区" in the default font drew as empty boxes.
+    if sys.platform not in ("win32", "darwin"):
+        pytest.skip("no known Japanese system font on this OS")
+    fresh = HeadlessExecutor()
+    try:
+        _compose(fresh, zones, tmp_path / "jp.png", [{"values": {"A": 0.5}, "group": 0}], [_group()],
+                 column_titles=["港区"])
+        assert _run(fresh, JAPANESE_FAMILIES) > 0
+    finally:
+        fresh.shutdown()
+
+
+def test_a_grid_too_big_for_the_page_is_refused(headless, zones, tmp_path):
+    panels = [{"values": {"A": 0.5}, "group": 0}] * 4
+    with pytest.raises(ExecutorError, match=r"PAGE_TOO_SMALL.*Next:"):
+        _compose(headless, zones, tmp_path / "tiny.png", panels, [_group()], width_mm=30.0)
+
+
+def _overlaps(a, b):
+    return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+
+
+@pytest.mark.parametrize(("position", "colorbar", "groups_of"),
+                         [("right", True, (0, 0, 1, 1)), ("bottom", True, (0, 1, 0, 1)),
+                          ("right", False, (0, 0, 1, 1))])
+def test_panels_and_colour_bars_stay_on_the_page_without_overlap(headless, zones, tmp_path, position,
+                                                                 colorbar, groups_of):
+    width, height = 120.0, 110.0
+    panels = [{"values": {"A": 0.5}, "group": g} for g in groups_of]
+    res = _compose(headless, zones, tmp_path / f"{position}{colorbar}.png", panels,
+                   [_group("Reds", label="Share"), _group("Blues", label="Share")], rows=2, cols=2,
+                   colorbar=colorbar, colorbar_position=position, width_mm=width, height_mm=height,
+                   column_titles=["a", "b"], row_labels=["c", "d"])
+    boxes, bars = res["panel_boxes_mm"], res["colorbar_boxes_mm"]
+    assert len(bars) == (2 if colorbar else 0)
+    for box in boxes + bars:
+        x, y, w, h = box
+        assert w > 0 and h > 0 and x >= 0 and y >= 0 and x + w <= width and y + h <= height, box
+    pairs = [(a, b) for i, a in enumerate(boxes + bars) for b in (boxes + bars)[i + 1:]]
+    assert not any(_overlaps(a, b) for a, b in pairs)
+    for g, bar in enumerate(bars):
+        members = [boxes[i] for i, grp in enumerate(groups_of) if grp == g]
+        if position == "right":
+            assert bar[0] >= max(b[0] + b[2] for b in members)
+        else:
+            assert bar[1] >= max(b[1] + b[3] for b in members)
+
+
 TINY_ZONES = str(Path(__file__).parent / "fixtures" / "tiny_zones.geojson")
 
 
@@ -214,3 +316,22 @@ async def test_fig_spatial_shape_through_the_mcp_tool(server_on, tmp_path):
     assert out.read_bytes()[:4] == b"%PDF"
     sidecar = json.loads(Path(str(out) + ".provenance.json").read_text(encoding="utf-8"))
     assert {e["argument"] for e in sidecar["inputs"]} == {"zones_path", "value_csv"}
+
+
+async def test_a_panel_figure_replays_from_its_sidecar(server_on, tmp_path):
+    zones = tmp_path / "zones.geojson"
+    zones.write_bytes(Path(TINY_ZONES).read_bytes())
+    shares = tmp_path / "shares.csv"
+    shares.write_text("zone_id,a,b\nZ01,0.1,0.2\nZ02,0.3,0.4\nZ03,0.5,0.6\nZ04,0.7,0.8\n", encoding="utf-8")
+    out = tmp_path / "panels.png"
+    await server_on.mcp.call_tool("qgis_compose_panels", {
+        "zones_path": str(zones), "value_csv": str(shares), "value_fields": ["a", "b"], "rows": 1, "cols": 2,
+        "output_path": str(out), "dpi": DPI, "width_mm": 120.0, "height_mm": 70.0})
+    script = tmp_path / "replay.py"
+    server_on.qgis_export_session(output_py=str(script), figures=[str(out)])
+    done = subprocess.run([sys.executable, str(script), "--out-dir", str(tmp_path / "out")],
+                          capture_output=True, text=True, timeout=300, env={**os.environ},
+                          stdin=subprocess.DEVNULL)
+    assert done.returncode == 0, done.stdout + done.stderr
+    replayed = tmp_path / "out" / "DROPBOX_ROOT" / "panels.png"
+    assert replayed.stat().st_size == out.stat().st_size

@@ -551,6 +551,9 @@ height_mm=140.0, font_family=None, title_size_pt=9.0, label_size_pt=9.0,
 tick_size_pt=7.0, outline_width_mm=0.05, outline_color="#cccccc", dpi=300) → PanelsResult`
 draws a rows × cols grid of one polygon layer: one panel per CSV column, row by
 row, all within one extent so simulated and observed panels frame identically.
+That extent defaults to the zones drawn in any panel plus 2%: with
+`unmatched="hide"`, a 23-ward CSV over a larger szone layer frames the wards,
+as the matplotlib figure does.
 It exists for camera-ready comparison figures (PFLOW's `fig_spatial`: simulated
 vs observed trip shares, origins and destinations) that `qgis_compose_layout`'s
 single panel and classed legend cannot make.
@@ -574,21 +577,28 @@ labels on the left and may hold line breaks (`Origins\nR² = 0.79`). Fonts, size
 (pt), the zone outline (width in mm, colour) and the page (mm) are arguments.
 PDF and SVG stay vector.
 
-**Fonts headless.** Qt's offscreen platform sees only its bundled font (one
-family on Windows), so `font_family="Arial"` could never resolve headless. When a
-requested family is missing, `compat.register_system_fonts()` registers the OS
-font folders once per process (724 files, 0.13 s on Windows). A family still
-missing is listed in `fonts_missing`, and QGIS's default font draws instead.
+**Fonts headless.** Qt's offscreen platform sees only its bundled font (Open
+Sans on Windows, with no Japanese glyphs), so `font_family="Arial"` could never
+resolve headless, and `港区` in the default font drew as empty boxes. Under the
+offscreen platform, `compat.register_system_fonts()` registers the OS font
+folders once per process before any label (724 files, 0.13 s on Windows); QGIS
+Desktop already has them and is left alone. A family still missing is listed in
+`fonts_missing`, and QGIS's default font draws instead.
 
 **Refused before QGIS runs:** a `value_fields` length other than rows × cols;
 `row_labels`, `column_titles` or `extent` of the wrong length; `palettes` or
 `colorbar_labels` with neither 1 nor one entry per group; `n_ticks < 2`; a
 `tick_format` that `format()` rejects; `cap_percentile` outside (0, 100]; an
-output that is not .png, .pdf or .svg; and a `vmin` above a group's top, which
-would run its colours backwards. Blank, non-numeric and non-finite CSV cells are
+output that is not .png, .pdf or .svg; a `vmin` above a group's top, which
+would run its colours backwards; a CSV that is not UTF-8 (CP932 is common for
+Japanese data); and a CSV that repeats a key, since keeping either row would
+draw a map the CSV does not say. Blank, non-numeric and non-finite CSV cells are
 left out of the panel and its scale. A layer with no key in any panel fails with
-`JOIN_NO_MATCH` and samples of both sides' keys. Zones without a value in a
-panel are hidden, or drawn light grey (`unmatched="nodata"`).
+`JOIN_NO_MATCH` and samples of both sides' keys. A grid whose panels would be
+under 10 mm after titles, labels and bars fails with `PAGE_TOO_SMALL`. Zones
+without a value in a panel are hidden, or drawn light grey
+(`unmatched="nodata"`). Panel layers take the zones' CRS object itself, so a
+custom `.prj` with no EPSG code stays in place.
 
 Full mode only, like `qgis_export_session`. Not in scope: mesh grids (next),
 values computed from points, difference maps, inset panels, per-panel extents.

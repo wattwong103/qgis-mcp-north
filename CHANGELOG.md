@@ -20,9 +20,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   PDF and SVG stay vector. The result reports every group's scale (vmin, vmax,
   data max, capped), fonts that were not found, join counts, and the panel and
   colour-bar boxes. Full mode only.
+  The default extent is the zones drawn in any panel, so hidden zones do not
+  shrink the map. Refused with a `Next:` hint: a CSV that is not UTF-8, a CSV
+  that repeats a key, and a page too small for its panels (`PAGE_TOO_SMALL`).
 - Headless QGIS now finds installed fonts. Qt's offscreen platform sees only
-  its bundled font, so a requested family that is missing triggers a one-time
-  registration of the OS font folders (0.13 s for 724 files on Windows).
+  its bundled font (no Japanese glyphs), so `qgis_compose_panels` registers the
+  OS font folders once per headless process (0.13 s for 724 files on Windows).
+  QGIS Desktop is left alone.
 
 ## v1.15.4 — 2026-10-22 — output folders are created
 

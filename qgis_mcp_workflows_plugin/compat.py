@@ -143,6 +143,13 @@ def font_families():
         return set(QFontDatabase().families())
 
 
+def is_offscreen():
+    """True under Qt's offscreen platform (headless QGIS), False in QGIS Desktop."""
+    from qgis.PyQt.QtGui import QGuiApplication
+
+    return QGuiApplication.platformName() == "offscreen"
+
+
 _system_fonts_registered = False
 
 

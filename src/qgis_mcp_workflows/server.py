@@ -2861,30 +2861,50 @@ def _refuse_bad_panel_arguments(*, value_fields: list[str], rows: int, cols: int
 
 
 def _read_panel_columns(csv_path: str, join_field: str, value_fields: list[str]) -> list[dict[str, float]]:
-    """One ``{key: value}`` dict per field. Blank, non-numeric and non-finite cells are left out."""
+    """One ``{key: value}`` dict per field. Blank, non-numeric and non-finite cells are left out.
+
+    A key on two rows is refused: keeping either row would draw a map the CSV does not say.
+    """
     import csv as _csv
 
     from qgis_mcp_workflows.errors import FieldNotFoundError
 
-    with open(csv_path, encoding="utf-8-sig", newline="") as f:
-        reader = _csv.DictReader(f)
-        csv_columns = reader.fieldnames or []
-        for field in (join_field, *value_fields):
-            if field not in csv_columns:
-                raise FieldNotFoundError(field, csv_columns)
-        columns: list[dict[str, float]] = [{} for _ in value_fields]
-        n_skipped = 0
-        for row in reader:
-            key = str(row[join_field])
-            for values, field in zip(columns, value_fields, strict=True):
-                try:
-                    value = float(row[field])
-                except (TypeError, ValueError):
-                    value = math.nan
-                if math.isfinite(value):
-                    values[key] = value
-                else:
-                    n_skipped += 1
+    columns: list[dict[str, float]] = [{} for _ in value_fields]
+    seen: set[str] = set()
+    repeated: list[str] = []
+    n_skipped = 0
+    try:
+        with open(csv_path, encoding="utf-8-sig", newline="") as f:
+            reader = _csv.DictReader(f)
+            csv_columns = reader.fieldnames or []
+            for field in (join_field, *value_fields):
+                if field not in csv_columns:
+                    raise FieldNotFoundError(field, csv_columns)
+            for row in reader:
+                key = str(row[join_field])
+                if key in seen:
+                    repeated.append(key)
+                seen.add(key)
+                for values, field in zip(columns, value_fields, strict=True):
+                    try:
+                        value = float(row[field])
+                    except (TypeError, ValueError):
+                        value = math.nan
+                    if math.isfinite(value):
+                        values[key] = value
+                    else:
+                        n_skipped += 1
+    except UnicodeDecodeError as err:
+        raise InvalidArgumentError(
+            f"value_csv {csv_path!r} is not UTF-8 text ({err.reason} at byte {err.start}).",
+            next_step="re-save it as UTF-8 (pandas: to_csv(path, encoding='utf-8')), then retry",
+        ) from None
+    if repeated:
+        raise InvalidArgumentError(
+            f"value_csv repeats {join_field} values, e.g. {sorted(set(repeated))[:5]}; "
+            "panels need one row per zone.",
+            next_step="aggregate the CSV to one row per zone, then retry",
+        )
     if n_skipped:
         logger.warning("compose_panels: left out %d blank, non-numeric or non-finite cells of %s",
                        n_skipped, csv_path)
@@ -2915,7 +2935,7 @@ def qgis_compose_panels(
     tick_format: Annotated[str, Field(description="Python format spec for tick labels, applied as format(value, spec): '.3g', '.1%', ',.0f'. Not a '{}' template.")] = ".3g",
     n_ticks: Annotated[int, Field(description="Evenly spaced ticks per colour bar, both ends included.", ge=2, le=11)] = 5,
     unmatched: Annotated[Literal["hide", "nodata"], Field(description='Zones without a value in a panel: "hide" (not drawn) or "nodata" (light grey, outside the scale).')] = "hide",
-    extent: Annotated[list[float] | None, Field(description="Map extent [xmin, ymin, xmax, ymax] in the zones' CRS, shared by every panel. Default: the zones' extent plus 2%.")] = None,
+    extent: Annotated[list[float] | None, Field(description="Map extent [xmin, ymin, xmax, ymax] in the zones' CRS, shared by every panel. Default: the zones drawn in any panel (hidden ones excluded) plus 2%.")] = None,
     width_mm: Annotated[float, Field(description="Page width in mm (160 suits a two-column journal figure).", gt=20.0, le=1000.0)] = 160.0,
     height_mm: Annotated[float, Field(description="Page height in mm.", gt=20.0, le=1000.0)] = 140.0,
     font_family: Annotated[str | None, Field(description="Font family for every label, e.g. 'Arial'. A family that is not installed is reported in fonts_missing and QGIS's default font is used.")] = None,

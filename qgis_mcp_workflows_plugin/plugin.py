@@ -131,6 +131,7 @@ from .compat import (
     TOOLBUTTON_ICON_ONLY,
     TOOLBUTTON_MENU_POPUP,
     font_families,
+    is_offscreen,
     register_system_fonts,
 )
 
@@ -3767,6 +3768,7 @@ class QgisMCPServer(QObject):
                     pass
 
     _PANEL_NODATA = "#e0e0e0"
+    _PANEL_MIN_MM = 10.0  # smallest panel side worth drawing; below it the layout overlaps
     _PT_MM = 0.3528  # one typographic point in millimetres
 
     def _panel_layer(self, zones, features, keys, values, ramp, scale, join_field,
@@ -3775,6 +3777,7 @@ class QgisMCPServer(QObject):
         uri = (f"Polygon?crs={zones.crs().authid() or 'EPSG:4326'}"
                f"&field={join_field}:string&field=_value:double&field=_color:string")
         mem = QgsVectorLayer(uri, f"_panel_{index}", "memory")
+        mem.setCrs(zones.crs())  # a CRS with no authid (custom .prj) would otherwise read as EPSG:4326
         vmin, vmax = float(scale["vmin"]), float(scale["vmax"])
         new = []
         for feature, key in zip(features, keys):
@@ -3912,11 +3915,10 @@ class QgisMCPServer(QObject):
                     f"sample layer keys: {keys[:5]}. Next: make the CSV's {join_field} values match the "
                     "layer's (as text: 13101 is not 13101.0)"
                 )
-            missing = []
-            if font_family and font_family not in font_families():
-                register_system_fonts()  # before any label: offscreen Qt starts with almost no fonts
-                if font_family not in font_families():
-                    missing = [font_family]
+            if is_offscreen():
+                # Before any label: headless Qt starts with one bundled font, no CJK glyphs.
+                register_system_fonts()
+            missing = [font_family] if font_family and font_family not in font_families() else []
             ramps = [self._resolve_color_ramp(g["palette"]) for g in groups]
             layers = []
             for i, panel in enumerate(panels):
@@ -3930,7 +3932,16 @@ class QgisMCPServer(QObject):
             if extent is not None:
                 rect = QgsRectangle(extent[0], extent[1], extent[2], extent[3])
             else:
-                rect = QgsRectangle(zones.extent())
+                # The zones drawn in any panel (hidden ones leave the frame), plus 2%.
+                rect = None
+                for layer in layers:
+                    if layer.featureCount() > 0:
+                        if rect is None:
+                            rect = QgsRectangle(layer.extent())
+                        else:
+                            rect.combineExtentWith(layer.extent())
+                if rect is None:
+                    rect = QgsRectangle(zones.extent())
                 dx, dy = rect.width() * 0.02, rect.height() * 0.02
                 rect = QgsRectangle(rect.xMinimum() - dx, rect.yMinimum() - dy,
                                     rect.xMaximum() + dx, rect.yMaximum() + dy)
@@ -3954,6 +3965,13 @@ class QgisMCPServer(QObject):
             grid_x0, grid_y0 = margin + label_w, margin + title_h
             cell_w = (float(width_mm) - grid_x0 - margin - right - gap * cols) / cols
             cell_h = (float(height_mm) - grid_y0 - margin - bottom - gap * rows) / rows
+            if min(cell_w, cell_h) < self._PANEL_MIN_MM:
+                raise Exception(
+                    f"PAGE_TOO_SMALL: {rows} x {cols} panels get {cell_w:.1f} x {cell_h:.1f} mm on a "
+                    f"{float(width_mm):g} x {float(height_mm):g} mm page after titles, labels and colour bars "
+                    f"(at least {self._PANEL_MIN_MM:g} mm needed). Next: raise width_mm or height_mm, use "
+                    "fewer rows or cols, or smaller font sizes"
+                )
 
             items, boxes = [], []
             for i, layer in enumerate(layers):
