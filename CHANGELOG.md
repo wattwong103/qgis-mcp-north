@@ -3,6 +3,31 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.16.0 — 2026-11-10 — panel grids with linked colour scales
+
+### Added
+
+- `qgis_compose_panels` (TASK-22): a rows × cols grid of map panels of one
+  polygon layer, one panel per CSV column, for camera-ready comparison figures
+  such as PFLOW's simulated-vs-observed `fig_spatial`. Panels in a
+  `share_scale` group (`row`, `column` or `all`) share one continuous colour
+  scale and one colour bar. A scale runs from `vmin` (default `min(0, data
+  min)`) to the `cap_percentile` percentile of the group's values; values
+  above it take the top colour, and the top tick reads `≥ x`. Ticks use a
+  Python format spec (`.1%`). Column titles, rotated row labels (line breaks
+  and `R²` work), font family and sizes, zone outline width and colour, and the
+  page size in mm are arguments, so the figure needs no editing afterwards.
+  PDF and SVG stay vector. The result reports every group's scale (vmin, vmax,
+  data max, capped), fonts that were not found, join counts, and the panel and
+  colour-bar boxes. Full mode only.
+  The default extent is the zones drawn in any panel, so hidden zones do not
+  shrink the map. Refused with a `Next:` hint: a CSV that is not UTF-8, a CSV
+  that repeats a key, and a page too small for its panels (`PAGE_TOO_SMALL`).
+- Headless QGIS now finds installed fonts. Qt's offscreen platform sees only
+  its bundled font (no Japanese glyphs), so `qgis_compose_panels` registers the
+  OS font folders once per headless process (0.13 s for 724 files on Windows).
+  QGIS Desktop is left alone.
+
 ## v1.15.4 — 2026-10-22 — output folders are created
 
 ### Fixed

@@ -116,6 +116,7 @@ from .compat import (
     GEOM_LINE,
     GEOM_POINT,
     GEOM_POLYGON,
+    GRADIENT_FROM_RAMP,
     IODEVICE_WRITEONLY,
     LAYER_RASTER,
     LAYER_VECTOR,
@@ -124,9 +125,14 @@ from .compat import (
     MSG_INFO,
     MSG_WARNING,
     PROCESSING_OPTIONAL,
+    PROP_FILL_COLOR,
     RASTER_STATS_ALL,
+    SHAPE_RECTANGLE,
     TOOLBUTTON_ICON_ONLY,
     TOOLBUTTON_MENU_POPUP,
+    font_families,
+    is_offscreen,
+    register_system_fonts,
 )
 
 
@@ -348,6 +354,7 @@ class QgisMCPServer(QObject):
                 "spatial_join": self.spatial_join,
                 "zonal_stats": self.zonal_stats,
                 "compose_layout": self.compose_layout,
+                "compose_panels": self.compose_panels,
                 # Phase 3 — Plugin development & system management
                 "get_message_log": self.get_message_log,
                 "list_plugins": self.list_plugins,
@@ -3752,6 +3759,314 @@ class QgisMCPServer(QObject):
                 "n_layers": len(layers),
                 "items": items,
                 "page_size_mm": [float(pw), float(ph)],
+            }
+        finally:
+            for tid in transient_ids:
+                try:
+                    project.removeMapLayer(tid)
+                except Exception:
+                    pass
+
+    _PANEL_NODATA = "#e0e0e0"
+    _PANEL_MIN_MM = 10.0  # smallest panel side worth drawing; below it the layout overlaps
+    _PT_MM = 0.3528  # one typographic point in millimetres
+
+    def _panel_layer(self, zones, features, keys, values, ramp, scale, join_field,
+                     unmatched, outline_width_mm, outline_color, index):
+        """A memory copy of the zones, each coloured for one panel (a `_color` field)."""
+        uri = (f"Polygon?crs={zones.crs().authid() or 'EPSG:4326'}"
+               f"&field={join_field}:string&field=_value:double&field=_color:string")
+        mem = QgsVectorLayer(uri, f"_panel_{index}", "memory")
+        mem.setCrs(zones.crs())  # a CRS with no authid (custom .prj) would otherwise read as EPSG:4326
+        vmin, vmax = float(scale["vmin"]), float(scale["vmax"])
+        new = []
+        for feature, key in zip(features, keys):
+            value = values.get(key)
+            if value is None and unmatched == "hide":
+                continue
+            if value is None:
+                color = self._PANEL_NODATA
+            else:
+                t = 0.0 if vmax == vmin else min(1.0, max(0.0, (float(value) - vmin) / (vmax - vmin)))
+                color = ramp.color(t).name()
+            f = QgsFeature(mem.fields())
+            f.setGeometry(QgsGeometry(feature.geometry()))
+            f.setAttributes([key, value, color])
+            new.append(f)
+        mem.dataProvider().addFeatures(new)
+        mem.updateExtents()
+        symbol = QgsFillSymbol.createSimple({
+            "color": "#000000", "outline_color": outline_color,
+            "outline_width": str(outline_width_mm), "outline_width_unit": "MM",
+        })
+        symbol.symbolLayer(0).setDataDefinedProperty(PROP_FILL_COLOR, QgsProperty.fromField("_color"))
+        mem.setRenderer(QgsSingleSymbolRenderer(symbol))
+        return mem
+
+    def _panel_label(self, layout, text, family, size_pt, box, rotate=False, halign="center"):
+        """A text item in ``box`` (x, y, w, h mm); ``rotate`` turns it to read bottom to top."""
+        from qgis.core import QgsTextFormat
+        from qgis.PyQt.QtCore import Qt
+
+        mm = QgsUnitTypes.LayoutMillimeters
+        lbl = QgsLayoutItemLabel(layout)
+        lbl.setText(str(text))
+        fmt = QgsTextFormat()
+        font = fmt.font()
+        if family:
+            font.setFamily(family)
+        fmt.setFont(font)
+        fmt.setSize(float(size_pt))
+        lbl.setTextFormat(fmt)
+        lbl.setHAlign({"center": Qt.AlignmentFlag.AlignHCenter, "left": Qt.AlignmentFlag.AlignLeft,
+                       "right": Qt.AlignmentFlag.AlignRight}[halign])
+        lbl.setVAlign(Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayoutItem(lbl)
+        x, y, w, h = box
+        if rotate:  # lay it out sideways, then turn it about its centre
+            cx, cy = x + w / 2.0, y + h / 2.0
+            lbl.attemptResize(QgsLayoutSize(h, w, mm))
+            lbl.attemptMove(QgsLayoutPoint(cx - h / 2.0, cy - w / 2.0, mm))
+            lbl.setItemRotation(-90, True)
+        else:
+            lbl.attemptResize(QgsLayoutSize(w, h, mm))
+            lbl.attemptMove(QgsLayoutPoint(x, y, mm))
+        return lbl
+
+    def _panel_colorbar(self, layout, ramp, box, vertical):
+        """A rectangle filled with ``ramp``: bottom to top when vertical, else left to right."""
+        from qgis.core import QgsGradientFillSymbolLayer, QgsLayoutItemShape
+        from qgis.PyQt.QtCore import QPointF
+
+        mm = QgsUnitTypes.LayoutMillimeters
+        gradient = QgsGradientFillSymbolLayer()
+        gradient.setGradientColorType(GRADIENT_FROM_RAMP)
+        gradient.setColorRamp(ramp.clone())
+        if vertical:
+            gradient.setReferencePoint1(QPointF(0.5, 1.0))
+            gradient.setReferencePoint2(QPointF(0.5, 0.0))
+        else:
+            gradient.setReferencePoint1(QPointF(0.0, 0.5))
+            gradient.setReferencePoint2(QPointF(1.0, 0.5))
+        symbol = QgsFillSymbol([gradient])
+        border = QgsFillSymbol.createSimple({"style": "no", "outline_color": "#666666", "outline_width": "0.1"})
+        symbol.appendSymbolLayer(border.symbolLayer(0).clone())
+        shape = QgsLayoutItemShape(layout)
+        shape.setShapeType(SHAPE_RECTANGLE)
+        shape.setSymbol(symbol)
+        layout.addLayoutItem(shape)
+        shape.attemptResize(QgsLayoutSize(box[2], box[3], mm))
+        shape.attemptMove(QgsLayoutPoint(box[0], box[1], mm))
+        return shape
+
+    def compose_panels(
+        self,
+        zones_path,
+        join_field,
+        rows,
+        cols,
+        panels,
+        groups,
+        output_path,
+        column_titles=None,
+        row_labels=None,
+        unmatched="hide",
+        colorbar=True,
+        colorbar_position="right",
+        extent=None,
+        width_mm=160.0,
+        height_mm=140.0,
+        font_family=None,
+        title_size_pt=9.0,
+        label_size_pt=9.0,
+        tick_size_pt=7.0,
+        outline_width_mm=0.05,
+        outline_color="#cccccc",
+        dpi=300,
+        **kwargs,
+    ):
+        """A print layout of rows x cols map panels on linked colour scales (TASK-22).
+
+        Panels are row-major; ``panels[i] = {"values": {key: value}, "group": g}``.
+        Every scale is decided by the caller (``groups[g]``: palette, vmin, vmax,
+        ticks, label); this handler colours, lays out and exports.
+        """
+        project = QgsProject.instance()
+        transient_ids = []
+        try:
+            zones = QgsVectorLayer(zones_path, "_panels_zones", "ogr")
+            if not zones.isValid():
+                raise Exception(f"Layer not found or invalid: {zones_path}. Next: check zones_path")
+            if zones.geometryType() != GEOM_POLYGON:
+                raise Exception("compose_panels needs polygon zones. Next: pass a polygon layer as zones_path")
+            names = [f.name() for f in zones.fields()]
+            if join_field not in names:
+                raise Exception(f"Field {join_field!r} not found on zones; available: {names}. "
+                                "Next: pass join_field as one of those")
+            features = list(zones.getFeatures())
+            keys = ["" if f.attribute(join_field) is None else str(f.attribute(join_field)) for f in features]
+            valued = set()
+            for panel in panels:
+                valued.update(panel["values"].keys())
+            n_matched = sum(1 for k in keys if k in valued)
+            if n_matched == 0:
+                raise Exception(
+                    f"JOIN_NO_MATCH on {join_field}: 0 matches. Sample CSV keys: {sorted(valued)[:5]}; "
+                    f"sample layer keys: {keys[:5]}. Next: make the CSV's {join_field} values match the "
+                    "layer's (as text: 13101 is not 13101.0)"
+                )
+            if is_offscreen():
+                # Before any label: headless Qt starts with one bundled font, no CJK glyphs.
+                register_system_fonts()
+            missing = [font_family] if font_family and font_family not in font_families() else []
+            ramps = [self._resolve_color_ramp(g["palette"]) for g in groups]
+            layers = []
+            for i, panel in enumerate(panels):
+                g = int(panel["group"])
+                layer = self._panel_layer(zones, features, keys, panel["values"], ramps[g], groups[g],
+                                          join_field, unmatched, outline_width_mm, outline_color, i)
+                project.addMapLayer(layer, False)
+                transient_ids.append(layer.id())
+                layers.append(layer)
+
+            if extent is not None:
+                rect = QgsRectangle(extent[0], extent[1], extent[2], extent[3])
+            else:
+                # The zones drawn in any panel (hidden ones leave the frame), plus 2%.
+                rect = None
+                for layer in layers:
+                    if layer.featureCount() > 0:
+                        if rect is None:
+                            rect = QgsRectangle(layer.extent())
+                        else:
+                            rect.combineExtentWith(layer.extent())
+                if rect is None:
+                    rect = QgsRectangle(zones.extent())
+                dx, dy = rect.width() * 0.02, rect.height() * 0.02
+                rect = QgsRectangle(rect.xMinimum() - dx, rect.yMinimum() - dy,
+                                    rect.xMaximum() + dx, rect.yMaximum() + dy)
+
+            mm = QgsUnitTypes.LayoutMillimeters
+            layout = QgsPrintLayout(project)
+            layout.initializeDefaults()
+            layout.pageCollection().page(0).setPageSize(QgsLayoutSize(float(width_mm), float(height_mm), mm))
+
+            margin, gap = 2.0, 2.0
+            title_h = float(title_size_pt) * self._PT_MM * 1.8 if column_titles else 0.0
+            lines = max((str(t).count("\n") + 1 for t in (row_labels or [])), default=0)
+            label_w = float(label_size_pt) * self._PT_MM * 1.5 * lines + 1.0 if row_labels else 0.0
+            tick_chars = max((len(str(t[1])) for g in groups for t in g["ticks"]), default=1)
+            tick_w = float(tick_size_pt) * self._PT_MM * 0.62 * tick_chars + 1.5
+            tick_h = float(tick_size_pt) * self._PT_MM * 1.6
+            labelled = any(g.get("label") for g in groups)
+            right = 3.5 + 1.0 + tick_w if colorbar and colorbar_position == "right" else 0.0
+            bottom = (3.5 + 1.0 + tick_h * (2 if labelled else 1)
+                      if colorbar and colorbar_position == "bottom" else 0.0)
+            grid_x0, grid_y0 = margin + label_w, margin + title_h
+            cell_w = (float(width_mm) - grid_x0 - margin - right - gap * cols) / cols
+            cell_h = (float(height_mm) - grid_y0 - margin - bottom - gap * rows) / rows
+            if min(cell_w, cell_h) < self._PANEL_MIN_MM:
+                raise Exception(
+                    f"PAGE_TOO_SMALL: {rows} x {cols} panels get {cell_w:.1f} x {cell_h:.1f} mm on a "
+                    f"{float(width_mm):g} x {float(height_mm):g} mm page after titles, labels and colour bars "
+                    f"(at least {self._PANEL_MIN_MM:g} mm needed). Next: raise width_mm or height_mm, use "
+                    "fewer rows or cols, or smaller font sizes"
+                )
+
+            items, boxes = [], []
+            for i, layer in enumerate(layers):
+                r, c = divmod(i, cols)
+                box = [grid_x0 + c * (cell_w + gap), grid_y0 + r * (cell_h + gap), cell_w, cell_h]
+                m = QgsLayoutItemMap(layout)
+                layout.addLayoutItem(m)
+                m.attemptMove(QgsLayoutPoint(box[0], box[1], mm))
+                m.attemptResize(QgsLayoutSize(box[2], box[3], mm))
+                m.setLayers([layer])
+                m.setKeepLayerSet(True)
+                m.setCrs(zones.crs())
+                m.zoomToExtent(rect)
+                items.append(f"panel:{i}")
+                boxes.append([round(v, 3) for v in box])
+
+            for c, text in enumerate(column_titles or []):
+                self._panel_label(layout, text, font_family, title_size_pt,
+                                  (grid_x0 + c * (cell_w + gap), margin, cell_w, title_h))
+                items.append(f"title:{c}")
+            for r, text in enumerate(row_labels or []):
+                self._panel_label(layout, text, font_family, label_size_pt,
+                                  (margin, grid_y0 + r * (cell_h + gap), label_w, cell_h), rotate=True)
+                items.append(f"row_label:{r}")
+
+            bar_boxes = []
+            if colorbar:
+                for g, group in enumerate(groups):
+                    members = [i for i, p in enumerate(panels) if int(p["group"]) == g]
+                    member_boxes = [boxes[i] for i in members]
+                    # Inset so the end tick labels (and the bar label) never meet a neighbouring bar.
+                    if colorbar_position == "bottom":
+                        x0 = min(b[0] for b in member_boxes) + tick_w / 2.0
+                        x1 = max(b[0] + b[2] for b in member_boxes) - tick_w / 2.0
+                        y = max(b[1] + b[3] for b in member_boxes) + gap / 2.0
+                        bar = [x0, y, x1 - x0, 3.5]
+                    else:
+                        top = tick_h / 2.0 + (tick_h + 0.5 if group.get("label") else 0.0)
+                        y0 = min(b[1] for b in member_boxes) + top
+                        y1 = max(b[1] + b[3] for b in member_boxes) - tick_h / 2.0
+                        x = max(b[0] + b[2] for b in member_boxes) + gap / 2.0
+                        bar = [x, y0, 3.5, y1 - y0]
+                    self._panel_colorbar(layout, ramps[g], bar, colorbar_position != "bottom")
+                    items.append(f"colorbar:{g}")
+                    bar_boxes.append([round(v, 3) for v in bar])
+                    for position, text in group["ticks"]:
+                        if colorbar_position == "bottom":
+                            tx = bar[0] + float(position) * bar[2]
+                            tbox = (tx - tick_w / 2.0, bar[1] + bar[3] + 0.5, tick_w, tick_h)
+                            self._panel_label(layout, text, font_family, tick_size_pt, tbox)
+                        else:
+                            ty = bar[1] + bar[3] - float(position) * bar[3]
+                            tbox = (bar[0] + bar[2] + 1.0, ty - tick_h / 2.0, tick_w, tick_h)
+                            self._panel_label(layout, text, font_family, tick_size_pt, tbox, halign="left")
+                        items.append(f"tick:{g}")
+                    if group.get("label"):
+                        if colorbar_position == "bottom":
+                            lbox = (bar[0], bar[1] + bar[3] + tick_h, bar[2], tick_h)
+                            self._panel_label(layout, group["label"], font_family, tick_size_pt, lbox)
+                        else:
+                            lbox = (bar[0], bar[1] - tick_h - 0.5, bar[2] + 1.0 + tick_w, tick_h)
+                            self._panel_label(layout, group["label"], font_family, tick_size_pt, lbox, halign="left")
+                        items.append(f"cblabel:{g}")
+
+            out = os.path.abspath(output_path)
+            parent = os.path.dirname(out)
+            if parent and not os.path.isdir(parent):
+                os.makedirs(parent, exist_ok=True)
+            fmt = out.rsplit(".", 1)[-1].lower() if "." in out else "png"
+            exporter = QgsLayoutExporter(layout)
+            if fmt == "pdf":
+                settings = QgsLayoutExporter.PdfExportSettings()
+                result = exporter.exportToPdf(out, settings)
+            elif fmt == "svg":
+                settings = QgsLayoutExporter.SvgExportSettings()
+                result = exporter.exportToSvg(out, settings)
+            else:
+                settings = QgsLayoutExporter.ImageExportSettings()
+                settings.dpi = int(dpi)
+                result = exporter.exportToImage(out, settings)
+            if result != LAYOUT_SUCCESS:
+                raise Exception(f"compose_panels export failed with code {result}. "
+                                "Next: check the folder is writable and the file is not open elsewhere")
+            return {
+                "output_path": out,
+                "format": fmt,
+                "n_panels": len(layers),
+                "n_layers": len(layers),
+                "items": items,
+                "page_size_mm": [float(width_mm), float(height_mm)],
+                "fonts_missing": missing,
+                "n_matched": n_matched,
+                "n_unmatched": len(keys) - n_matched,
+                "panel_boxes_mm": boxes,
+                "colorbar_boxes_mm": bar_boxes,
             }
         finally:
             for tid in transient_ids:

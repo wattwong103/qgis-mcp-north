@@ -46,7 +46,7 @@ The headless runner injects a stub `iface` that no-ops UI calls. Every command
 handler that doesn't touch the canvas / layer-tree-view works in both transports
 for free — a v0.4 architectural promise that v0.5+ tools inherit.
 
-## Tools (27 standalone — 26 workflow + `qgis_eval`; 5 grouped in compound mode)
+## Tools (28 standalone — 27 workflow + `qgis_eval`; 5 grouped in compound mode)
 
 | Tool | Purpose |
 |---|---|
@@ -69,6 +69,7 @@ for free — a v0.4 architectural promise that v0.5+ tools inherit.
 | `qgis_render_trajectory` | Lines/points/heatmap from CSV/GPX. Stride sampling; optional `movingpandas` speed bins |
 | `qgis_render_od_flows` | Origin-destination arcs over a zones layer, data-defined widths |
 | `qgis_export_layout` | Print-composer → PNG/PDF/SVG |
+| `qgis_compose_panels` | Grid of map panels on linked colour scales with colour bars, set fonts and line weights → PDF/SVG/PNG |
 | `qgis_batch_render` | Fan-out per attribute value; manifest + per-value errors |
 | `qgis_figures_to_pptx` | Assemble PNGs into a PowerPoint deck (defaults to Sekimoto-lab blank) |
 | `qgis_export_session` | Write a replay script that re-makes figures from their `.provenance.json` sidecars |

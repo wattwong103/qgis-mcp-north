@@ -16,6 +16,7 @@ import contextlib
 import datetime as _dt
 import decimal
 import logging
+import math
 import os
 import sys
 from logging.handlers import RotatingFileHandler
@@ -582,6 +583,25 @@ class ComposeLayoutResult(BaseModel):
     n_layers: int
     items: list[str]
     page_size_mm: list[float]
+
+
+class PanelGroup(BaseModel):
+    palette: str
+    vmin: float
+    vmax: float
+    data_max: Annotated[float, Field(description="The group's largest value; above vmax when the scale is capped.")]
+    capped: bool
+    panels: Annotated[list[int], Field(description="Row-major indices of the panels on this scale.")]
+
+
+class PanelsResult(ComposeLayoutResult):
+    n_panels: int
+    groups: list[PanelGroup]
+    fonts_missing: Annotated[list[str], Field(description="Requested font families not installed; QGIS's default font was used.")]
+    n_matched: int
+    n_unmatched: int
+    panel_boxes_mm: Annotated[list[list[float]], Field(description="Each panel's [x, y, width, height] on the page, mm from the top left.")]
+    colorbar_boxes_mm: Annotated[list[list[float]], Field(description="Each colour bar's [x, y, width, height], one per group.")]
 
 
 class DiagramMapResult(RenderResult):
@@ -2798,6 +2818,198 @@ def qgis_compose_layout(
         n_layers=result["n_layers"],
         items=result["items"],
         page_size_mm=result["page_size_mm"],
+    )
+
+
+_PANEL_FORMATS = (".png", ".pdf", ".svg")
+
+
+def _refuse_bad_panel_arguments(*, value_fields: list[str], rows: int, cols: int, n_groups: int,
+                                column_titles: list[str] | None, row_labels: list[str] | None,
+                                palettes: list[str], colorbar_labels: list[str] | None, tick_format: str,
+                                n_ticks: int, cap_percentile: float, extent: list[float] | None,
+                                output_path: str) -> None:
+    """Raise InvalidArgumentError for any argument compose_panels cannot draw, before reading the CSV."""
+    if rows < 1 or cols < 1 or len(value_fields) != rows * cols:
+        raise InvalidArgumentError(
+            f"value_fields has {len(value_fields)} columns but a {rows} x {cols} grid needs {rows * cols} "
+            "(rows and cols at least 1; panels fill row by row)."
+        )
+    for name, given, wanted in (("row_labels", row_labels, rows), ("column_titles", column_titles, cols)):
+        if given is not None and len(given) != wanted:
+            raise InvalidArgumentError(f"{name} has {len(given)} entries; the grid has {wanted}.")
+    for name, given in (("palettes", palettes), ("colorbar_labels", colorbar_labels)):
+        if given is not None and len(given) not in (1, n_groups):
+            raise InvalidArgumentError(
+                f"{name} has {len(given)} entries; give 1 (used for every scale) or {n_groups} (one per scale group)."
+            )
+    if n_ticks < 2:
+        raise InvalidArgumentError(f"n_ticks={n_ticks}: a colour bar needs at least its two end ticks.")
+    try:
+        format(1.0, tick_format)
+    except (TypeError, ValueError) as err:
+        raise InvalidArgumentError(
+            f"tick_format={tick_format!r} is not a format spec ({err}); use one like '.3g', '.1%' or ',.0f', "
+            "without braces."
+        ) from None
+    if not 0 < cap_percentile <= 100:
+        raise InvalidArgumentError(f"cap_percentile={cap_percentile} must be above 0 and at most 100 (the maximum).")
+    if extent is not None and len(extent) != 4:
+        raise InvalidArgumentError(f"extent has {len(extent)} numbers; give [xmin, ymin, xmax, ymax].")
+    if os.path.splitext(output_path)[1].lower() not in _PANEL_FORMATS:
+        raise InvalidArgumentError(f"output_path {output_path!r} must end in .png, .pdf or .svg.")
+
+
+def _read_panel_columns(csv_path: str, join_field: str, value_fields: list[str]) -> list[dict[str, float]]:
+    """One ``{key: value}`` dict per field. Blank, non-numeric and non-finite cells are left out.
+
+    A key on two rows is refused: keeping either row would draw a map the CSV does not say.
+    """
+    import csv as _csv
+
+    from qgis_mcp_workflows.errors import FieldNotFoundError
+
+    columns: list[dict[str, float]] = [{} for _ in value_fields]
+    seen: set[str] = set()
+    repeated: list[str] = []
+    n_skipped = 0
+    try:
+        with open(csv_path, encoding="utf-8-sig", newline="") as f:
+            reader = _csv.DictReader(f)
+            csv_columns = reader.fieldnames or []
+            for field in (join_field, *value_fields):
+                if field not in csv_columns:
+                    raise FieldNotFoundError(field, csv_columns)
+            for row in reader:
+                key = str(row[join_field])
+                if key in seen:
+                    repeated.append(key)
+                seen.add(key)
+                for values, field in zip(columns, value_fields, strict=True):
+                    try:
+                        value = float(row[field])
+                    except (TypeError, ValueError):
+                        value = math.nan
+                    if math.isfinite(value):
+                        values[key] = value
+                    else:
+                        n_skipped += 1
+    except UnicodeDecodeError as err:
+        raise InvalidArgumentError(
+            f"value_csv {csv_path!r} is not UTF-8 text ({err.reason} at byte {err.start}).",
+            next_step="re-save it as UTF-8 (pandas: to_csv(path, encoding='utf-8')), then retry",
+        ) from None
+    if repeated:
+        raise InvalidArgumentError(
+            f"value_csv repeats {join_field} values, e.g. {sorted(set(repeated))[:5]}; "
+            "panels need one row per zone.",
+            next_step="aggregate the CSV to one row per zone, then retry",
+        )
+    if n_skipped:
+        logger.warning("compose_panels: left out %d blank, non-numeric or non-finite cells of %s",
+                       n_skipped, csv_path)
+    return columns
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_compose_panels(
+    zones_path: Annotated[str, Field(description="Absolute path to the polygon layer every panel draws (shp, gpkg, geojson), e.g. the 23 Tokyo wards.")],
+    value_csv: Annotated[str, Field(description="CSV with the join key and one numeric column per panel.")],
+    value_fields: Annotated[list[str], Field(description="CSV columns, one per panel, filled row by row: [row1col1, row1col2, row2col1, ...]. Needs rows x cols entries.")],
+    rows: Annotated[int, Field(description="Panel rows.", ge=1, le=8)],
+    cols: Annotated[int, Field(description="Panel columns.", ge=1, le=8)],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .png, .pdf or .svg (PDF and SVG stay vector).")],
+    join_field: Annotated[str, Field(description="Key shared by the zones layer and the CSV, compared as text (13101 is not 13101.0).")] = "zone_id",
+    column_titles: Annotated[list[str] | None, Field(description="One title above each column, e.g. ['Simulated', 'Observed (PT)'].")] = None,
+    row_labels: Annotated[list[str] | None, Field(description="One label left of each row, rotated; may hold a line break, e.g. 'Origins\\nR² = 0.79'.")] = None,
+    share_scale: Annotated[Literal["row", "column", "all"], Field(description='Panels that share one colour scale and bar: "row" (bar right of each row), "column" (bar under each column) or "all" (one bar).')] = "row",
+    palettes: Annotated[list[str] | None, Field(description='Palette per scale group, ColorBrewer or scientific names (e.g. ["Reds", "Blues"]); one name is used for every group. Default ["YlOrRd"].')] = None,
+    vmin: Annotated[float | None, Field(description="Bottom of every scale. Default: min(0, the group's smallest value).")] = None,
+    cap_percentile: Annotated[float, Field(description="Top of each scale as a percentile of its group's values (linear interpolation). Values above it take the top colour and the top tick reads '≥ x'. 100 is the maximum.", gt=0.0, le=100.0)] = 100.0,
+    colorbar: Annotated[bool, Field(description="Draw one colour bar per scale group.")] = True,
+    colorbar_labels: Annotated[list[str] | None, Field(description="Label above each colour bar; one label is used for every bar.")] = None,
+    tick_format: Annotated[str, Field(description="Python format spec for tick labels, applied as format(value, spec): '.3g', '.1%', ',.0f'. Not a '{}' template.")] = ".3g",
+    n_ticks: Annotated[int, Field(description="Evenly spaced ticks per colour bar, both ends included.", ge=2, le=11)] = 5,
+    unmatched: Annotated[Literal["hide", "nodata"], Field(description='Zones without a value in a panel: "hide" (not drawn) or "nodata" (light grey, outside the scale).')] = "hide",
+    extent: Annotated[list[float] | None, Field(description="Map extent [xmin, ymin, xmax, ymax] in the zones' CRS, shared by every panel. Default: the zones drawn in any panel (hidden ones excluded) plus 2%.")] = None,
+    width_mm: Annotated[float, Field(description="Page width in mm (160 suits a two-column journal figure).", gt=20.0, le=1000.0)] = 160.0,
+    height_mm: Annotated[float, Field(description="Page height in mm.", gt=20.0, le=1000.0)] = 140.0,
+    font_family: Annotated[str | None, Field(description="Font family for every label, e.g. 'Arial'. A family that is not installed is reported in fonts_missing and QGIS's default font is used.")] = None,
+    title_size_pt: Annotated[float, Field(description="Column title size in points.", gt=0.0, le=72.0)] = 9.0,
+    label_size_pt: Annotated[float, Field(description="Row label and colour-bar label size in points.", gt=0.0, le=72.0)] = 9.0,
+    tick_size_pt: Annotated[float, Field(description="Tick label size in points.", gt=0.0, le=72.0)] = 7.0,
+    outline_width_mm: Annotated[float, Field(description="Zone outline width in mm (QGIS draws 0 as a one-pixel hairline).", ge=0.0, le=5.0)] = 0.05,
+    outline_color: Annotated[str, Field(description="Zone outline colour, e.g. '#cccccc'.")] = "#cccccc",
+    dpi: Annotated[int, Field(description="Export DPI for PNG.", ge=72, le=600)] = 300,
+) -> PanelsResult:
+    """Compose a grid of map panels on linked colour scales, with colour bars. Figure tool.
+
+    When to use: a camera-ready comparison figure, e.g. simulated vs observed
+    trip shares (columns) for origins and destinations (rows). Every panel draws
+    the same zones within one shared extent. Panels in a ``share_scale`` group use
+    one continuous colour scale and one colour bar. The scale runs from ``vmin``
+    to the ``cap_percentile`` percentile of the group's values. Fonts, sizes and
+    outline weight are set here, so the figure needs no editing afterwards.
+
+    Returns: ``PanelsResult`` with the output path, each group's scale (vmin,
+    vmax, data max, capped), fonts that were not found, join counts, and the
+    panel and colour-bar boxes in mm.
+
+    Chains into: ``qgis_figures_to_pptx``.
+    """
+    from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.panels import group_scales, panel_group, ticks
+
+    n_groups = {"row": rows, "column": cols}.get(share_scale, 1)
+    palettes = list(palettes) if palettes is not None else ["YlOrRd"]
+    _refuse_bad_panel_arguments(
+        value_fields=value_fields, rows=rows, cols=cols, n_groups=n_groups, column_titles=column_titles,
+        row_labels=row_labels, palettes=palettes, colorbar_labels=colorbar_labels, tick_format=tick_format,
+        n_ticks=n_ticks, cap_percentile=cap_percentile, extent=extent, output_path=output_path,
+    )
+    abs_csv = os.path.abspath(value_csv)
+    _require_file("value_csv", abs_csv)
+    columns = _read_panel_columns(abs_csv, join_field, value_fields)
+    scales = group_scales([list(c.values()) for c in columns], rows, cols, share_scale, vmin, cap_percentile)
+    for g, scale in enumerate(scales):
+        if scale.vmax < scale.vmin:
+            where = "the shared scale" if share_scale == "all" else f"{share_scale} {g}"
+            raise InvalidArgumentError(
+                f"vmin={vmin:g} is above the top of {where} ({scale.vmax:g}), so its colours would run backwards. "
+                "Lower vmin, or leave it unset for min(0, data min)."
+            )
+
+    def one_per_group(options: list[str], g: int) -> str:
+        return options[g] if len(options) > 1 else options[0]
+
+    groups = [{"palette": one_per_group(palettes, g), "vmin": s.vmin, "vmax": s.vmax,
+               "ticks": [list(t) for t in ticks(s, n_ticks, tick_format)],
+               "label": one_per_group(colorbar_labels, g) if colorbar_labels else None}
+              for g, s in enumerate(scales)]
+    params = {
+        "zones_path": os.path.abspath(zones_path), "join_field": join_field, "rows": rows, "cols": cols,
+        "panels": [{"values": columns[i], "group": panel_group(i, rows, cols, share_scale)}
+                   for i in range(rows * cols)],
+        "groups": groups, "output_path": os.path.abspath(output_path),
+        "column_titles": column_titles, "row_labels": row_labels, "unmatched": unmatched,
+        "colorbar": colorbar, "colorbar_position": "bottom" if share_scale == "column" else "right",
+        "extent": list(extent) if extent is not None else None, "width_mm": width_mm, "height_mm": height_mm,
+        "font_family": font_family, "title_size_pt": title_size_pt, "label_size_pt": label_size_pt,
+        "tick_size_pt": tick_size_pt, "outline_width_mm": outline_width_mm, "outline_color": outline_color,
+        "dpi": dpi,
+    }
+    result = get_executor().dispatch("compose_panels", params, timeout=180)
+    return PanelsResult(
+        output_path=result["output_path"], format=result["format"], n_layers=result["n_layers"],
+        items=result["items"], page_size_mm=result["page_size_mm"], n_panels=result["n_panels"],
+        groups=[PanelGroup(palette=g["palette"], vmin=s.vmin, vmax=s.vmax, data_max=s.data_max,
+                           capped=s.capped, panels=list(s.panels)) for g, s in zip(groups, scales, strict=True)],
+        fonts_missing=result["fonts_missing"], n_matched=result["n_matched"], n_unmatched=result["n_unmatched"],
+        panel_boxes_mm=result["panel_boxes_mm"], colorbar_boxes_mm=result["colorbar_boxes_mm"],
     )
 
 

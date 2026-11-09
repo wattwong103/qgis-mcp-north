@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.15.4**, 2026-10-22
+Status: **v1.16.0**, 2026-11-10
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -12,7 +12,7 @@ This document is the spec. Implementation follows. If a tool's signature, respon
 
 Three problems with upstream that the fork solves:
 
-**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **26 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
+**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **27 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
 
 **No headless mode.** Upstream requires QGIS Desktop running with the plugin enabled. That's incompatible with scheduled overnight runs, CI, or any automation. We add a **PyQGIS-subprocess transport** alongside the existing plugin transport. Same tools, two backends, selected by config or CLI flag.
 
@@ -96,7 +96,7 @@ Upstream's plugin and server stay untouched. If the user installs both, Claude D
 
 ---
 
-## 4. Tool surface (26 workflow + 1 escape hatch)
+## 4. Tool surface (27 workflow + 1 escape hatch)
 
 For each tool: signature, what it does, response shape, and the typical chain.
 
@@ -541,6 +541,70 @@ database cursor, an API — renders through the same path.
 
 ---
 
+### Panel grids with linked scales (v1.16)
+
+`qgis_compose_panels(zones_path, value_csv, value_fields, rows, cols, output_path,
+join_field="zone_id", column_titles=None, row_labels=None, share_scale="row",
+palettes=None, vmin=None, cap_percentile=100.0, colorbar=True, colorbar_labels=None,
+tick_format=".3g", n_ticks=5, unmatched="hide", extent=None, width_mm=160.0,
+height_mm=140.0, font_family=None, title_size_pt=9.0, label_size_pt=9.0,
+tick_size_pt=7.0, outline_width_mm=0.05, outline_color="#cccccc", dpi=300) → PanelsResult`
+draws a rows × cols grid of one polygon layer: one panel per CSV column, row by
+row, all within one extent so simulated and observed panels frame identically.
+That extent defaults to the zones drawn in any panel plus 2%: with
+`unmatched="hide"`, a 23-ward CSV over a larger szone layer frames the wards,
+as the matplotlib figure does.
+It exists for camera-ready comparison figures (PFLOW's `fig_spatial`: simulated
+vs observed trip shares, origins and destinations) that `qgis_compose_layout`'s
+single panel and classed legend cannot make.
+
+**The server decides every number; the plugin only draws.** `panels.py` (pure,
+stdlib) groups panels by `share_scale` (`row`, `column` or `all`) and gives each
+group one scale. The scale runs from `vmin` (default `min(0, data min)`) to the
+`cap_percentile` percentile of the group's values, with numpy's linear
+interpolation. Each zone is coloured continuously at `(v - vmin) / (vmax - vmin)`,
+clipped to [0, 1], like matplotlib's `Normalize`, through the shared
+`_resolve_color_ramp`. Values above a capped top take the top colour, and that
+tick reads `≥ x`. Tick labels are `format(value, tick_format)`, a format *spec*,
+never a template. The result reports each group's vmin, vmax, data max and
+`capped`, so the figure cannot silently differ from the numbers.
+
+**Layout.** One colour bar per group, a `QgsGradientFillSymbolLayer` on a layout
+shape drawn from the same ramp: right of each row (`row`, `all`) or under each
+column (`column`). Bars are inset by half a tick label at each end so stacked
+bars' labels never collide. Column titles sit above; row labels are rotated
+labels on the left and may hold line breaks (`Origins\nR² = 0.79`). Fonts, sizes
+(pt), the zone outline (width in mm, colour) and the page (mm) are arguments.
+PDF and SVG stay vector.
+
+**Fonts headless.** Qt's offscreen platform sees only its bundled font (Open
+Sans on Windows, with no Japanese glyphs), so `font_family="Arial"` could never
+resolve headless, and `港区` in the default font drew as empty boxes. Under the
+offscreen platform, `compat.register_system_fonts()` registers the OS font
+folders once per process before any label (724 files, 0.13 s on Windows); QGIS
+Desktop already has them and is left alone. A family still missing is listed in
+`fonts_missing`, and QGIS's default font draws instead.
+
+**Refused before QGIS runs:** a `value_fields` length other than rows × cols;
+`row_labels`, `column_titles` or `extent` of the wrong length; `palettes` or
+`colorbar_labels` with neither 1 nor one entry per group; `n_ticks < 2`; a
+`tick_format` that `format()` rejects; `cap_percentile` outside (0, 100]; an
+output that is not .png, .pdf or .svg; a `vmin` above a group's top, which
+would run its colours backwards; a CSV that is not UTF-8 (CP932 is common for
+Japanese data); and a CSV that repeats a key, since keeping either row would
+draw a map the CSV does not say. Blank, non-numeric and non-finite CSV cells are
+left out of the panel and its scale. A layer with no key in any panel fails with
+`JOIN_NO_MATCH` and samples of both sides' keys. A grid whose panels would be
+under 10 mm after titles, labels and bars fails with `PAGE_TOO_SMALL`. Zones
+without a value in a panel are hidden, or drawn light grey
+(`unmatched="nodata"`). Panel layers take the zones' CRS object itself, so a
+custom `.prj` with no EPSG code stays in place.
+
+Full mode only, like `qgis_export_session`. Not in scope: mesh grids (next),
+values computed from points, difference maps, inset panels, per-panel extents.
+
+---
+
 ## 5. Cross-cutting
 
 **Errors.** Every tool raises a typed exception class that maps to an MCP error response with a `next_action` hint. Examples:
@@ -614,6 +678,8 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 **v1.14 — GUFM DRM routing.** ✅ Shipped 2026-09-12. `qgis_route_on_network` snaps stop sequences onto GUFM `drm_inner_tokyo.tsv` / `rail_inner_tokyo.tsv` (or a line GeoJSON/GPKG) and writes a routed CSV for `qgis_render_trajectory`. MCP-side networkx; TSV stays in the GUFM tree (57 MB, not copied).
 
 **v1.15 — figure provenance and upstream review fixes.** ✅ Shipped 2026-10-20. Every file a tool writes gets a `.provenance.json` sidecar (§5); `qgis_export_session` turns sidecars into a replay script that checks its source inputs, replays state-reading figures from the session ledger, and runs recorded `qgis_eval` code only with `--allow-eval`. Project and shapefile datasources are fingerprinted; `qgis_render_from_duckdb` reaches only tables stored in the database. Also: the upstream-review tool fixes (atlas export, `classes`, batch render, unavailable-layer dialogs), typed errors that survive mcp 2.x, and the macOS QGIS 4 headless launcher.
+
+**v1.16 — panel grids.** ✅ Built 2026-11-10 (TASK-22). `qgis_compose_panels` composes a rows × cols grid of one polygon layer on linked colour scales with colour bars, for camera-ready comparison figures (PFLOW `fig_spatial`); scales are computed server-side in `panels.py`, fonts and line weights are arguments, and headless QGIS registers the OS fonts when a requested family is missing. Next: mesh-grid polygons.
 
 ---
 
