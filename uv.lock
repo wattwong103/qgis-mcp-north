@@ -1313,7 +1313,7 @@ wheels = [
 
 [[package]]
 name = "qgis-mcp-workflows"
-version = "1.16.0"
+version = "1.16.2"
 source = { editable = "." }
 dependencies = [
     { name = "mcp", extra = ["cli"] },

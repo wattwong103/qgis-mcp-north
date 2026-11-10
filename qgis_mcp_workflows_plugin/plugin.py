@@ -355,6 +355,7 @@ class QgisMCPServer(QObject):
                 "zonal_stats": self.zonal_stats,
                 "compose_layout": self.compose_layout,
                 "compose_panels": self.compose_panels,
+                "get_field_values": self.get_field_values,
                 # Phase 3 — Plugin development & system management
                 "get_message_log": self.get_message_log,
                 "list_plugins": self.list_plugins,
@@ -3859,6 +3860,33 @@ class QgisMCPServer(QObject):
         shape.attemptMove(QgsLayoutPoint(box[0], box[1], mm))
         return shape
 
+    def _open_keyed_layer(self, path, field):
+        """The vector layer at ``path``, checked to be valid and to carry ``field``."""
+        layer = QgsVectorLayer(path, "_keyed_zones", "ogr")
+        if not layer.isValid():
+            raise Exception(f"Layer not found or invalid: {path}. Next: check zones_path")
+        names = [f.name() for f in layer.fields()]
+        if field not in names:
+            raise Exception(f"Field {field!r} not found on zones; available: {names}. "
+                            "Next: pass join_field as one of those")
+        return layer
+
+    def _join_keys(self, features, field):
+        """Each feature's ``field`` as join text; NULL (None or a NULL QVariant) reads as "".
+
+        ``compose_panels`` joins on these and ``get_field_values`` reports them, so
+        the scales the server builds and the zones the plugin draws use one key set.
+        """
+        return ["" if self._is_null(f.attribute(field)) else str(f.attribute(field)) for f in features]
+
+    def get_field_values(self, path, field, **kwargs):
+        """The distinct join keys of ``field`` on the layer at ``path``, sorted (TASK-24).
+
+        ``qgis_compose_panels`` drops CSV keys outside this set before it scales.
+        """
+        layer = self._open_keyed_layer(path, field)
+        return {"values": sorted(set(self._join_keys(layer.getFeatures(), field)))}
+
     def compose_panels(
         self,
         zones_path,
@@ -3894,17 +3922,11 @@ class QgisMCPServer(QObject):
         project = QgsProject.instance()
         transient_ids = []
         try:
-            zones = QgsVectorLayer(zones_path, "_panels_zones", "ogr")
-            if not zones.isValid():
-                raise Exception(f"Layer not found or invalid: {zones_path}. Next: check zones_path")
+            zones = self._open_keyed_layer(zones_path, join_field)
             if zones.geometryType() != GEOM_POLYGON:
                 raise Exception("compose_panels needs polygon zones. Next: pass a polygon layer as zones_path")
-            names = [f.name() for f in zones.fields()]
-            if join_field not in names:
-                raise Exception(f"Field {join_field!r} not found on zones; available: {names}. "
-                                "Next: pass join_field as one of those")
             features = list(zones.getFeatures())
-            keys = ["" if f.attribute(join_field) is None else str(f.attribute(join_field)) for f in features]
+            keys = self._join_keys(features, join_field)
             valued = set()
             for panel in panels:
                 valued.update(panel["values"].keys())

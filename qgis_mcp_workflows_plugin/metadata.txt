@@ -18,7 +18,7 @@ about=Companion QGIS plugin for the qgis-mcp-workflows MCP server. Exposes a TCP
 
     Default socket port: 9877 (vs upstream nkarasiak/qgis-mcp on 9876).
 
-version=1.16.0
+version=1.16.2
 author=North
 email=
 tags=mcp,ai,claude,llm,workflows,transportation,research,pflow,gufm,drm
@@ -30,7 +30,8 @@ category=Plugins
 icon=icons/icon.png
 experimental=True
 deprecated=False
-changelog=1.16.0 : compose_panels draws a grid of map panels on shared colour scales, with
+changelog=1.16.2 : get_field_values returns a layer's join keys; panel scales ignore CSV keys no zone carries.
+ 1.16.0 : compose_panels draws a grid of map panels on shared colour scales, with
     colour bars, set fonts and line weights (qgis_compose_panels).
  1.15.4 : Render tools and decks create the folder they write into.
  1.15.3 : Unstyled layers draw in a colour fixed by their file name, not a random one.

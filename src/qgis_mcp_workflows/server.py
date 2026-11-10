@@ -598,8 +598,10 @@ class PanelsResult(ComposeLayoutResult):
     n_panels: int
     groups: list[PanelGroup]
     fonts_missing: Annotated[list[str], Field(description="Requested font families not installed; QGIS's default font was used.")]
-    n_matched: int
-    n_unmatched: int
+    n_matched: Annotated[int, Field(description="Zones with a value in at least one panel.")]
+    n_unmatched: Annotated[int, Field(description="Zones with no value in any panel.")]
+    n_csv_keys_unmatched: Annotated[int, Field(description="CSV keys no zone carries (a total row, another zone system); not drawn and left out of every scale.")]
+    csv_keys_unmatched_sample: Annotated[list[str], Field(description="Up to 5 of those keys, sorted.")]
     panel_boxes_mm: Annotated[list[list[float]], Field(description="Each panel's [x, y, width, height] on the page, mm from the top left.")]
     colorbar_boxes_mm: Annotated[list[list[float]], Field(description="Each colour bar's [x, y, width, height], one per group.")]
 
@@ -2860,10 +2862,13 @@ def _refuse_bad_panel_arguments(*, value_fields: list[str], rows: int, cols: int
         raise InvalidArgumentError(f"output_path {output_path!r} must end in .png, .pdf or .svg.")
 
 
-def _read_panel_columns(csv_path: str, join_field: str, value_fields: list[str]) -> list[dict[str, float]]:
-    """One ``{key: value}`` dict per field. Blank, non-numeric and non-finite cells are left out.
+def _read_panel_columns(csv_path: str, join_field: str,
+                        value_fields: list[str]) -> tuple[list[dict[str, float]], set[str]]:
+    """One ``{key: value}`` dict per field, and every key in the CSV.
 
-    A key on two rows is refused: keeping either row would draw a map the CSV does not say.
+    Blank, non-numeric and non-finite cells are left out of the dicts; their rows'
+    keys stay in the key set. A key on two rows is refused: keeping either row
+    would draw a map the CSV does not say.
     """
     import csv as _csv
 
@@ -2908,7 +2913,49 @@ def _read_panel_columns(csv_path: str, join_field: str, value_fields: list[str])
     if n_skipped:
         logger.warning("compose_panels: left out %d blank, non-numeric or non-finite cells of %s",
                        n_skipped, csv_path)
-    return columns
+    return columns, seen
+
+
+_UNMATCHED_SAMPLE = 5  # CSV keys named in an error or a result
+
+
+def _layer_join_keys(zones_path: str, join_field: str) -> set[str]:
+    """The zones layer's ``join_field`` values as the plugin joins them (TASK-24)."""
+    from qgis_mcp_workflows.errors import ExecutorError
+    from qgis_mcp_workflows.executors import get_executor
+
+    try:
+        result = get_executor().dispatch("get_field_values", {"path": zones_path, "field": join_field})
+    except ExecutorError as err:
+        if "Unknown command type" not in err.message:
+            raise
+        raise ExecutorError(
+            "get_field_values",
+            "the QGIS plugin is older than this server (get_field_values arrived in 1.16.2). "
+            "Next: restart QGIS so it loads the plugin from this checkout (python install.py links it), then retry",
+        ) from None
+    return set(result["values"])
+
+
+def _drop_keys_off_the_layer(columns: list[dict[str, float]], csv_keys: set[str], layer_keys: set[str],
+                             join_field: str) -> tuple[list[dict[str, float]], list[str]]:
+    """``columns`` without CSV keys that no zone carries, and those keys, sorted.
+
+    A key with no zone is never drawn, so it must not set any scale either.
+    """
+    from qgis_mcp_workflows.errors import JoinError
+
+    if not csv_keys & layer_keys:
+        raise JoinError(
+            f"JOIN_NO_MATCH on {join_field}: no CSV key is on the zones layer. "
+            f"Sample CSV keys: {sorted(csv_keys)[:_UNMATCHED_SAMPLE]}; "
+            f"sample layer keys: {sorted(layer_keys)[:_UNMATCHED_SAMPLE]}. Keys compare as text: 13101 is not 13101.0."
+        )
+    off_layer = sorted(csv_keys - layer_keys)
+    if off_layer:
+        logger.warning("compose_panels: %d CSV keys are on no zone and stay out of every scale, e.g. %s",
+                       len(off_layer), off_layer[:_UNMATCHED_SAMPLE])
+    return [{k: v for k, v in c.items() if k in layer_keys} for c in columns], off_layer
 
 
 @_maybe_tool(
@@ -2952,12 +2999,15 @@ def qgis_compose_panels(
     trip shares (columns) for origins and destinations (rows). Every panel draws
     the same zones within one shared extent. Panels in a ``share_scale`` group use
     one continuous colour scale and one colour bar. The scale runs from ``vmin``
-    to the ``cap_percentile`` percentile of the group's values. Fonts, sizes and
-    outline weight are set here, so the figure needs no editing afterwards.
+    to the ``cap_percentile`` percentile of the group's values. CSV rows whose key
+    no zone carries (a total row, another zone system) are not drawn and stay out
+    of every scale. Fonts, sizes and outline weight are set here, so the figure
+    needs no editing afterwards.
 
     Returns: ``PanelsResult`` with the output path, each group's scale (vmin,
-    vmax, data max, capped), fonts that were not found, join counts, and the
-    panel and colour-bar boxes in mm.
+    vmax, data max, capped), fonts that were not found, join counts (zones
+    without values, and CSV keys without zones with a sample), and the panel
+    and colour-bar boxes in mm.
 
     Chains into: ``qgis_figures_to_pptx``.
     """
@@ -2973,7 +3023,10 @@ def qgis_compose_panels(
     )
     abs_csv = os.path.abspath(value_csv)
     _require_file("value_csv", abs_csv)
-    columns = _read_panel_columns(abs_csv, join_field, value_fields)
+    abs_zones = os.path.abspath(zones_path)
+    columns, csv_keys = _read_panel_columns(abs_csv, join_field, value_fields)
+    columns, off_layer = _drop_keys_off_the_layer(columns, csv_keys, _layer_join_keys(abs_zones, join_field),
+                                                  join_field)
     scales = group_scales([list(c.values()) for c in columns], rows, cols, share_scale, vmin, cap_percentile)
     for g, scale in enumerate(scales):
         if scale.vmax < scale.vmin:
@@ -2991,7 +3044,7 @@ def qgis_compose_panels(
                "label": one_per_group(colorbar_labels, g) if colorbar_labels else None}
               for g, s in enumerate(scales)]
     params = {
-        "zones_path": os.path.abspath(zones_path), "join_field": join_field, "rows": rows, "cols": cols,
+        "zones_path": abs_zones, "join_field": join_field, "rows": rows, "cols": cols,
         "panels": [{"values": columns[i], "group": panel_group(i, rows, cols, share_scale)}
                    for i in range(rows * cols)],
         "groups": groups, "output_path": os.path.abspath(output_path),
@@ -3009,6 +3062,7 @@ def qgis_compose_panels(
         groups=[PanelGroup(palette=g["palette"], vmin=s.vmin, vmax=s.vmax, data_max=s.data_max,
                            capped=s.capped, panels=list(s.panels)) for g, s in zip(groups, scales, strict=True)],
         fonts_missing=result["fonts_missing"], n_matched=result["n_matched"], n_unmatched=result["n_unmatched"],
+        n_csv_keys_unmatched=len(off_layer), csv_keys_unmatched_sample=off_layer[:_UNMATCHED_SAMPLE],
         panel_boxes_mm=result["panel_boxes_mm"], colorbar_boxes_mm=result["colorbar_boxes_mm"],
     )
 
