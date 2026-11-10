@@ -187,6 +187,26 @@ def test_no_matching_keys_is_an_error(headless, zones, tmp_path):
         _compose(headless, zones, tmp_path / "none.png", [{"values": {"13101.0": 1.0}, "group": 0}], [_group()])
 
 
+def test_get_field_values_returns_each_key_once_as_text(headless, tmp_path):
+    # TASK-24: the server drops CSV keys outside this set before scaling. A NULL key
+    # reads as "" on QGIS 3 (a NULL QVariant) as on QGIS 4 (None), as compose_panels joins it.
+    def square(key, x0):
+        ring = [[x0, 35.0], [x0 + 0.1, 35.0], [x0 + 0.1, 35.1], [x0, 35.1], [x0, 35.0]]
+        return {"type": "Feature", "properties": {"zone_id": key},
+                "geometry": {"type": "Polygon", "coordinates": [ring]}}
+
+    path = tmp_path / "keys.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": [
+        square("B", 139.0), square(None, 139.2), square("A", 139.4), square("A", 139.6)]}), encoding="utf-8")
+    res = headless.dispatch("get_field_values", {"path": str(path), "field": "zone_id"})
+    assert res == {"values": ["", "A", "B"]}
+
+
+def test_get_field_values_names_a_missing_field(headless, zones):
+    with pytest.raises(ExecutorError, match=r"'ward' not found.*zone_id.*Next:"):
+        headless.dispatch("get_field_values", {"path": zones, "field": "ward"})
+
+
 def test_the_default_extent_frames_only_the_drawn_zones(headless, zones, tmp_path):
     # fig_spatial draws 23 wards out of a larger szone layer: hidden zones must not set the frame.
     out = tmp_path / "frame.png"
@@ -335,3 +355,15 @@ async def test_a_panel_figure_replays_from_its_sidecar(server_on, tmp_path):
     assert done.returncode == 0, done.stdout + done.stderr
     replayed = tmp_path / "out" / "DROPBOX_ROOT" / "panels.png"
     assert replayed.stat().st_size == out.stat().st_size
+
+
+def test_a_total_row_does_not_stretch_the_scale(server_on, tmp_path):
+    # TASK-24: TOTAL is on no zone of the layer, so it must neither be drawn nor scale the colours.
+    shares = tmp_path / "shares.csv"
+    shares.write_text("zone_id,v\nZ01,0.1\nZ02,0.2\nZ03,0.3\nZ04,0.4\nTOTAL,1.0\n", encoding="utf-8")
+    res = server_on.qgis_compose_panels(
+        zones_path=TINY_ZONES, value_csv=str(shares), value_fields=["v"], rows=1, cols=1,
+        output_path=str(tmp_path / "total.png"), dpi=DPI, width_mm=120.0, height_mm=70.0)
+    assert (res.groups[0].vmax, res.groups[0].data_max) == (0.4, 0.4)
+    assert (res.n_csv_keys_unmatched, res.csv_keys_unmatched_sample) == (1, ["TOTAL"])
+    assert (res.n_matched, res.n_unmatched) == (4, 0)
