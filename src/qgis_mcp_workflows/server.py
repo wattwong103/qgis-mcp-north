@@ -592,6 +592,7 @@ class PanelGroup(BaseModel):
     data_max: Annotated[float, Field(description="The group's largest value; above vmax when the scale is capped.")]
     capped: bool
     panels: Annotated[list[int], Field(description="Row-major indices of the panels on this scale.")]
+    empty: Annotated[bool, Field(description="No panel in this group has a value for a zone on the layer (e.g. its only numbers were on CSV keys no zone carries). Its panels draw no values, and vmin, vmax and data_max are placeholders.")]
 
 
 class PanelsResult(ComposeLayoutResult):
@@ -3034,8 +3035,12 @@ def qgis_compose_panels(
         )
     scales = group_scales([list(c.values()) for c in columns], rows, cols, share_scale, vmin, cap_percentile)
     for g, scale in enumerate(scales):
+        where = "the shared scale" if share_scale == "all" else f"{share_scale} {g}"
+        if scale.empty:
+            # North 2026-11-10: render it and flag it (PanelGroup.empty), not refuse.
+            logger.warning("compose_panels: %s has no value for any zone on the layer; its panels draw "
+                           "no values and the result flags the group empty", where)
         if scale.vmax < scale.vmin:
-            where = "the shared scale" if share_scale == "all" else f"{share_scale} {g}"
             raise InvalidArgumentError(
                 f"vmin={vmin:g} is above the top of {where} ({scale.vmax:g}), so its colours would run backwards. "
                 "Lower vmin, or leave it unset for min(0, data min)."
@@ -3065,7 +3070,8 @@ def qgis_compose_panels(
         output_path=result["output_path"], format=result["format"], n_layers=result["n_layers"],
         items=result["items"], page_size_mm=result["page_size_mm"], n_panels=result["n_panels"],
         groups=[PanelGroup(palette=g["palette"], vmin=s.vmin, vmax=s.vmax, data_max=s.data_max,
-                           capped=s.capped, panels=list(s.panels)) for g, s in zip(groups, scales, strict=True)],
+                           capped=s.capped, panels=list(s.panels), empty=s.empty)
+                for g, s in zip(groups, scales, strict=True)],
         fonts_missing=result["fonts_missing"], n_matched=result["n_matched"], n_unmatched=result["n_unmatched"],
         n_csv_keys_unmatched=len(off_layer), csv_keys_unmatched_sample=off_layer[:_UNMATCHED_SAMPLE],
         panel_boxes_mm=result["panel_boxes_mm"], colorbar_boxes_mm=result["colorbar_boxes_mm"],

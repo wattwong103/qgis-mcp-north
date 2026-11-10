@@ -22,6 +22,7 @@ class GroupScale:
     data_max: float
     capped: bool
     panels: tuple[int, ...]
+    empty: bool = False  # no panel of the group has any value; vmin, vmax and data_max are placeholders
 
 
 def panel_group(index: int, rows: int, cols: int, share: str) -> int:
@@ -47,7 +48,8 @@ def group_scales(columns: list[list[float]], rows: int, cols: int, share: str,
 
     A group runs from ``vmin`` (default ``min(0, group minimum)``) to the
     ``cap_percentile`` percentile of all its panels' values; it is ``capped``
-    when that falls below the group's maximum.
+    when that falls below the group's maximum. A group with no values at all is
+    ``empty``: it still gets a flat scale at ``vmin`` so the figure renders.
     """
     n_groups = {"row": rows, "column": cols}.get(share, 1)
     scales = []
@@ -58,7 +60,7 @@ def group_scales(columns: list[list[float]], rows: int, cols: int, share: str,
         low = vmin if vmin is not None else min(0.0, min(values) if values else 0.0)
         high = percentile(values, cap_percentile) if values else low
         scales.append(GroupScale(vmin=low, vmax=high, data_max=data_max, capped=high < data_max,
-                                 panels=members))
+                                 panels=members, empty=not values))
     return scales
 
 

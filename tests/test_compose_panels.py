@@ -231,6 +231,21 @@ def test_a_plugin_without_get_field_values_says_to_restart_qgis(fake_executor, c
     assert _rendered(fake_executor) == []
 
 
+def test_a_group_left_without_values_renders_and_is_flagged(fake_executor, tmp_path, caplog):
+    # Codex review of TASK-24; North 2026-11-10 chose "render and flag": row 0's only
+    # numbers sit on TOTAL, so after filtering its scale has nothing behind it.
+    path = tmp_path / "rows.csv"
+    path.write_text("zone_id,a,b,c,d\n13101,,,1.0,2.0\n13102,,,3.0,4.0\nTOTAL,9.0,9.0,9.0,9.0\n",
+                    encoding="utf-8")
+    fake_executor.responses["compose_panels"] = _plugin_result
+    with caplog.at_level("WARNING", logger="QgisMcpWorkflowsServer"):
+        result = _call(str(path), tmp_path)
+    assert _rendered(fake_executor) == ["compose_panels"]
+    assert [g.empty for g in result.groups] == [True, False]
+    assert result.groups[1].data_max == 4.0
+    assert "row 0" in caplog.text and "no value" in caplog.text
+
+
 def test_the_old_plugin_check_matches_the_plugins_own_words():
     # _layer_join_keys spots an old plugin by this text; the plugin is a separate package, so pin it here.
     from tests.plugin_contract import PLUGIN_PATH

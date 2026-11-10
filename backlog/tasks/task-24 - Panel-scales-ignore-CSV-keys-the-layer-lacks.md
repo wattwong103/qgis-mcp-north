@@ -36,6 +36,7 @@ ASSUMPTION (North's answer to the design question was lost when the session ende
 - [x] #3 Plugin command `get_field_values(path, field)` returns the layer's keys from the same helper `compose_panels` uses; NULL keys read as ""
 - [x] #4 A CSV with no key on the layer is refused before `compose_panels` is dispatched; an older plugin gets a restart hint
 - [x] #5 FakeExecutor and live tests; full suite and ruff green; version 1.16.2; docs updated
+- [x] #6 A scale group left without any value renders and is flagged `empty` in the result (North, 2026-11-10)
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -47,5 +48,7 @@ Review (fresh context, read-only): code-reviewer APPROVE, python-reviewer APPROV
 
 Cross-harness: Codex (read-only, diff on stdin after its sandbox could not run commands) APPROVE.
 
-Parked: an empty scale group after filtering reports data_max 0.0 (Codex MEDIUM, policy for North); a pass-through test uses a fake error wording (Codex LOW); a blank CSV key joins NULL-keyed zones (as before on QGIS 4); `get_field_values` reads geometry it does not need; a short CSV row's key reads "None"; the panel-grid spec doc is not updated (DESIGN.md is); tests index `fake_executor.calls` by position.
+Codex MEDIUM (an empty scale group after filtering reported data_max 0.0 with no data behind it): North chose "render and flag" on 2026-11-10. `GroupScale` and `PanelGroup` carry `empty`, a warning names the group; tests failed first (unit and FakeExecutor), plus a live render test.
+
+Parked: a pass-through test uses a fake error wording (Codex LOW); a blank CSV key joins NULL-keyed zones (as before on QGIS 4); `get_field_values` reads geometry it does not need; a short CSV row's key reads "None"; the panel-grid spec doc is not updated (DESIGN.md is); tests index `fake_executor.calls` by position.
 <!-- SECTION:NOTES:END -->

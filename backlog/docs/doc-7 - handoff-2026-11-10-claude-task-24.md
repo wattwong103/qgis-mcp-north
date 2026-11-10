@@ -40,7 +40,7 @@ TASK-24, the MEDIUM parked from #38's review: in `qgis_compose_panels`, CSV rows
 
 ## Open questions (North)
 - The design answers were lost when the session ended; "goon" was taken as approval of: drop and report (not refuse behind a flag), and `_is_null` for NULL keys. Both are labelled ASSUMPTION in the task and the PR.
-- Parked, needs a policy decision (Codex MEDIUM): filtering can empty one scale group while others keep values (row 0's only numbers belong to TOTAL). The figure renders, and that group reports `data_max = 0.0` with no observation behind it. Options: refuse with a `Next:` hint naming the group, or render it and mark the group as empty in the result.
+- Decided (Codex MEDIUM): filtering can empty one scale group while others keep values (row 0's only numbers belong to TOTAL). North chose "render and flag" on 2026-11-10: `GroupScale.empty` / `PanelGroup.empty`, and a warning names the group. The unit and FakeExecutor tests failed first; a live test confirms the figure renders with a flat bar. Commit after the PR opened, so Codex has not reviewed it.
 - Parked, not fixed:
   - Codex LOW: `test_other_plugin_errors_from_get_field_values_pass_through` raises a fake message the real executor mapping would turn into `LayerNotFoundError`; use the plugin's real wording.
   - A CSV row with a blank key joins NULL-keyed zones (`""` on both sides), as before on QGIS 4.
@@ -51,4 +51,4 @@ TASK-24, the MEDIUM parked from #38's review: in `qgis_compose_panels`, CSV rows
 - CI "plugin compiles on py3.9" fails at setup on every PR (Ubuntu 26.04 has no Python 3.9); the fix is proposed in #39's body (operator-owned).
 
 ## Who owns next
-North: review and merge (this PR and #39, in either order), then decide whether to waive or rerun the cross-harness review if Codex's verdict stays inconclusive.
+North: review and merge (this PR and #39, in either order). Codex approved the PR as opened (450100e); the empty-group commit after it had fresh-context review only.

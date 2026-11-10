@@ -21,6 +21,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `PanelGroup.empty`: true when filtering leaves a scale group with no value
+  for any zone (e.g. a row whose only numbers sat on a total row). The figure
+  still renders; that group's panels draw no values, its colour bar is flat,
+  and its vmin, vmax and data max are placeholders. A warning names the group.
 - Plugin command `get_field_values(path, field)`: a layer's distinct join keys
   as text, from the helper `compose_panels` joins on. A NULL key reads as `""`
   on QGIS 3 (NULL QVariant) as on QGIS 4. A plugin older than 1.16.2 gets a

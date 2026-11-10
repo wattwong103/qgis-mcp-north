@@ -578,7 +578,11 @@ percentile or data max. The result counts them (`n_csv_keys_unmatched`, with up
 to five in `csv_keys_unmatched_sample`), beside `n_matched` / `n_unmatched`,
 which count zones with and without values. A CSV with no key on the layer is
 refused (`JOIN_NO_MATCH`) before anything renders, and so is one whose keys on
-the layer carry no number in any panel column. A plugin older than 1.16.2
+the layer carry no number in any panel column. When only some scale groups are
+left without a value (a row whose only numbers sat on a total row), the figure
+renders and the result flags each such group `empty: true`. Its panels draw no
+values, its colour bar is flat at `vmin`, and its vmin, vmax and data max are
+placeholders (North, 2026-11-10: render and flag, not refuse). A plugin older than 1.16.2
 answers "Unknown command type", which the tool turns into a restart-QGIS hint.
 
 **Layout.** One colour bar per group, a `QgsGradientFillSymbolLayer` on a layout

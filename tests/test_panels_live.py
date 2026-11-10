@@ -367,3 +367,18 @@ def test_a_total_row_does_not_stretch_the_scale(server_on, tmp_path):
     assert (res.groups[0].vmax, res.groups[0].data_max) == (0.4, 0.4)
     assert (res.n_csv_keys_unmatched, res.csv_keys_unmatched_sample) == (1, ["TOTAL"])
     assert (res.n_matched, res.n_unmatched) == (4, 0)
+
+
+def test_a_group_left_without_values_still_renders(server_on, tmp_path):
+    # North 2026-11-10: render and flag. Column a's only number is on TOTAL, so its
+    # panel draws no zone and its scale is flat; column b draws normally.
+    shares = tmp_path / "shares.csv"
+    shares.write_text("zone_id,a,b\nZ01,,0.1\nZ02,,0.2\nZ03,,0.3\nZ04,,0.4\nTOTAL,1.0,1.0\n", encoding="utf-8")
+    out = tmp_path / "empty_group.png"
+    res = server_on.qgis_compose_panels(
+        zones_path=TINY_ZONES, value_csv=str(shares), value_fields=["a", "b"], rows=1, cols=2,
+        share_scale="column", output_path=str(out), dpi=DPI, width_mm=120.0, height_mm=70.0)
+    assert out.stat().st_size > 0
+    assert [g.empty for g in res.groups] == [True, False]
+    assert res.items.count("tick:0") == 1  # a flat scale has one tick
+
