@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.16.0**, 2026-11-10
+Status: **v1.16.1**, 2026-11-10
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 

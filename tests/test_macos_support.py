@@ -6,6 +6,7 @@ are monkeypatched, so the macOS branches are exercised on Linux/Windows CI too.
 
 from __future__ import annotations
 
+import ast
 import os
 
 import pytest
@@ -313,18 +314,13 @@ _QT5_ONLY = {
 }
 
 
-def test_plugin_avoids_qt5_only_enums():
-    """`QPainter.Antialiasing` broke every PNG render with map furniture under
-    QGIS 4 headless. Use `QPainter.RenderHint.X`, `QFont.Weight.X`,
-    `Qt.AlignmentFlag.X`; `compat.py` is exempt (it tries the new form first
-    and falls back to the old one on purpose)."""
-    import ast
-
+def _plugin_nodes():
+    """(file name, AST node) for every plugin source file except compat.py,
+    which tries the new enum form first and falls back to the old one on purpose."""
     root = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "qgis_mcp_workflows_plugin",
     )
-    offenders = []
     for dirpath, _, filenames in os.walk(root):
         if "__pycache__" in dirpath:
             continue
@@ -334,19 +330,47 @@ def test_plugin_avoids_qt5_only_enums():
             with open(os.path.join(dirpath, fn), encoding="utf-8") as fh:
                 tree = ast.parse(fh.read())
             for node in ast.walk(tree):
-                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-                    base, attr = node.value.id, node.attr
-                    if attr in _QT5_ONLY.get(base, ()) or (
-                        base == "Qt" and attr.startswith("Align") and attr != "AlignmentFlag"
-                    ):
-                        offenders.append(f"{fn}:{node.lineno} {base}.{attr}")
-                # QFontMetrics.width() was removed in Qt6: horizontalAdvance().
-                if (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "width"
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id in ("fm", "metrics", "font_metrics")
-                ):
-                    offenders.append(f"{fn}:{node.lineno} {node.func.value.id}.width()")
+                yield fn, node
+
+
+def test_plugin_avoids_qt5_only_enums():
+    """`QPainter.Antialiasing` broke every PNG render with map furniture under
+    QGIS 4 headless. Use `QPainter.RenderHint.X`, `QFont.Weight.X`,
+    `Qt.AlignmentFlag.X`; `compat.py` is exempt."""
+    offenders = []
+    for fn, node in _plugin_nodes():
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            base, attr = node.value.id, node.attr
+            if attr in _QT5_ONLY.get(base, ()) or (
+                base == "Qt" and attr.startswith("Align") and attr != "AlignmentFlag"
+            ):
+                offenders.append(f"{fn}:{node.lineno} {base}.{attr}")
+        # QFontMetrics.width() was removed in Qt6: horizontalAdvance().
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "width"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in ("fm", "metrics", "font_metrics")
+        ):
+            offenders.append(f"{fn}:{node.lineno} {node.func.value.id}.width()")
     assert not offenders, f"Qt5-only spellings that fail under QGIS 4 / PyQt6: {offenders}"
+
+
+def test_plugin_names_unit_enums_only_through_compat():
+    """Unit enums moved to `Qgis.LayoutUnit` / `Qgis.RenderUnit` in QGIS 3.30; the
+    `QgsUnitTypes.LayoutMillimeters`-style aliases may be gone in QGIS 4, and the
+    plugin still supports QGIS 3.28, which has only the aliases. compat.py
+    resolves both (`LAYOUT_MM`, `RENDER_MM`, `RENDER_PIXELS`). A hand-rolled
+    fallback elsewhere went wrong: the heatmap passed 1 (map units) for pixels.
+    TASK-23."""
+    offenders = []
+    for fn, node in _plugin_nodes():
+        if not (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)):
+            continue
+        base, attr = node.value.id, node.attr
+        if (base == "QgsUnitTypes" and attr[:1].isupper()) or (
+            base == "Qgis" and attr in ("LayoutUnit", "RenderUnit")
+        ):
+            offenders.append(f"{fn}:{node.lineno} {base}.{attr}")
+    assert not offenders, f"unit enums named outside compat.py (use compat's constants): {offenders}"
