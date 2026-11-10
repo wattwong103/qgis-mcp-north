@@ -14,7 +14,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reads the layer's keys first and leaves those rows out of every scale. The
   result reports them in `n_csv_keys_unmatched` and `csv_keys_unmatched_sample`
   (up to 5). A CSV with no key on the layer is refused with `JOIN_NO_MATCH`
-  before anything renders.
+  before anything renders, and so is one whose keys on the layer carry no
+  number in any panel column.
+- `qgis_compose_panels` on QGIS 3: a zone whose join key is NULL now joins as
+  `""`, as on QGIS 4, instead of as the text of a NULL QVariant.
 
 ### Added
 

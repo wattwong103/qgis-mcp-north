@@ -2933,7 +2933,7 @@ def _layer_join_keys(zones_path: str, join_field: str) -> set[str]:
             "get_field_values",
             "the QGIS plugin is older than this server (get_field_values arrived in 1.16.2). "
             "Next: restart QGIS so it loads the plugin from this checkout (python install.py links it), then retry",
-        ) from None
+        ) from err
     return set(result["values"])
 
 
@@ -3027,6 +3027,11 @@ def qgis_compose_panels(
     columns, csv_keys = _read_panel_columns(abs_csv, join_field, value_fields)
     columns, off_layer = _drop_keys_off_the_layer(columns, csv_keys, _layer_join_keys(abs_zones, join_field),
                                                   join_field)
+    if not any(columns):
+        raise InvalidArgumentError(
+            f"value_csv has no number for any zone on the layer in {value_fields}: those cells are blank or text.",
+            next_step="name the numeric CSV columns in value_fields, then retry",
+        )
     scales = group_scales([list(c.values()) for c in columns], rows, cols, share_scale, vmin, cap_percentile)
     for g, scale in enumerate(scales):
         if scale.vmax < scale.vmin:

@@ -3877,7 +3877,11 @@ class QgisMCPServer(QObject):
         ``compose_panels`` joins on these and ``get_field_values`` reports them, so
         the scales the server builds and the zones the plugin draws use one key set.
         """
-        return ["" if self._is_null(f.attribute(field)) else str(f.attribute(field)) for f in features]
+        keys = []
+        for f in features:
+            value = f.attribute(field)
+            keys.append("" if self._is_null(value) else str(value))
+        return keys
 
     def get_field_values(self, path, field, **kwargs):
         """The distinct join keys of ``field`` on the layer at ``path``, sorted (TASK-24).

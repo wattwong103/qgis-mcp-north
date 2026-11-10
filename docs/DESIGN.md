@@ -577,7 +577,8 @@ another zone system) are dropped from every panel, so they move no vmin, vmax,
 percentile or data max. The result counts them (`n_csv_keys_unmatched`, with up
 to five in `csv_keys_unmatched_sample`), beside `n_matched` / `n_unmatched`,
 which count zones with and without values. A CSV with no key on the layer is
-refused (`JOIN_NO_MATCH`) before anything renders. A plugin older than 1.16.2
+refused (`JOIN_NO_MATCH`) before anything renders, and so is one whose keys on
+the layer carry no number in any panel column. A plugin older than 1.16.2
 answers "Unknown command type", which the tool turns into a restart-QGIS hint.
 
 **Layout.** One colour bar per group, a `QgsGradientFillSymbolLayer` on a layout

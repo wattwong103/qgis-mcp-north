@@ -231,6 +231,21 @@ def test_a_plugin_without_get_field_values_says_to_restart_qgis(fake_executor, c
     assert _rendered(fake_executor) == []
 
 
+def test_the_old_plugin_check_matches_the_plugins_own_words():
+    # _layer_join_keys spots an old plugin by this text; the plugin is a separate package, so pin it here.
+    from tests.plugin_contract import PLUGIN_PATH
+
+    assert '"message": f"Unknown command type: {cmd_type}"' in PLUGIN_PATH.read_text(encoding="utf-8")
+
+
+def test_keys_on_the_layer_without_any_number_are_refused_before_rendering(fake_executor, tmp_path):
+    # Review of TASK-24: keys match, but every cell is blank, so no zone has a value to draw.
+    csv = _one_panel_csv(tmp_path, "13101,\n13102,x\nTOTAL,5.0\n")
+    with pytest.raises(InvalidArgumentError, match=r"no number for any zone on the layer.*'v'.*Next:"):
+        _call(csv, tmp_path, value_fields=["v"], rows=1, cols=1)
+    assert _rendered(fake_executor) == []
+
+
 def test_other_plugin_errors_from_get_field_values_pass_through(fake_executor, csv_path, tmp_path):
     def missing_field(params):
         raise ExecutorError("get_field_values", "Field 'zone_id' not found on the layer. Next: pass join_field")
