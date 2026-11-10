@@ -18,6 +18,7 @@ Parked MEDIUM from #38's review (North, 2026-11-10): `plugin.py` used the unscop
   - an AST tripwire in tests/test_macos_support.py (no unit enum outside compat.py), sharing a walker with the Qt5 tripwire;
   - tests/test_compat_units.py loads compat.py against stub qgis modules shaped like QGIS 3.28 and like QGIS 4.
 - Reviews: code-reviewer and python-reviewer, fresh context. Both APPROVE, with no CRITICAL, HIGH or MEDIUM. Doc LOWs fixed; test-strengthening LOWs parked (task file).
+- Cross-harness review (North chose Codex): Codex APPROVED, with no CRITICAL, HIGH or MEDIUM. Its one LOW is already parked. Codex's shell can't run commands on this PC, so it reviewed from a stdin bundle (`codex exec -s read-only - < bundle`). The verdict is posted on PR #39.
 - Probe: all three local QGIS builds (3.40.5, 3.42.1, 3.40.14; Qt5) have old and new spellings as the same object. No QGIS 4 install on this PC.
 - Worktree venv rebuilt offline: `uv sync --frozen --offline --all-extras`.
 
@@ -32,12 +33,12 @@ Parked MEDIUM from #38's review (North, 2026-11-10): `plugin.py` used the unscop
 - After merge: `uv sync --frozen --offline --all-extras` in the main checkout (venv to 1.16.1), then reconnect the qgis-workflows MCP server.
 
 ## Open questions
-- **Cross-harness review not run.** On this PC there is no agy, `agy_run.py` is absent from the vault checkout, and Codex is unusable on this account. North decides: run it elsewhere, set up agy here, or waive.
+- **QGIS 4 unverified.** The QGIS Desktop on this PC is OSGeo4W 3.40.5 on Qt 5.15.13, and it loads the main checkout's plugin, so only the Mac can settle QGIS 4 (Verify next).
 - **CI's "plugin compiles on py3.9" job fails at setup:** `ubuntu-latest` (now Ubuntu 26.04) has no Python 3.9 in `actions/setup-python`. It is operator-owned (`.github/workflows/`). Proposed: `runs-on: ubuntu-24.04` for that job, or a `python:3.9-slim` container.
 - **TASK-24 (sibling session, CSV keys off the layer, 1.16.2)** conflicts with this PR on version lines, CHANGELOG, the metadata.txt changelog and uv.lock. The PR merged second resolves them.
 
 ## Owner next
-- North: review and merge; the cross-harness route; the CI runner pin.
+- North: review and merge; the CI runner pin.
 - Claude, next session: the mesh-grid feature (needs its own brainstorm and plan), or the PFLOW acceptance render once its CSV exists.
 
-Status: DONE_WITH_CONCERNS (cross-harness review not run; QGIS 4 unverified: no QGIS 4 install on this PC).
+Status: DONE_WITH_CONCERNS (QGIS 4 unverified: no QGIS 4 install on this PC; 5 test-hardening LOWs parked).
