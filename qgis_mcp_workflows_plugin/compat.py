@@ -17,6 +17,7 @@ from qgis.core import (
     QgsProcessingParameterDefinition,
     QgsRasterBandStats,
     QgsSymbolLayer,
+    QgsUnitTypes,
     QgsWkbTypes,
 )
 from qgis.PyQt.QtCore import QIODevice, Qt
@@ -77,6 +78,21 @@ try:
     LAYOUT_SUCCESS = Qgis.LayoutResult.Success
 except AttributeError:
     LAYOUT_SUCCESS = QgsLayoutExporter.Success
+
+# ── Units: layout items in mm, symbol and diagram sizes ──────────────
+# Qgis.LayoutUnit / Qgis.RenderUnit arrived in QGIS 3.30; 3.28 has only the
+# QgsUnitTypes aliases, which QGIS 4 may drop (TASK-23).
+try:
+    LAYOUT_MM = Qgis.LayoutUnit.Millimeters
+except AttributeError:
+    LAYOUT_MM = QgsUnitTypes.LayoutMillimeters
+
+try:
+    RENDER_MM = Qgis.RenderUnit.Millimeters
+    RENDER_PIXELS = Qgis.RenderUnit.Pixels
+except AttributeError:
+    RENDER_MM = QgsUnitTypes.RenderMillimeters
+    RENDER_PIXELS = QgsUnitTypes.RenderPixels
 
 # ── Processing parameter flags ───────────────────────────────────────
 try:
