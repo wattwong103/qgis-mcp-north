@@ -1,7 +1,7 @@
 ---
 id: TASK-24
 title: Panel scales ignore CSV keys the zones layer lacks (qgis_compose_panels)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-10 12:00'
 labels:
@@ -31,9 +31,21 @@ ASSUMPTION (North's answer to the design question was lost when the session ende
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A CSV key that no zone carries does not enter any group's vmin, vmax, cap percentile or data_max
-- [ ] #2 `PanelsResult` reports `n_csv_keys_unmatched` and a sorted sample of up to 5 such keys
-- [ ] #3 Plugin command `get_field_values(path, field)` returns the layer's keys from the same helper `compose_panels` uses; NULL keys read as ""
-- [ ] #4 A CSV with no key on the layer is refused before `compose_panels` is dispatched; an older plugin gets a restart hint
-- [ ] #5 FakeExecutor and live tests; full suite and ruff green; version 1.16.2; docs updated
+- [x] #1 A CSV key that no zone carries does not enter any group's vmin, vmax, cap percentile or data_max
+- [x] #2 `PanelsResult` reports `n_csv_keys_unmatched` and a sorted sample of up to 5 such keys
+- [x] #3 Plugin command `get_field_values(path, field)` returns the layer's keys from the same helper `compose_panels` uses; NULL keys read as ""
+- [x] #4 A CSV with no key on the layer is refused before `compose_panels` is dispatched; an older plugin gets a restart hint
+- [x] #5 FakeExecutor and live tests; full suite and ruff green; version 1.16.2; docs updated
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Built 2026-11-10 test-first on `task/task-24-panel-csv-keys`. Numbered TASK-24 / v1.16.2 because a parallel session took TASK-23 / v1.16.1 for #39 (agreed by message).
+
+Review (fresh context, read-only): code-reviewer APPROVE, python-reviewer APPROVE, security-reviewer no new exposure; no CRITICAL or HIGH. Fixed in one pass: a CSV whose on-layer keys carry no number is refused before rendering (test failed first); `_join_keys` reads each attribute once; the old-plugin hint chains its cause and a test pins the plugin's "Unknown command type" wording; CHANGELOG notes the QGIS 3 NULL-key fix.
+
+Cross-harness: Codex (read-only, diff on stdin after its sandbox could not run commands) APPROVE.
+
+Parked: an empty scale group after filtering reports data_max 0.0 (Codex MEDIUM, policy for North); a pass-through test uses a fake error wording (Codex LOW); a blank CSV key joins NULL-keyed zones (as before on QGIS 4); `get_field_values` reads geometry it does not need; a short CSV row's key reads "None"; the panel-grid spec doc is not updated (DESIGN.md is); tests index `fake_executor.calls` by position.
+<!-- SECTION:NOTES:END -->
