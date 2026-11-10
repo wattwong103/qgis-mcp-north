@@ -3,6 +3,33 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.16.2 — 2026-11-10 — panel scales ignore CSV keys the zones lack
+
+### Fixed
+
+- `qgis_compose_panels` (TASK-24): CSV rows whose key no zone carries (a total
+  row, keys from another zone system) were never drawn but still set every
+  scale's vmin, vmax, cap percentile and data max, so the colours were
+  compressed and `data_max` could report a value no panel shows. The server now
+  reads the layer's keys first and leaves those rows out of every scale. The
+  result reports them in `n_csv_keys_unmatched` and `csv_keys_unmatched_sample`
+  (up to 5). A CSV with no key on the layer is refused with `JOIN_NO_MATCH`
+  before anything renders, and so is one whose keys on the layer carry no
+  number in any panel column.
+- `qgis_compose_panels` on QGIS 3: a zone whose join key is NULL now joins as
+  `""`, as on QGIS 4, instead of as the text of a NULL QVariant.
+
+### Added
+
+- `PanelGroup.empty`: true when filtering leaves a scale group with no value
+  for any zone (e.g. a row whose only numbers sat on a total row). The figure
+  still renders; that group's panels draw no values, its colour bar is flat,
+  and its vmin, vmax and data max are placeholders. A warning names the group.
+- Plugin command `get_field_values(path, field)`: a layer's distinct join keys
+  as text, from the helper `compose_panels` joins on. A NULL key reads as `""`
+  on QGIS 3 (NULL QVariant) as on QGIS 4. A plugin older than 1.16.2 gets a
+  restart-QGIS hint instead of an unknown-command error.
+
 ## v1.16.0 — 2026-11-10 — panel grids with linked colour scales
 
 ### Added
