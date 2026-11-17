@@ -51,7 +51,6 @@ from qgis.core import (
     QgsLayoutPoint,
     QgsLayoutSize,
     QgsPrintLayout,
-    QgsUnitTypes,
     QgsArrowSymbolLayer,
     QgsFillSymbol,
     QgsLineSymbol,
@@ -120,6 +119,7 @@ from .compat import (
     IODEVICE_WRITEONLY,
     LAYER_RASTER,
     LAYER_VECTOR,
+    LAYOUT_MM,
     LAYOUT_SUCCESS,
     MSG_CRITICAL,
     MSG_INFO,
@@ -127,6 +127,8 @@ from .compat import (
     PROCESSING_OPTIONAL,
     PROP_FILL_COLOR,
     RASTER_STATS_ALL,
+    RENDER_MM,
+    RENDER_PIXELS,
     SHAPE_RECTANGLE,
     TOOLBUTTON_ICON_ONLY,
     TOOLBUTTON_MENU_POPUP,
@@ -2478,7 +2480,7 @@ class QgisMCPServer(QObject):
         if render_mode == "heatmap":
             renderer = QgsHeatmapRenderer()
             renderer.setRadius(15.0)
-            renderer.setRadiusUnit(Qgis.RenderUnit.Pixels if hasattr(Qgis, "RenderUnit") else 1)
+            renderer.setRadiusUnit(RENDER_PIXELS)
             ramp = QgsStyle.defaultStyle().colorRamp("Spectral")
             if ramp:
                 inverted = ramp.clone()
@@ -2943,7 +2945,7 @@ class QgisMCPServer(QObject):
             ds.categoryColors = colors
             ds.size = QSizeF(float(size), float(size))
             try:
-                ds.sizeType = QgsUnitTypes.RenderMillimeters
+                ds.sizeType = RENDER_MM
             except Exception:
                 pass
             ds.penColor = QColor("white")
@@ -3661,7 +3663,7 @@ class QgisMCPServer(QObject):
                 "a3_landscape": (420, 297), "square": (250, 250),
             }
             pw, ph = pages.get(page, (297, 210))
-            mm = QgsUnitTypes.LayoutMillimeters
+            mm = LAYOUT_MM
 
             layout = QgsPrintLayout(project)
             layout.initializeDefaults()
@@ -3808,7 +3810,7 @@ class QgisMCPServer(QObject):
         from qgis.core import QgsTextFormat
         from qgis.PyQt.QtCore import Qt
 
-        mm = QgsUnitTypes.LayoutMillimeters
+        mm = LAYOUT_MM
         lbl = QgsLayoutItemLabel(layout)
         lbl.setText(str(text))
         fmt = QgsTextFormat()
@@ -3838,7 +3840,7 @@ class QgisMCPServer(QObject):
         from qgis.core import QgsGradientFillSymbolLayer, QgsLayoutItemShape
         from qgis.PyQt.QtCore import QPointF
 
-        mm = QgsUnitTypes.LayoutMillimeters
+        mm = LAYOUT_MM
         gradient = QgsGradientFillSymbolLayer()
         gradient.setGradientColorType(GRADIENT_FROM_RAMP)
         gradient.setColorRamp(ramp.clone())
@@ -3946,7 +3948,7 @@ class QgisMCPServer(QObject):
                 rect = QgsRectangle(rect.xMinimum() - dx, rect.yMinimum() - dy,
                                     rect.xMaximum() + dx, rect.yMaximum() + dy)
 
-            mm = QgsUnitTypes.LayoutMillimeters
+            mm = LAYOUT_MM
             layout = QgsPrintLayout(project)
             layout.initializeDefaults()
             layout.pageCollection().page(0).setPageSize(QgsLayoutSize(float(width_mm), float(height_mm), mm))

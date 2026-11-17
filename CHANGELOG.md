@@ -3,6 +3,20 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.16.1 — 2026-11-10 — unit enums through compat
+
+### Fixed
+
+- The plugin no longer names the unscoped `QgsUnitTypes` aliases
+  (`LayoutMillimeters`, `RenderMillimeters`), which QGIS 4 may drop (TASK-23).
+  `compat.py` resolves `LAYOUT_MM`, `RENDER_MM` and `RENDER_PIXELS` from
+  `Qgis.LayoutUnit` / `Qgis.RenderUnit` (QGIS 3.30+) and falls back to the
+  aliases on 3.28. Affects `qgis_compose_layout`, `qgis_compose_panels` and the
+  diagram size in `qgis_render_diagram_map`. QGIS 4 itself is not yet run.
+- `qgis_render_trajectory(render_mode="heatmap")` on QGIS 3.28–3.29 set its
+  15-unit radius in map units, not pixels: the hand-written fallback passed 1,
+  which is `RenderMapUnits` (`RenderPixels` is 2). QGIS 3.30+ was unaffected.
+
 ## v1.16.0 — 2026-11-10 — panel grids with linked colour scales
 
 ### Added
