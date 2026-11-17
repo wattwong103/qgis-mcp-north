@@ -44,3 +44,11 @@ def test_ticks_mark_a_capped_top():
 def test_a_flat_group_has_one_tick():
     s = group_scales([[0, 0], [0, 0]], 1, 2, "row", None, 100)[0]
     assert s.vmin == s.vmax == 0 and ticks(s, 5, ".1f") == [(0.0, "0.0")]
+    assert not s.empty  # flat is not empty: its zones have values, all zero
+
+
+def test_a_group_without_values_is_flagged_empty():
+    # TASK-24 (North 2026-11-10: render and flag): row 0 has no value at all, row 1 does.
+    empty, full = group_scales([[], [], [1.0], [2.0]], 2, 2, "row", None, 100)
+    assert empty.empty and not full.empty
+    assert (empty.vmin, empty.vmax, empty.data_max, empty.capped) == (0.0, 0.0, 0.0, False)
