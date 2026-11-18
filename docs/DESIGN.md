@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.23.0**, 2026-11-18
+Status: **v1.24.0**, 2026-11-18
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -570,7 +570,7 @@ Shipped on `feat/choropleth-diverging-colormaps`, grounded in the `N:\TransInfor
 transit-figure pipeline. Each a separate commit, unit-tested + live-verified.
 
 **New tools (3):**
-- `qgis_compose_layout(layer_paths, output_path, title=None, extent=None, page="a4_landscape", legend=True, scale_bar=True, north_arrow=True, dpi=300) → ComposeLayoutResult` — programmatic `QgsPrintLayout`: a titled map panel with linked legend, scale bar and north arrow, exported PNG/PDF/SVG. Complements `qgis_export_layout` (which only exports pre-authored `.qgz`). Single panel; multi-panel/inset is future.
+- `qgis_compose_layout(layer_paths, output_path, title=None, extent=None, page="a4_landscape", legend=True, scale_bar=True, north_arrow=True, dpi=300, width_mm=None, height_mm=None, font_family=None, title_size_pt=None, legend_size_pt=None, legend_corner=None) → ComposeLayoutResult` — programmatic `QgsPrintLayout`: a titled map panel with linked legend, scale bar and north arrow, exported PNG/PDF/SVG. Complements `qgis_export_layout` (which only exports pre-authored `.qgz`). Single panel; multi-panel/inset is future. v1.24 adds optional page millimetres, a font, title and legend sizes, and a legend corner (below). Omitted, the page preset and the 18 pt title stay.
 - `qgis_render_diagram_map(layer_path, value_fields, output_png, diagram_type="pie", size=10.0, palette="Set2", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150, outline_color=None, outline_width_mm=None, fill_opacity=None, label_field=None, label_size_pt=None, label_font=None, label_color=None, label_halo_mm=None, label_halo_color=None) → DiagramMapResult` — chart-in-map: a pie/bar `QgsDiagramRenderer` glyph per feature, one slice/bar per `value_field`. v1.21: stroke and opacity on the base symbol, and the same stroke on the diagram pen (omitted pen stays white, 0.2). `size` is unchanged. `label_field` is a field on the layer; omitted label type is 9 pt, 1 mm, white.
 - `qgis_render_catchment(points_path, output_png, method="voronoi", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150, outline_color=None, outline_width_mm=None, fill_opacity=None, label_field=None, label_size_pt=None, label_font=None, label_color=None, label_halo_mm=None, label_halo_color=None) → CatchmentResult` — Voronoi (Thiessen) service-area catchments around points via `QgsGeometry.voronoiDiagram` (no Processing dependency). The cells are a PNG. `qgis_voronoi` writes the same diagram as a polygon file. v1.21: stroke and opacity on the cells. Omitted cells stay `200,220,240` at alpha 90 with outline `70,90,120` at 0.3 mm; `fill_opacity` replaces that alpha. Point markers take the same stroke and opacity; omitted markers stay `#b2182b` with no outline. `label_field` is a field on the point layer (9 pt when the label type is omitted).
 
@@ -679,17 +679,28 @@ database cursor, an API — renders through the same path.
 
 ---
 
+### Print-layout fonts and millimetres (v1.24)
+
+`qgis_compose_layout` keeps the page presets (`a4_landscape` 297×210, `a4_portrait` 210×297, `a3_landscape` 420×297, `square` 250×250). `width_mm` and `height_mm` are optional and are set together. Both omitted: the preset is the page, and the command body is the v1.23 body. Both set: they are the page (greater than 20 mm, at most 1000) and `page` does not change the size. One without the other is refused.
+
+`font_family` is the title, the legend, and the scale bar. A missing family is listed in `fonts_missing` and QGIS's default font draws. Headless QGIS registers the OS fonts first, the same way panels do. `title_size_pt` (just above 0, at most 72) needs `title`; omitted, the title stays 18 pt bold in a 12 mm band. `legend_size_pt` is the legend text and needs `legend=True`; omitted, the legend font stays QGIS's default. `legend_corner` is `top_left`, `top_right`, `bottom_left` or `bottom_right`, and needs `legend=True`. Omitted, the legend stays inset from the top-right of the map, where v1.23 put it. The scale bar and the north arrow do not move.
+
+Omitted arguments are not dispatched. When any of these is set, the plugin returns `layout_applied` (the keys it applied) and `fonts_missing`. If `layout_applied` is absent, the server raises `PluginOutdatedError`: the running plugin accepted the keys and drew the old page. On plugin transport the hint is to restart QGIS. On headless the hint is to restart the MCP server. Compound `qgis_export(kind="compose_layout")` forwards the same arguments. `ComposeLayoutResult` gains `fonts_missing` and `layout_applied`.
+
+---
+
 ### Panel grids with linked scales (v1.16)
 
 `qgis_compose_panels(zones_path, value_csv, value_fields, rows, cols, output_path,
 join_field="zone_id", column_titles=None, row_labels=None, share_scale="row",
 palettes=None, vmin=None, cap_percentile=100.0, colorbar=True, colorbar_labels=None,
-tick_format=".3g", n_ticks=5, unmatched="hide", extent=None, width_mm=160.0,
-height_mm=140.0, font_family=None, title_size_pt=9.0, label_size_pt=9.0,
-tick_size_pt=7.0, outline_width_mm=0.05, outline_color="#cccccc", dpi=300) → PanelsResult`
+tick_format=".3g", n_ticks=5, unmatched="hide", extent=None, panel_extents=None,
+difference_columns=None, width_mm=160.0, height_mm=140.0, font_family=None,
+title_size_pt=9.0, label_size_pt=9.0, tick_size_pt=7.0, outline_width_mm=0.05,
+outline_color="#cccccc", dpi=300) → PanelsResult`
 draws a rows × cols grid of one polygon layer: one panel per CSV column, row by
-row, all within one extent so simulated and observed panels frame identically.
-That extent defaults to the zones drawn in any panel plus 2%: with
+row. Every panel frames the same extent unless `panel_extents` is set.
+That shared extent defaults to the zones drawn in any panel plus 2%: with
 `unmatched="hide"`, a 23-ward CSV over a larger szone layer frames the wards,
 as the matplotlib figure does.
 It exists for camera-ready comparison figures (PFLOW's `fig_spatial`: simulated
@@ -739,6 +750,25 @@ folders once per process before any label (724 files, 0.13 s on Windows); QGIS
 Desktop already has them and is left alone. A family still missing is listed in
 `fonts_missing`, and QGIS's default font draws instead.
 
+**Difference columns (v1.24).** `difference_columns` is a list of
+`name = left - right` (double quotes optional around each name). That is the
+subtraction `qgis_expression` writes as `sim - obs`, computed on the CSV and
+joined in as a column `value_fields` can name. Both operands are CSV columns.
+A blank, non-numeric or non-finite operand leaves that zone out of the
+difference and out of its scale. The result lists the names in
+`difference_columns`. Any other expression stays on `qgis_expression`; the
+number is written into the CSV before this call. The server still decides the
+scale. The plugin receives finished `{key: value}` panels, so an older plugin
+draws a difference map without a new command.
+
+**Per-panel extents (v1.24).** `panel_extents` is one `[xmin, ymin, xmax, ymax]`
+per panel, row by row, in the zones' CRS. Omitted, every panel keeps the shared
+`extent` (or the drawn-zones default), and `extents` is not sent. Set, it
+replaces that shared frame: `extent` and `panel_extents` together are refused.
+Each box is four finite numbers with `xmin < xmax` and `ymin < ymax`. The
+plugin returns `extents_applied`. If that key is absent, `PluginOutdatedError`,
+because an older plugin would draw every panel in one frame.
+
 **Refused before QGIS runs:** a `value_fields` length other than rows × cols;
 `row_labels`, `column_titles` or `extent` of the wrong length; `palettes` or
 `colorbar_labels` with neither 1 nor one entry per group; `n_ticks < 2`; a
@@ -747,15 +777,19 @@ output that is not .png, .pdf or .svg; a `vmin` above a group's top, which
 would run its colours backwards; a CSV that is not UTF-8 (CP932 is common for
 Japanese data); and a CSV that repeats a key, since keeping either row would
 draw a map the CSV does not say. Blank, non-numeric and non-finite CSV cells are
-left out of the panel and its scale. A layer with no key in any panel fails with
-`JOIN_NO_MATCH` and samples of both sides' keys. A grid whose panels would be
-under 10 mm after titles, labels and bars fails with `PAGE_TOO_SMALL`. Zones
-without a value in a panel are hidden, or drawn light grey
-(`unmatched="nodata"`). Panel layers take the zones' CRS object itself, so a
+left out of the panel and its scale. Also refused: a `difference_columns` entry
+that is not `name = left - right`; a difference name that is already a CSV
+column, or that `value_fields` does not name; a difference operand that is not
+a CSV column; `panel_extents` of the wrong length; a box that is not four finite
+numbers in order; and `panel_extents` together with `extent`. A layer with no key in any
+panel fails with `JOIN_NO_MATCH` and samples of both sides' keys. A grid whose
+panels would be under 10 mm after titles, labels and bars fails with
+`PAGE_TOO_SMALL`. Zones without a value in a panel are hidden, or drawn light
+grey (`unmatched="nodata"`). Panel layers take the zones' CRS object itself, so a
 custom `.prj` with no EPSG code stays in place.
 
 Full mode only, like `qgis_export_session`. Not in scope: mesh grids (next),
-values computed from points, difference maps, inset panels, per-panel extents.
+values computed from points, inset panels.
 
 ---
 
@@ -848,6 +882,8 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 **v1.22 — categorical zonal stats.** ✅ `qgis_zonal_stats` accepts `majority` and `histogram`. `majority` is the most frequent cell value. `histogram` writes one integer column per class id that occurs inside the zones (`lulc_2` is JAXA built-up). A class that does not occur gets no column. `mean` stays the numeric mean.
 
 **v1.23 — geometry writers.** ✅ `qgis_buffer`, `qgis_dissolve`, `qgis_clip` and `qgis_voronoi` write a GeoPackage or GeoJSON another tool can join. Buffer distance is metres. A geographic layer is measured in a projected CRS and written back in the source CRS. Dissolve writes one feature, or one feature per field value. Clip cuts to a polygon study area. Voronoi polygons use the same `QgsGeometry.voronoiDiagram` as the catchment PNG, which stays a PNG. Full mode only. No Processing.
+
+**v1.24 — layout type and panel frames.** ✅ `qgis_compose_layout` takes optional `width_mm` and `height_mm`, `font_family`, `title_size_pt`, `legend_size_pt` and `legend_corner`. Omitted, the page preset, the 18 pt title and the top-right legend stay. `qgis_compose_panels` takes `difference_columns` (`name = left - right`, joined into the CSV before the scale) and `panel_extents` (one box per panel). An older plugin that ignores the new keys raises `PluginOutdatedError`.
 
 ---
 

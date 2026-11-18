@@ -17,6 +17,7 @@ from qgis_mcp_workflows.errors import (
     FieldNotFoundError,
     InvalidArgumentError,
     JoinError,
+    PluginOutdatedError,
 )
 from qgis_mcp_workflows.panels import group_scales, ticks
 from qgis_mcp_workflows.server import qgis_compose_panels
@@ -259,6 +260,104 @@ def test_keys_on_the_layer_without_any_number_are_refused_before_rendering(fake_
     with pytest.raises(InvalidArgumentError, match=r"no number for any zone on the layer.*'v'.*Next:"):
         _call(csv, tmp_path, value_fields=["v"], rows=1, cols=1)
     assert _rendered(fake_executor) == []
+
+
+def _diff_csv(tmp_path):
+    path = tmp_path / "diff.csv"
+    path.write_text(
+        "zone_id,sim,obs\n13101,0.4,0.1\n13102,0.2,0.5\nTOTAL,9,1\n",
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def test_a_difference_column_is_joined_into_the_panels(fake_executor, tmp_path):
+    fake_executor.responses["compose_panels"] = _plugin_result
+    result = _call(
+        _diff_csv(tmp_path), tmp_path, value_fields=["sim", "diff"], rows=1, cols=2,
+        difference_columns=["diff = sim - obs"],
+    )
+    params = fake_executor.calls[-1][1]
+    assert params["panels"][0]["values"] == {"13101": 0.4, "13102": 0.2}
+    # TOTAL is not a zone, so 8 does not enter the scale. 13102 is 0.2 - 0.5.
+    diff = params["panels"][1]["values"]
+    assert set(diff) == {"13101", "13102"}
+    assert diff["13101"] == pytest.approx(0.3)
+    assert diff["13102"] == pytest.approx(-0.3)
+    assert "extents" not in params
+    assert result.difference_columns == ["diff"]
+    assert result.panel_extents is None
+    assert result.groups[0].data_max == 0.4
+    assert result.groups[0].vmin == -0.3
+
+
+def test_a_blank_operand_stays_out_of_the_difference(fake_executor, tmp_path):
+    path = tmp_path / "gap.csv"
+    path.write_text("zone_id,sim,obs\n13101,0.4,0.1\n13102,0.8,\n", encoding="utf-8")
+    fake_executor.responses["compose_panels"] = _plugin_result
+    _call(
+        str(path), tmp_path, value_fields=["sim", "diff"], rows=1, cols=2,
+        difference_columns=['"diff" = "sim" - "obs"'],
+    )
+    panels = fake_executor.calls[-1][1]["panels"]
+    assert panels[0]["values"]["13102"] == 0.8
+    assert "13102" not in panels[1]["values"]
+    assert panels[1]["values"]["13101"] == pytest.approx(0.3)
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"difference_columns": ['"share" = "sim" / sum("sim")']}, r"name = left - right.*qgis_expression"),
+    ({"difference_columns": ["sim = sim - obs"]}, r"already a CSV column"),
+    ({"difference_columns": ["diff = sim - missing"]}, r"missing"),
+    ({"difference_columns": ["diff = sim - obs"], "value_fields": ["sim"], "rows": 1, "cols": 1},
+     r"not a panel"),
+], ids=["expression", "collision", "operand", "unused"])
+def test_bad_difference_columns_are_refused(fake_executor, tmp_path, kwargs, match):
+    with pytest.raises((InvalidArgumentError, FieldNotFoundError), match=match):
+        _call(_diff_csv(tmp_path), tmp_path, **kwargs)
+    assert fake_executor.calls == []
+
+
+def test_panel_extents_are_one_box_per_panel(fake_executor, csv_path, tmp_path):
+    def rendered(params):
+        body = _plugin_result(params)
+        body["extents_applied"] = True
+        return body
+
+    boxes = [[139.0, 35.6, 139.8, 35.8], [139.1, 35.5, 139.9, 35.7],
+             [139.0, 35.4, 139.7, 35.6], [139.2, 35.5, 139.6, 35.8]]
+    fake_executor.responses["compose_panels"] = rendered
+    result = _call(csv_path, tmp_path, panel_extents=boxes)
+    params = fake_executor.calls[-1][1]
+    assert params["extents"] == boxes
+    assert params["extent"] is None
+    assert result.panel_extents == boxes
+
+
+def test_panel_extents_and_a_shared_extent_are_refused(fake_executor, csv_path, tmp_path):
+    with pytest.raises(InvalidArgumentError, match=r"extent and panel_extents.*Next:"):
+        _call(csv_path, tmp_path, extent=[139.0, 35.0, 140.0, 36.0],
+              panel_extents=[[139.0, 35.0, 140.0, 36.0]])
+    assert fake_executor.calls == []
+
+
+@pytest.mark.parametrize("boxes", [
+    [[139.0, 35.0, 140.0, 36.0]],
+    [[140.0, 35.0, 139.0, 36.0], [0, 0, 1, 1], [0, 0, 1, 1], [0, 0, 1, 1]],
+    [[139.0, 35.0, 140.0, "x"], [0, 0, 1, 1], [0, 0, 1, 1], [0, 0, 1, 1]],
+    [[0, 0, 1, 1], [0, 1.0, 1.0, 1.0], [0, 0, 1, 1], [0, 0, 1, 1]],
+], ids=["length", "order", "text", "flat-y"])
+def test_a_bad_panel_extent_is_refused(fake_executor, csv_path, tmp_path, boxes):
+    with pytest.raises(InvalidArgumentError, match=r"panel_extents.*Next:"):
+        _call(csv_path, tmp_path, panel_extents=boxes)
+    assert fake_executor.calls == []
+
+
+def test_an_old_plugin_that_ignores_panel_extents_is_outdated(fake_executor, csv_path, tmp_path):
+    fake_executor.responses["compose_panels"] = _plugin_result
+    boxes = [[0.0, 0.0, 1.0, 1.0]] * 4
+    with pytest.raises(PluginOutdatedError, match="Next:"):
+        _call(csv_path, tmp_path, panel_extents=boxes)
 
 
 def test_other_plugin_errors_from_get_field_values_pass_through(fake_executor, csv_path, tmp_path):

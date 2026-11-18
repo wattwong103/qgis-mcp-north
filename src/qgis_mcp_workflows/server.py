@@ -657,6 +657,8 @@ class ComposeLayoutResult(DrawsMap):
     n_layers: int
     items: list[str]
     page_size_mm: list[float]
+    fonts_missing: list[str] = []
+    layout_applied: dict | None = None
 
 
 class PanelGroup(BaseModel):
@@ -679,6 +681,8 @@ class PanelsResult(ComposeLayoutResult):
     csv_keys_unmatched_sample: Annotated[list[str], Field(description="Up to 5 of those keys, sorted.")]
     panel_boxes_mm: Annotated[list[list[float]], Field(description="Each panel's [x, y, width, height] on the page, mm from the top left.")]
     colorbar_boxes_mm: Annotated[list[list[float]], Field(description="Each colour bar's [x, y, width, height], one per group.")]
+    difference_columns: Annotated[list[str], Field(description="Columns computed as name = left - right and joined into the CSV before scaling.")] = []
+    panel_extents: Annotated[list[list[float]] | None, Field(description="One [xmin, ymin, xmax, ymax] per panel when the caller set panel_extents; otherwise null and every panel shares one frame.")] = None
 
 
 class DiagramMapResult(RenderResult):
@@ -3589,6 +3593,12 @@ def qgis_compose_layout(
     scale_bar: Annotated[bool, Field(description="Add a scale bar linked to the map.")] = True,
     north_arrow: Annotated[bool, Field(description="Add a north arrow from QGIS's bundled SVGs.")] = True,
     dpi: Annotated[int, Field(description="Export DPI.", ge=72, le=600)] = 300,
+    width_mm: Annotated[float | None, Field(description="Page width in mm. Set together with height_mm; both omitted keeps the page preset. Greater than 20 and at most 1000.")] = None,
+    height_mm: Annotated[float | None, Field(description="Page height in mm. Set together with width_mm; both omitted keeps the page preset.")] = None,
+    font_family: Annotated[str | None, Field(description="Font for the title, legend and scale bar. A missing family is listed in fonts_missing and QGIS's default font draws.")] = None,
+    title_size_pt: Annotated[float | None, Field(description="Title size in points (just above 0 to 72). Needs title. Omitted, the title stays 18 pt bold.")] = None,
+    legend_size_pt: Annotated[float | None, Field(description="Legend text size in points (just above 0 to 72). Needs legend=True. Omitted, the legend font stays QGIS's default.")] = None,
+    legend_corner: Annotated[Literal["top_left", "top_right", "bottom_left", "bottom_right"] | None, Field(description="Legend corner. Omitted, the legend stays inset from the top-right of the map. Needs legend=True.")] = None,
 ) -> ComposeLayoutResult:
     """Compose a deck-ready print layout from layers and export it. v2 workflow tool.
 
@@ -3596,14 +3606,26 @@ def qgis_compose_layout(
     with a titled map panel plus a linked legend, scale bar and north arrow — the
     gap that ``qgis_export_layout`` (which only exports pre-authored .qgz layouts)
     leaves open. Single panel for now; multi-panel / inset is a future extension.
+    ``width_mm`` and ``height_mm`` replace the page preset when both are set.
+    ``font_family``, ``title_size_pt``, ``legend_size_pt`` and ``legend_corner``
+    match the panel tool's type. Omitted, the preset, the 18 pt title and the
+    top-right legend stay, and those keys are not sent.
 
     Returns: ``ComposeLayoutResult`` with output path, format, layer count, the
-    furniture items added, and page size in mm.
+    furniture items added, page size in mm, fonts that were not found, and
+    ``layout_applied`` when a v1.24 control was set.
 
     Chains into: ``qgis_figures_to_pptx``.
     """
+    from qgis_mcp_workflows.errors import PluginOutdatedError
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import layout_params
 
+    sent = layout_params(
+        width_mm=width_mm, height_mm=height_mm, font_family=font_family,
+        title_size_pt=title_size_pt, legend_size_pt=legend_size_pt, legend_corner=legend_corner,
+        title=title, legend=legend, scale_bar=scale_bar,
+    )
     abs_layers = [user_abs(p) for p in layer_paths]
     abs_output = user_abs(output_path)
     params = {
@@ -3617,13 +3639,18 @@ def qgis_compose_layout(
         "north_arrow": north_arrow,
         "dpi": dpi,
     }
+    params.update(sent)
     result = get_executor().dispatch("compose_layout", params, timeout=120)
+    if sent and "layout_applied" not in result:
+        raise PluginOutdatedError(_executor_transport_name())
     return ComposeLayoutResult(
         output_path=result["output_path"],
         format=result["format"],
         n_layers=result["n_layers"],
         items=result["items"],
         page_size_mm=result["page_size_mm"],
+        fonts_missing=list(result.get("fonts_missing") or []),
+        layout_applied=result.get("layout_applied"),
     )
 
 
@@ -3666,19 +3693,26 @@ def _refuse_bad_panel_arguments(*, value_fields: list[str], rows: int, cols: int
         raise InvalidArgumentError(f"output_path {output_path!r} must end in .png, .pdf or .svg.")
 
 
-def _read_panel_columns(csv_path: str, join_field: str,
-                        value_fields: list[str]) -> tuple[list[dict[str, float]], set[str]]:
-    """One ``{key: value}`` dict per field, and every key in the CSV.
+def _read_panel_columns(csv_path: str, join_field: str, value_fields: list[str],
+                        diffs: list) -> tuple[list[dict[str, float]], set[str]]:
+    """One ``{key: value}`` dict per panel, and every key in the CSV.
 
     Blank, non-numeric and non-finite cells are left out of the dicts; their rows'
     keys stay in the key set. A key on two rows is refused: keeping either row
-    would draw a map the CSV does not say.
+    would draw a map the CSV does not say. ``diffs`` are ``name = left - right``
+    columns joined in after the CSV is read; their operands are CSV columns.
     """
     import csv as _csv
 
     from qgis_mcp_workflows.errors import FieldNotFoundError
+    from qgis_mcp_workflows.panels import subtract_columns
 
-    columns: list[dict[str, float]] = [{} for _ in value_fields]
+    diff_names = [diff.name for diff in diffs]
+    csv_fields: list[str] = []
+    for field in [*value_fields, *(name for diff in diffs for name in (diff.left, diff.right))]:
+        if field not in diff_names and field not in csv_fields:
+            csv_fields.append(field)
+    columns: list[dict[str, float]] = [{} for _ in csv_fields]
     seen: set[str] = set()
     repeated: list[str] = []
     n_skipped = 0
@@ -3686,7 +3720,21 @@ def _read_panel_columns(csv_path: str, join_field: str,
         with open(csv_path, encoding="utf-8-sig", newline="") as f:
             reader = _csv.DictReader(f)
             csv_columns = reader.fieldnames or []
-            for field in (join_field, *value_fields):
+            for diff in diffs:
+                if diff.name in csv_columns:
+                    raise InvalidArgumentError(
+                        f"difference column {diff.name!r} is already a CSV column.",
+                        next_step="pick another name, or drop it from difference_columns",
+                    )
+                for operand in (diff.left, diff.right):
+                    if operand not in csv_columns:
+                        raise FieldNotFoundError(operand, csv_columns)
+                if diff.name not in value_fields:
+                    raise InvalidArgumentError(
+                        f"difference column {diff.name!r} is not a panel.",
+                        next_step="name it in value_fields, or drop it from difference_columns",
+                    )
+            for field in (join_field, *csv_fields):
                 if field not in csv_columns:
                     raise FieldNotFoundError(field, csv_columns)
             for row in reader:
@@ -3694,7 +3742,7 @@ def _read_panel_columns(csv_path: str, join_field: str,
                 if key in seen:
                     repeated.append(key)
                 seen.add(key)
-                for values, field in zip(columns, value_fields, strict=True):
+                for values, field in zip(columns, csv_fields, strict=True):
                     try:
                         value = float(row[field])
                     except (TypeError, ValueError):
@@ -3717,7 +3765,10 @@ def _read_panel_columns(csv_path: str, join_field: str,
     if n_skipped:
         logger.warning("compose_panels: left out %d blank, non-numeric or non-finite cells of %s",
                        n_skipped, csv_path)
-    return columns, seen
+    by_name = dict(zip(csv_fields, columns, strict=True))
+    for diff in diffs:
+        by_name[diff.name] = subtract_columns(by_name[diff.left], by_name[diff.right])
+    return [by_name[field] for field in value_fields], seen
 
 
 _UNMATCHED_SAMPLE = 5  # CSV keys named in an error or a result
@@ -3739,6 +3790,50 @@ def _layer_join_keys(zones_path: str, join_field: str) -> set[str]:
             "Next: restart QGIS so it loads the plugin from this checkout (python install.py links it), then retry",
         ) from err
     return set(result["values"])
+
+
+def _panel_extent_boxes(panel_extents: list | None, n_panels: int,
+                        extent: list[float] | None) -> list[list[float]] | None:
+    """One finite ``[xmin, ymin, xmax, ymax]`` per panel, or ``None`` for the shared frame."""
+    if panel_extents is None:
+        return None
+    if extent is not None:
+        raise InvalidArgumentError(
+            "extent and panel_extents both frame the panels.",
+            next_step="drop extent or drop panel_extents",
+        )
+    if isinstance(panel_extents, (str, bytes)) or not isinstance(panel_extents, (list, tuple)):
+        raise InvalidArgumentError(
+            f"panel_extents must be one [xmin, ymin, xmax, ymax] per panel, got {panel_extents!r}.",
+            next_step="pass one box per panel, row by row",
+        )
+    if len(panel_extents) != n_panels:
+        raise InvalidArgumentError(
+            f"panel_extents has {len(panel_extents)} box(es); the grid has {n_panels} panels.",
+            next_step="pass one [xmin, ymin, xmax, ymax] per panel, row by row",
+        )
+    boxes: list[list[float]] = []
+    for index, box in enumerate(panel_extents):
+        if isinstance(box, (str, bytes)) or not isinstance(box, (list, tuple)) or len(box) != 4:
+            raise InvalidArgumentError(
+                f"panel_extents[{index}] must be [xmin, ymin, xmax, ymax] with xmin < xmax and ymin < ymax.",
+                next_step="pass four finite numbers, xmin < xmax and ymin < ymax",
+            )
+        numbers: list[float] = []
+        for value in box:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise InvalidArgumentError(
+                    f"panel_extents[{index}] must be four finite numbers, got {value!r}.",
+                    next_step="pass four finite numbers, xmin < xmax and ymin < ymax",
+                )
+            numbers.append(float(value))
+        if not (numbers[0] < numbers[2] and numbers[1] < numbers[3]):
+            raise InvalidArgumentError(
+                f"panel_extents[{index}] must be [xmin, ymin, xmax, ymax] with xmin < xmax and ymin < ymax.",
+                next_step="pass four finite numbers, xmin < xmax and ymin < ymax",
+            )
+        boxes.append(numbers)
+    return boxes
 
 
 def _drop_keys_off_the_layer(columns: list[dict[str, float]], csv_keys: set[str], layer_keys: set[str],
@@ -3786,7 +3881,9 @@ def qgis_compose_panels(
     tick_format: Annotated[str, Field(description="Python format spec for tick labels, applied as format(value, spec): '.3g', '.1%', ',.0f'. Not a '{}' template.")] = ".3g",
     n_ticks: Annotated[int, Field(description="Evenly spaced ticks per colour bar, both ends included.", ge=2, le=11)] = 5,
     unmatched: Annotated[Literal["hide", "nodata"], Field(description='Zones without a value in a panel: "hide" (not drawn) or "nodata" (light grey, outside the scale).')] = "hide",
-    extent: Annotated[list[float] | None, Field(description="Map extent [xmin, ymin, xmax, ymax] in the zones' CRS, shared by every panel. Default: the zones drawn in any panel (hidden ones excluded) plus 2%.")] = None,
+    extent: Annotated[list[float] | None, Field(description="Map extent [xmin, ymin, xmax, ymax] in the zones' CRS, shared by every panel. Default: the zones drawn in any panel (hidden ones excluded) plus 2%. Not together with panel_extents.")] = None,
+    panel_extents: Annotated[list[list[float]] | None, Field(description="One [xmin, ymin, xmax, ymax] per panel, row by row, in the zones' CRS. Omitted, every panel shares extent. xmin < xmax and ymin < ymax.")] = None,
+    difference_columns: Annotated[list[str] | None, Field(description='Columns computed on the CSV and joined in before scaling: ["diff = sim - obs"]. Quotes around names are optional. Other expressions stay on qgis_expression.')] = None,
     width_mm: Annotated[float, Field(description="Page width in mm (160 suits a two-column journal figure).", gt=20.0, le=1000.0)] = 160.0,
     height_mm: Annotated[float, Field(description="Page height in mm.", gt=20.0, le=1000.0)] = 140.0,
     font_family: Annotated[str | None, Field(description="Font family for every label, e.g. 'Arial'. A family that is not installed is reported in fonts_missing and QGIS's default font is used.")] = None,
@@ -3801,23 +3898,38 @@ def qgis_compose_panels(
 
     When to use: a camera-ready comparison figure, e.g. simulated vs observed
     trip shares (columns) for origins and destinations (rows). Every panel draws
-    the same zones within one shared extent. Panels in a ``share_scale`` group use
-    one continuous colour scale and one colour bar. The scale runs from ``vmin``
-    to the ``cap_percentile`` percentile of the group's values. CSV rows whose key
-    no zone carries (a total row, another zone system) are not drawn and stay out
-    of every scale. Fonts, sizes and outline weight are set here, so the figure
-    needs no editing afterwards.
+    the same zones within one shared extent, unless ``panel_extents`` gives each
+    panel its own frame. Panels in a ``share_scale`` group use one continuous
+    colour scale and one colour bar. The scale runs from ``vmin`` to the
+    ``cap_percentile`` percentile of the group's values. ``difference_columns``
+    (``name = left - right``) are computed on the CSV and joined in before that
+    scale. CSV rows whose key no zone carries (a total row, another zone system)
+    are not drawn and stay out of every scale. Fonts, sizes and outline weight
+    are set here, so the figure needs no editing afterwards.
 
     Returns: ``PanelsResult`` with the output path, each group's scale (vmin,
     vmax, data max, capped), fonts that were not found, join counts (zones
-    without values, and CSV keys without zones with a sample), and the panel
-    and colour-bar boxes in mm.
+    without values, and CSV keys without zones with a sample), the panel
+    and colour-bar boxes in mm, the difference columns that were joined, and
+    the per-panel extents when those were set.
 
     Chains into: ``qgis_figures_to_pptx``.
     """
+    from qgis_mcp_workflows.errors import PluginOutdatedError
     from qgis_mcp_workflows.executors import get_executor
-    from qgis_mcp_workflows.panels import group_scales, panel_group, ticks
+    from qgis_mcp_workflows.panels import group_scales, panel_group, parse_difference_columns, ticks
 
+    try:
+        diffs = parse_difference_columns(difference_columns)
+    except ValueError as err:
+        raise InvalidArgumentError(
+            str(err),
+            next_step=(
+                "pass name = left - right (quotes optional), or compute another expression "
+                "with qgis_expression and write that column into the CSV"
+            ),
+        ) from None
+    boxes = _panel_extent_boxes(panel_extents, rows * cols, extent)
     n_groups = {"row": rows, "column": cols}.get(share_scale, 1)
     palettes = list(palettes) if palettes is not None else ["YlOrRd"]
     _refuse_bad_panel_arguments(
@@ -3828,7 +3940,7 @@ def qgis_compose_panels(
     abs_csv = user_abs(value_csv)
     _require_file("value_csv", abs_csv)
     abs_zones = user_abs(zones_path)
-    columns, csv_keys = _read_panel_columns(abs_csv, join_field, value_fields)
+    columns, csv_keys = _read_panel_columns(abs_csv, join_field, value_fields, diffs)
     columns, off_layer = _drop_keys_off_the_layer(columns, csv_keys, _layer_join_keys(abs_zones, join_field),
                                                   join_field)
     if not any(columns):
@@ -3868,7 +3980,11 @@ def qgis_compose_panels(
         "tick_size_pt": tick_size_pt, "outline_width_mm": outline_width_mm, "outline_color": outline_color,
         "dpi": dpi,
     }
+    if boxes is not None:
+        params["extents"] = boxes
     result = get_executor().dispatch("compose_panels", params, timeout=180)
+    if boxes is not None and "extents_applied" not in result:
+        raise PluginOutdatedError(_executor_transport_name())
     return PanelsResult(
         output_path=result["output_path"], format=result["format"], n_layers=result["n_layers"],
         items=result["items"], page_size_mm=result["page_size_mm"], n_panels=result["n_panels"],
@@ -3878,6 +3994,7 @@ def qgis_compose_panels(
         fonts_missing=result["fonts_missing"], n_matched=result["n_matched"], n_unmatched=result["n_unmatched"],
         n_csv_keys_unmatched=len(off_layer), csv_keys_unmatched_sample=off_layer[:_UNMATCHED_SAMPLE],
         panel_boxes_mm=result["panel_boxes_mm"], colorbar_boxes_mm=result["colorbar_boxes_mm"],
+        difference_columns=[diff.name for diff in diffs], panel_extents=boxes,
     )
 
 

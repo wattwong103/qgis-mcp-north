@@ -192,6 +192,82 @@ def label_params(
     return {name: value for name, value in provided.items() if value is not None}
 
 
+_LEGEND_CORNERS = ("top_left", "top_right", "bottom_left", "bottom_right")
+
+
+def layout_params(
+    *,
+    width_mm: float | None,
+    height_mm: float | None,
+    font_family: str | None,
+    title_size_pt: float | None,
+    legend_size_pt: float | None,
+    legend_corner: str | None,
+    title: str | None,
+    legend: bool,
+    scale_bar: bool,
+) -> dict:
+    """Page millimetres and type for ``qgis_compose_layout``. Omitted keys stay out."""
+    if (width_mm is None) != (height_mm is None):
+        raise InvalidArgumentError(
+            "width_mm and height_mm are set together.",
+            next_step="pass both, or omit both to keep the page preset",
+        )
+    _number("width_mm", width_mm, low=20, high=1000, low_exclusive=True)
+    _number("height_mm", height_mm, low=20, high=1000, low_exclusive=True)
+    if isinstance(font_family, str) and not font_family.strip():
+        raise InvalidArgumentError(
+            "font_family is empty.",
+            next_step="pass a family name, or omit font_family",
+        )
+    if font_family is not None and not isinstance(font_family, str):
+        raise InvalidArgumentError(
+            f"font_family must be a font family name, got {font_family!r}.",
+            next_step="pass a family name, or omit font_family",
+        )
+    _number("title_size_pt", title_size_pt, low=0, high=72, low_exclusive=True)
+    _number("legend_size_pt", legend_size_pt, low=0, high=72, low_exclusive=True)
+    if title_size_pt is not None and not title:
+        raise InvalidArgumentError(
+            "title_size_pt needs a title.",
+            next_step="pass title, or omit title_size_pt",
+        )
+    if legend_size_pt is not None and not legend:
+        raise InvalidArgumentError(
+            "legend_size_pt needs legend=True.",
+            next_step="pass legend=True, or omit legend_size_pt",
+        )
+    if legend_corner is not None:
+        if legend_corner not in _LEGEND_CORNERS:
+            raise InvalidArgumentError(
+                f"legend_corner must be one of {', '.join(_LEGEND_CORNERS)}, got {legend_corner!r}.",
+                next_step="pass top_left, top_right, bottom_left, or bottom_right",
+            )
+        if not legend:
+            raise InvalidArgumentError(
+                "legend_corner needs legend=True.",
+                next_step="pass legend=True, or omit legend_corner",
+            )
+    if font_family and not (title or legend or scale_bar):
+        raise InvalidArgumentError(
+            "font_family needs a title, a legend, or a scale bar.",
+            next_step="pass title, or legend=True, or scale_bar=True, or omit font_family",
+        )
+    sent: dict = {}
+    if width_mm is not None:
+        sent["width_mm"] = float(width_mm)
+        sent["height_mm"] = float(height_mm)
+    if font_family:
+        sent["font_family"] = font_family
+    if title_size_pt is not None:
+        sent["title_size_pt"] = float(title_size_pt)
+    if legend_size_pt is not None:
+        sent["legend_size_pt"] = float(legend_size_pt)
+    if legend_corner is not None:
+        sent["legend_corner"] = legend_corner
+    return sent
+
+
 def require_style_applied(result: dict, sent: dict, transport: str) -> None:
     """An older plugin accepts the keys and draws the old figure."""
     if sent and "style_applied" not in result:

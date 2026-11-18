@@ -75,7 +75,8 @@ for free — a v0.4 architectural promise that v0.5+ tools inherit.
 | `qgis_render_trajectory` | Lines/points/heatmap from CSV/GPX. Stride sampling; optional stroke, opacity and labels |
 | `qgis_render_od_flows` | Origin-destination arcs over a zones layer. Width scales with flow unless a stroke width is set |
 | `qgis_export_layout` | Print-composer → PNG/PDF/SVG |
-| `qgis_compose_panels` | Grid of map panels on linked colour scales with colour bars, set fonts and line weights → PDF/SVG/PNG |
+| `qgis_compose_layout` | Print layout from layers: title, legend, scale bar, north arrow. Optional page millimetres, font, title and legend size, legend corner |
+| `qgis_compose_panels` | Grid of map panels on linked colour scales, with difference columns and optional per-panel extents → PDF/SVG/PNG |
 | `qgis_batch_render` | Fan-out per attribute value; manifest + per-value errors |
 | `qgis_figures_to_pptx` | Assemble PNGs into a PowerPoint deck (defaults to Sekimoto-lab blank) |
 | `qgis_export_session` | Write a replay script that re-makes figures from their `.provenance.json` sidecars |

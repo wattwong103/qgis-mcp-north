@@ -7,7 +7,15 @@ from __future__ import annotations
 
 import pytest
 
-from qgis_mcp_workflows.panels import GroupScale, group_scales, panel_group, percentile, ticks
+from qgis_mcp_workflows.panels import (
+    GroupScale,
+    group_scales,
+    panel_group,
+    parse_difference_columns,
+    percentile,
+    subtract_columns,
+    ticks,
+)
 
 
 def test_panel_group_by_row_column_and_all():
@@ -45,6 +53,38 @@ def test_a_flat_group_has_one_tick():
     s = group_scales([[0, 0], [0, 0]], 1, 2, "row", None, 100)[0]
     assert s.vmin == s.vmax == 0 and ticks(s, 5, ".1f") == [(0.0, "0.0")]
     assert not s.empty  # flat is not empty: its zones have values, all zero
+
+
+def test_a_difference_column_parses_bare_and_quoted_names():
+    one = parse_difference_columns(['diff = sim - obs'])
+    assert (one[0].name, one[0].left, one[0].right) == ("diff", "sim", "obs")
+    quoted = parse_difference_columns(['"net flux" = "sim share" - "obs share"'])
+    assert (quoted[0].name, quoted[0].left, quoted[0].right) == ("net flux", "sim share", "obs share")
+    assert parse_difference_columns(None) == []
+    assert parse_difference_columns([]) == []
+
+
+@pytest.mark.parametrize("entry", [
+    "sim + obs",
+    '"share" = "trips" / sum("trips")',
+    "diff = sim",
+    " = sim - obs",
+    3,
+])
+def test_a_difference_that_is_not_subtraction_is_refused(entry):
+    with pytest.raises(ValueError, match=r"name = left - right"):
+        parse_difference_columns([entry])
+
+
+def test_a_difference_name_cannot_be_repeated():
+    with pytest.raises(ValueError, match="diff"):
+        parse_difference_columns(["diff = sim - obs", "diff = a - b"])
+
+
+def test_subtraction_drops_a_zone_missing_either_column():
+    diff = subtract_columns({"13101": 0.4, "13102": 0.8}, {"13101": 0.1})
+    assert set(diff) == {"13101"}
+    assert diff["13101"] == pytest.approx(0.3)
 
 
 def test_a_group_without_values_is_flagged_empty():

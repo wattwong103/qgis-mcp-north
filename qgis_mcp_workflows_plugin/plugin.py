@@ -122,6 +122,11 @@ from .compat import (
     LAYER_VECTOR,
     LAYOUT_MM,
     LAYOUT_SUCCESS,
+    LEGEND_TEXT_STYLES,
+    REF_LOWER_LEFT,
+    REF_LOWER_RIGHT,
+    REF_UPPER_LEFT,
+    REF_UPPER_RIGHT,
     PEN_NONE,
     PEN_SOLID,
     MSG_CRITICAL,
@@ -4162,6 +4167,12 @@ class QgisMCPServer(QObject):
         scale_bar=True,
         north_arrow=True,
         dpi=300,
+        width_mm=None,
+        height_mm=None,
+        font_family=None,
+        title_size_pt=None,
+        legend_size_pt=None,
+        legend_corner=None,
         **kwargs,
     ):
         """Build a print layout programmatically and export it. v2 workflow tool.
@@ -4205,15 +4216,35 @@ class QgisMCPServer(QObject):
                 "a4_landscape": (297, 210), "a4_portrait": (210, 297),
                 "a3_landscape": (420, 297), "square": (250, 250),
             }
-            pw, ph = pages.get(page, (297, 210))
+            if width_mm is not None and height_mm is not None:
+                pw, ph = float(width_mm), float(height_mm)
+            elif width_mm is not None or height_mm is not None:
+                raise Exception(
+                    "compose_layout: width_mm and height_mm are set together. "
+                    "Next: pass both, or omit both to keep the page preset"
+                )
+            else:
+                pw, ph = pages.get(page, (297, 210))
             mm = LAYOUT_MM
+            missing = []
+            family_ok = False
+            if font_family:
+                if is_offscreen():
+                    register_system_fonts()
+                if font_family not in font_families():
+                    missing = [font_family]
+                else:
+                    family_ok = True
 
             layout = QgsPrintLayout(project)
             layout.initializeDefaults()
             layout.pageCollection().page(0).setPageSize(QgsLayoutSize(pw, ph, mm))
 
             margin = 8.0
-            title_h = 12.0 if title else 0.0
+            if title and title_size_pt is not None:
+                title_h = float(title_size_pt) * self._PT_MM * 1.8
+            else:
+                title_h = 12.0 if title else 0.0
             map_w = pw - 2 * margin
             map_h = ph - 2 * margin - title_h
 
@@ -4231,17 +4262,22 @@ class QgisMCPServer(QObject):
                 lbl.setText(str(title))
                 try:
                     from qgis.core import QgsTextFormat
+                    from qgis.PyQt.QtGui import QFont
 
                     tf = QgsTextFormat()
-                    fnt = tf.font()
+                    fnt = QFont()
                     fnt.setBold(True)
+                    if family_ok:
+                        fnt.setFamily(font_family)
                     tf.setFont(fnt)
-                    tf.setSize(18)
+                    tf.setSize(float(title_size_pt) if title_size_pt is not None else 18)
                     lbl.setTextFormat(tf)
                 except Exception:
                     font = lbl.font()
-                    font.setPointSize(18)
+                    font.setPointSize(int(title_size_pt) if title_size_pt is not None else 18)
                     font.setBold(True)
+                    if family_ok:
+                        font.setFamily(font_family)
                     lbl.setFont(font)
                 layout.addLayoutItem(lbl)
                 lbl.attemptMove(QgsLayoutPoint(margin, 3.0, mm))
@@ -4251,8 +4287,27 @@ class QgisMCPServer(QObject):
             if legend:
                 leg = QgsLayoutItemLegend(layout)
                 leg.setLinkedMap(m)
+                if font_family or legend_size_pt is not None:
+                    for component in LEGEND_TEXT_STYLES:
+                        legend_font = leg.styleFont(component)
+                        if family_ok:
+                            legend_font.setFamily(font_family)
+                        if legend_size_pt is not None:
+                            legend_font.setPointSizeF(float(legend_size_pt))
+                        leg.setStyleFont(component, legend_font)
                 layout.addLayoutItem(leg)
-                leg.attemptMove(QgsLayoutPoint(pw - margin - 46, margin + title_h + 4, mm))
+                if legend_corner:
+                    anchor, x, y = {
+                        "top_left": (REF_UPPER_LEFT, margin, margin + title_h + 4),
+                        "top_right": (REF_UPPER_RIGHT, pw - margin, margin + title_h + 4),
+                        "bottom_left": (REF_LOWER_LEFT, margin, ph - margin),
+                        "bottom_right": (REF_LOWER_RIGHT, pw - margin, ph - margin),
+                    }[legend_corner]
+                    leg.setReferencePoint(anchor)
+                    leg.attemptMove(QgsLayoutPoint(x, y, mm))
+                else:
+                    # v1.23 placement: inset from the top-right, not anchored on the corner.
+                    leg.attemptMove(QgsLayoutPoint(pw - margin - 46, margin + title_h + 4, mm))
                 items.append("legend")
 
             if scale_bar:
@@ -4262,6 +4317,10 @@ class QgisMCPServer(QObject):
                     sb.applyDefaultSize()
                 except Exception:
                     pass
+                if family_ok:
+                    bar_font = sb.font()
+                    bar_font.setFamily(font_family)
+                    sb.setFont(bar_font)
                 layout.addLayoutItem(sb)
                 sb.attemptMove(QgsLayoutPoint(margin + 2, ph - margin - 14, mm))
                 items.append("scalebar")
@@ -4298,13 +4357,29 @@ class QgisMCPServer(QObject):
             if res != LAYOUT_SUCCESS:
                 raise Exception(f"compose_layout export failed with code {res}")
 
-            return {
+            body = {
                 "output_path": output_path,
                 "format": fmt,
                 "n_layers": len(layers),
                 "items": items,
                 "page_size_mm": [float(pw), float(ph)],
             }
+            applied = {}
+            if width_mm is not None and height_mm is not None:
+                applied["width_mm"] = float(width_mm)
+                applied["height_mm"] = float(height_mm)
+            if font_family:
+                applied["font_family"] = font_family
+            if title_size_pt is not None:
+                applied["title_size_pt"] = float(title_size_pt)
+            if legend_size_pt is not None:
+                applied["legend_size_pt"] = float(legend_size_pt)
+            if legend_corner:
+                applied["legend_corner"] = legend_corner
+            if applied:
+                body["layout_applied"] = applied
+                body["fonts_missing"] = missing
+            return body
         finally:
             for tid in transient_ids:
                 try:
@@ -4450,6 +4525,7 @@ class QgisMCPServer(QObject):
         colorbar=True,
         colorbar_position="right",
         extent=None,
+        extents=None,
         width_mm=160.0,
         height_mm=140.0,
         font_family=None,
@@ -4499,7 +4575,19 @@ class QgisMCPServer(QObject):
                 transient_ids.append(layer.id())
                 layers.append(layer)
 
-            if extent is not None:
+            panel_rects = None
+            if extents is not None:
+                if len(extents) != len(layers):
+                    raise Exception(
+                        f"compose_panels: extents has {len(extents)} boxes for {len(layers)} panels. "
+                        "Next: pass one [xmin, ymin, xmax, ymax] per panel"
+                    )
+                panel_rects = [
+                    QgsRectangle(float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+                    for box in extents
+                ]
+                rect = panel_rects[0]
+            elif extent is not None:
                 rect = QgsRectangle(extent[0], extent[1], extent[2], extent[3])
             else:
                 # The zones drawn in any panel (hidden ones leave the frame), plus 2%.
@@ -4554,7 +4642,7 @@ class QgisMCPServer(QObject):
                 m.setLayers([layer])
                 m.setKeepLayerSet(True)
                 m.setCrs(zones.crs())
-                m.zoomToExtent(rect)
+                m.zoomToExtent(panel_rects[i] if panel_rects is not None else rect)
                 items.append(f"panel:{i}")
                 boxes.append([round(v, 3) for v in box])
 
@@ -4625,7 +4713,7 @@ class QgisMCPServer(QObject):
             if result != LAYOUT_SUCCESS:
                 raise Exception(f"compose_panels export failed with code {result}. "
                                 "Next: check the folder is writable and the file is not open elsewhere")
-            return {
+            body = {
                 "output_path": out,
                 "format": fmt,
                 "n_panels": len(layers),
@@ -4638,6 +4726,9 @@ class QgisMCPServer(QObject):
                 "panel_boxes_mm": boxes,
                 "colorbar_boxes_mm": bar_boxes,
             }
+            if extents is not None:
+                body["extents_applied"] = True
+            return body
         finally:
             for tid in transient_ids:
                 try:

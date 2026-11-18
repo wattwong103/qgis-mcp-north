@@ -3,6 +3,28 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.24.0 — 2026-11-18 — layout type and panel frames
+
+### Added
+
+- `qgis_compose_layout` takes optional `width_mm` and `height_mm` (both, or
+  neither; the page preset stays when both are omitted), `font_family`,
+  `title_size_pt`, `legend_size_pt` and `legend_corner`
+  (`top_left`, `top_right`, `bottom_left`, `bottom_right`). The font covers
+  the title, the legend and the scale bar. A missing family is listed in
+  `fonts_missing` and the default font draws. Omitted, the title stays 18 pt
+  bold and the legend stays inset from the top-right. An older plugin that
+  ignores the new keys raises `PluginOutdatedError`. Compound
+  `qgis_export(kind="compose_layout")` forwards the same arguments.
+- `qgis_compose_panels` takes `difference_columns` (`name = left - right`,
+  quotes optional). The subtraction is joined into the CSV before the scale.
+  A blank operand leaves that zone out. Other expressions stay on
+  `qgis_expression`.
+- `qgis_compose_panels` takes `panel_extents`, one `[xmin, ymin, xmax, ymax]`
+  per panel. Omitted, every panel still shares one frame. Together with
+  `extent` it is refused. An older plugin that draws one frame anyway raises
+  `PluginOutdatedError`.
+
 ## v1.23.0 — 2026-11-18 — geometry writers
 
 ### Added
