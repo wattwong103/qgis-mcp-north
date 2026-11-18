@@ -83,13 +83,18 @@ qgis_zonal_stats(
     zones_path="<repo>/assets/zones_tokyo23.gpkg",
     raster_path=".../2024JPN_v25.04_100m.tif",
     output_path="/tmp/ward_lulc.csv",
-    stats=["count", "mean"],
+    stats=["count", "mean", "majority", "histogram"],
     prefix="lulc_",
 )
 ```
 
 `basemap_paths` now accepts rasters. A filename matching `lulc` / `jaxa` /
 `2024jpn` gets the published 15-class palette (built-up = red, water = dark blue).
+
+`lulc_mean` stays the numeric mean of the class ids. `lulc_majority` is the
+most frequent class. `histogram` adds one integer column per class that occurs
+in the 23 wards; built-up is class 2, so the count is `lulc_2`. A class that
+does not occur has no column.
 
 ## 4. DRM routing
 

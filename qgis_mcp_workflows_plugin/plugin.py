@@ -5488,6 +5488,7 @@ class QgisMCPServer(QObject):
             "stdev": inner.StDev,
             "min": inner.Min,
             "max": inner.Max,
+            "majority": inner.Majority,
         }
         flags = 0
         for name in stat_names:
@@ -5499,6 +5500,178 @@ class QgisMCPServer(QObject):
                 )
             flags |= mapping[key]
         return flags
+
+    def _histogram_center_inside(self, geom, engine, x, y):
+        point = QgsGeometry.fromPointXY(QgsPointXY(x, y))
+        if engine is not None:
+            try:
+                return bool(engine.contains(point.constGet()))
+            except Exception:
+                pass
+        return bool(geom.contains(point))
+
+    def _histogram_window(self, bbox, extent, xres, yres, ncols, nrows):
+        """Native cell window covering ``bbox``, padded by one cell and clamped."""
+        import math
+
+        c0 = int(math.floor((bbox.xMinimum() - extent.xMinimum()) / xres)) - 1
+        c1 = int(math.floor((bbox.xMaximum() - extent.xMinimum()) / xres)) + 1
+        r0 = int(math.floor((extent.yMaximum() - bbox.yMaximum()) / yres)) - 1
+        r1 = int(math.floor((extent.yMaximum() - bbox.yMinimum()) / yres)) + 1
+        if c0 < 0:
+            c0 = 0
+        if r0 < 0:
+            r0 = 0
+        if c1 >= ncols:
+            c1 = ncols - 1
+        if r1 >= nrows:
+            r1 = nrows - 1
+        if c1 < c0 or r1 < r0:
+            return None
+        return c0, r0, c1, r1
+
+    def _histogram_cell_counts(
+        self, block, width, height, block_xmin, block_ymax, xres, yres, geom, engine, has_nodata, nodata, precise
+    ):
+        """Count non-nodata cell values inside ``geom``.
+
+        ``precise`` is False for a cell-center test. It is True when no center
+        fell in the polygon: a cell then counts if its rectangle intersects.
+        """
+        counts = {}
+        saw_data = False
+        for row in range(height):
+            for col in range(width):
+                if block.isNoData(row, col):
+                    continue
+                value = block.value(row, col)
+                if has_nodata and nodata is not None and value == float(nodata):
+                    continue
+                saw_data = True
+                if precise:
+                    cell = QgsRectangle(
+                        block_xmin + col * xres,
+                        block_ymax - (row + 1) * yres,
+                        block_xmin + (col + 1) * xres,
+                        block_ymax - row * yres,
+                    )
+                    if not geom.intersects(QgsGeometry.fromRect(cell)):
+                        continue
+                else:
+                    cx = block_xmin + (col + 0.5) * xres
+                    cy = block_ymax - (row + 0.5) * yres
+                    if not self._histogram_center_inside(geom, engine, cx, cy):
+                        continue
+                counts[value] = counts.get(value, 0) + 1
+        return counts, saw_data
+
+    def _zone_class_counts(self, zones_layer, raster_layer, band):
+        """Per-zone ``{cell value: count}`` for cells inside each polygon.
+
+        Zones are already in the raster CRS. A class that occurs only outside
+        these polygons is absent from every dict, so it gets no column.
+        """
+        provider = raster_layer.dataProvider()
+        if provider is None:
+            raise Exception("ZONAL_FAILED: raster has no data provider")
+        band_count = int(raster_layer.bandCount() or 0)
+        if band < 1 or band > band_count:
+            raise Exception("ZONAL_FAILED: raster_band %s is outside 1..%s" % (band, band_count))
+        has_nodata = False
+        nodata = None
+        try:
+            has_nodata = bool(provider.sourceHasNoDataValue(band))
+        except Exception:
+            has_nodata = False
+        if has_nodata:
+            nodata = provider.sourceNoDataValue(band)
+        extent = raster_layer.extent()
+        ncols = int(provider.xSize() or 0)
+        nrows = int(provider.ySize() or 0)
+        if ncols <= 0 or nrows <= 0 or extent.isEmpty():
+            raise Exception("ZONAL_FAILED: raster has no cells to summarize")
+        xres = extent.width() / float(ncols)
+        yres = extent.height() / float(nrows)
+        if xres <= 0 or yres <= 0:
+            raise Exception("ZONAL_FAILED: raster has a zero cell size")
+
+        fids = []
+        zone_counts = []
+        for feat in zones_layer.getFeatures():
+            fids.append(feat.id())
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                zone_counts.append({})
+                continue
+            bbox = geom.boundingBox().intersect(extent)
+            if bbox.isEmpty():
+                zone_counts.append({})
+                continue
+            window = self._histogram_window(bbox, extent, xres, yres, ncols, nrows)
+            if window is None:
+                zone_counts.append({})
+                continue
+            c0, r0, c1, r1 = window
+            width = c1 - c0 + 1
+            height = r1 - r0 + 1
+            block_xmin = extent.xMinimum() + c0 * xres
+            block_ymax = extent.yMaximum() - r0 * yres
+            block_extent = QgsRectangle(
+                block_xmin,
+                extent.yMaximum() - (r1 + 1) * yres,
+                extent.xMinimum() + (c1 + 1) * xres,
+                block_ymax,
+            )
+            block = provider.block(band, block_extent, width, height)
+            if block is None or not block.isValid():
+                raise Exception("ZONAL_FAILED: could not read raster band %s" % band)
+            engine = None
+            try:
+                engine = QgsGeometry.createGeometryEngine(geom.constGet())
+                engine.prepareGeometry()
+            except Exception:
+                engine = None
+            counts, saw_data = self._histogram_cell_counts(
+                block, width, height, block_xmin, block_ymax, xres, yres, geom, engine, has_nodata, nodata, False
+            )
+            # A polygon smaller than a cell contains no center. Count the cell
+            # when its rectangle intersects the polygon. Skip huge windows: a
+            # ward that contains centers never reaches this, and an all-nodata
+            # window has saw_data False.
+            if not counts and saw_data and width * height <= 100000:
+                counts, _ = self._histogram_cell_counts(
+                    block, width, height, block_xmin, block_ymax, xres, yres, geom, engine, has_nodata, nodata, True
+                )
+            zone_counts.append(counts)
+        return fids, zone_counts, nodata, has_nodata
+
+    def _write_histogram_fields(self, layer, fids, names, rows):
+        if not names:
+            return
+        existing = [field.name().lower() for field in layer.fields()]
+        for name in names:
+            if name.lower() in existing:
+                raise Exception(
+                    "ZONAL_FAILED: histogram field %r already exists. Pass a different prefix." % (name,)
+                )
+        qtype = getattr(QVariant, "LongLong", QVariant.Int)
+        provider = layer.dataProvider()
+        if not provider.addAttributes([QgsField(name, qtype) for name in names]):
+            raise Exception("ZONAL_FAILED: could not add histogram fields %s" % ", ".join(names))
+        layer.updateFields()
+        indexes = []
+        for name in names:
+            index = layer.fields().indexFromName(name)
+            if index < 0:
+                raise Exception("ZONAL_FAILED: histogram field %r was not added" % (name,))
+            indexes.append(index)
+        changes = {}
+        for fid, row in zip(fids, rows):
+            changes[fid] = {}
+            for index, value in zip(indexes, row):
+                changes[fid][index] = int(value)
+        if changes and not provider.changeAttributeValues(changes):
+            raise Exception("ZONAL_FAILED: could not write histogram counts")
 
     def zonal_stats(
         self,
@@ -5513,15 +5686,23 @@ class QgisMCPServer(QObject):
         """Raster statistics per polygon. Atomic load + stats + write; no Processing.
 
         GitHub analogue: nkarasiak ``zonal_statistics``. Uses ``QgsZonalStatistics``
-        from qgis.analysis (core), so it works headless. Typical PFLOW use: JAXA
-        LULC raster summarized onto MFS / prefecture polygons.
+        from qgis.analysis (core), so it works headless. ``mean`` stays the numeric
+        mean. ``majority`` is the most frequent cell value. ``histogram`` adds one
+        integer column per class id that occurs inside the zones. Typical PFLOW
+        use: JAXA LULC raster summarized onto MFS / prefecture polygons.
         """
         from qgis.analysis import QgsZonalStatistics
 
-        if not stats:
-            stats = ["count", "sum", "mean"]
+        from .zonal_histogram import histogram_columns, normalize_stats
+
+        try:
+            stats = normalize_stats(stats)
+        except ValueError as err:
+            raise Exception("ZONAL_FAILED: %s" % err)
         prefix = prefix or ""
         band = int(raster_band or 1)
+        numeric_stats = [name for name in stats if name != "histogram"]
+        want_histogram = "histogram" in stats
 
         zones = QgsVectorLayer(zones_path, "_zs_zones", "ogr")
         if not zones.isValid():
@@ -5546,12 +5727,22 @@ class QgisMCPServer(QObject):
             transient_ids.append(zones_mem.id())
             project.addMapLayer(raster, False)
             transient_ids.append(raster.id())
-            flags = self._zonal_stat_flags(stats)
-            zs = QgsZonalStatistics(zones_mem, raster, prefix, band, flags)
-            result = zs.calculateStatistics(None)
-            success = getattr(QgsZonalStatistics, "Success", 0)
-            if result not in (success, 0, None):
-                raise Exception("ZONAL_FAILED: QgsZonalStatistics returned %s" % result)
+            if numeric_stats:
+                flags = self._zonal_stat_flags(numeric_stats)
+                zs = QgsZonalStatistics(zones_mem, raster, prefix, band, flags)
+                result = zs.calculateStatistics(None)
+                success = getattr(QgsZonalStatistics, "Success", 0)
+                if result not in (success, 0, None):
+                    raise Exception("ZONAL_FAILED: QgsZonalStatistics returned %s" % result)
+            if want_histogram:
+                fids, zone_counts, nodata, has_nodata = self._zone_class_counts(zones_mem, raster, band)
+                try:
+                    names, rows = histogram_columns(
+                        zone_counts, prefix, nodata=nodata, has_nodata=has_nodata
+                    )
+                except ValueError as err:
+                    raise Exception("ZONAL_FAILED: %s" % err)
+                self._write_histogram_fields(zones_mem, fids, names, rows)
         finally:
             for tid in transient_ids:
                 try:

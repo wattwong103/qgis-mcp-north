@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.21.0**, 2026-11-18
+Status: **v1.22.0**, 2026-11-18
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -206,7 +206,13 @@ Chains into: `qgis_render_choropleth(zones_path=output_path, value_field=<field_
 
 #### `qgis_zonal_stats(zones_path: str, raster_path: str, output_path: str, stats: list[str] | None = None, prefix: str = "", raster_band: int = 1) → ZonalStatsResult`
 
-Raster statistics per polygon via `QgsZonalStatistics` (qgis.analysis — works headless). Default `stats=["count","sum","mean"]`. `.gpkg` keeps geometry; `.csv` is attributes only. The path for JAXA LULC (or any raster) onto zone polygons.
+Raster statistics per polygon. Numeric stats go through `QgsZonalStatistics` (qgis.analysis — works headless). `stats` may include `count`, `sum`, `mean`, `median`, `stdev`, `min`, `max`, `majority`, and `histogram`. Default `stats=["count","sum","mean"]`. An unknown name raises `InvalidArgumentError` before dispatch. `.gpkg` keeps geometry; `.csv` is attributes only.
+
+`mean` stays the numeric mean of the cell values (`prefix + "mean"`). It is not a land-cover share. `majority` is the most frequent cell value, still from `QgsZonalStatistics`, in the field `prefix + "majority"`.
+
+`histogram` is the class count. It writes one integer column per class id that occurs inside the zones, named `prefix + class id` (`lulc_1`, `lulc_2`, …). Columns are sorted by class id. A class that does not occur gets no column. A zone that lacks a class which occurs in another zone stores 0. The raster's nodata value is not a class. Class ids are whole numbers; a band that is not integer is refused, and the message says to use `mean` for a continuous raster. A histogram field name already on the zones layer is refused; pass another prefix. On the JAXA LULC raster, built-up is class 2, so `prefix="lulc_"` writes numeric `lulc_2`.
+
+Zones are transformed into the raster CRS first, as before. A cell counts when its center falls in the polygon. A polygon smaller than a cell counts when the cell rectangle intersects it. The handler does not touch `iface`.
 
 ```python
 ZonalStatsResult = {
@@ -217,7 +223,7 @@ ZonalStatsResult = {
 }
 ```
 
-Chains into: `qgis_render_choropleth(zones_path=output_path, value_field=...)`.
+Chains into: `qgis_render_choropleth(zones_path=output_path, value_field=...)`. A histogram column such as `lulc_2` is a `value_field` the same way `lulc_mean` is.
 
 ### Styling (2)
 
@@ -771,6 +777,8 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 **v1.20 — aggregate points and lines onto polygons.** ✅ `qgis_aggregate_to_zones` counts, sums, or averages every point or line that intersects a polygon. `qgis_spatial_join` still copies the first match. The new field is a `value_field` for `qgis_render_choropleth`. Full mode only.
 
 **v1.21 — line and point figure controls.** ✅ The choropleth stroke, opacity and label arguments on `qgis_render_trajectory`, `qgis_render_od_flows`, `qgis_render_link_density`, `qgis_render_diagram_map`, `qgis_render_catchment` and `qgis_render_from_duckdb`, and on compound `qgis_render` for those modes. Omitted arguments are not dispatched. A line's outline is the line; a point's outline is the marker stroke and the fill stays. OD flow width and the link-density ramp stay as they are until the caller sets the control. OD labels stay 8 pt and link-density labels stay 7 pt when the new label arguments are omitted. `breaks` stays on the choropleth.
+
+**v1.22 — categorical zonal stats.** ✅ `qgis_zonal_stats` accepts `majority` and `histogram`. `majority` is the most frequent cell value. `histogram` writes one integer column per class id that occurs inside the zones (`lulc_2` is JAXA built-up). A class that does not occur gets no column. `mean` stays the numeric mean.
 
 ---
 

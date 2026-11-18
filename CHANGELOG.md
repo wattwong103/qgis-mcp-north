@@ -3,6 +3,20 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.22.0 — 2026-11-18 — categorical zonal stats
+
+### Added
+
+- `qgis_zonal_stats` accepts `majority` and `histogram`. `majority` is the most
+  frequent cell value (`prefix + "majority"`), from `QgsZonalStatistics`.
+  `mean` stays the numeric mean of the cell values.
+- `histogram` writes one integer column per class id that occurs inside the
+  zones, named `prefix + class id` (`lulc_1`, `lulc_2`, …). A class that does
+  not occur has no column. A zone that lacks a class which occurs elsewhere
+  stores 0. Nodata is not a class. On the JAXA LULC raster, built-up is class
+  2, so `prefix="lulc_"` writes numeric `lulc_2`. A non-integer band is refused;
+  use `mean` for a continuous raster.
+
 ## v1.21.0 — 2026-11-18 — line and point figure controls
 
 ### Added

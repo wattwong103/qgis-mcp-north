@@ -53,7 +53,7 @@ for free — a v0.4 architectural promise that v0.5+ tools inherit.
 | `qgis_spatial_join` | Join attributes by location; writes GeoPackage / GeoJSON |
 | `qgis_aggregate_to_zones` | Count, sum, or mean points or lines onto polygons; writes GeoPackage / GeoJSON. Full mode only |
 | `qgis_expression` | Calculated column and/or filter from a QGIS expression; writes GeoPackage / GeoJSON. Full mode only |
-| `qgis_zonal_stats` | Raster statistics per polygon (JAXA LULC, DEM) → GeoPackage or CSV |
+| `qgis_zonal_stats` | Raster statistics per polygon (JAXA LULC, DEM), plus majority and a class histogram → GeoPackage or CSV |
 | `qgis_export_atlas` | Export every atlas page from a print layout (PNG per feature or one PDF) |
 | `qgis_assign_section_load` | All-or-nothing OD → link volumes (`[network]` extra); feed `load_csv` to link-density |
 | `qgis_route_on_network` | Snap stop sequences onto DRM/rail (GUFM Tokyo TSV); writes routed CSV |

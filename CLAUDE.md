@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`qgis-mcp-workflows` (v1.21.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
+`qgis-mcp-workflows` (v1.22.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
 
 Key differences from upstream:
 - 29 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
@@ -113,7 +113,7 @@ uv tool run ruff check src/ tests/
 | `qgis_spatial_join` | ✅ v1.12 | Join attributes by location (`QgsSpatialIndex`); writes GeoPackage/GeoJSON. Copies the first match. |
 | `qgis_aggregate_to_zones` | ✅ v1.20 | Count, sum, or mean points or lines onto polygons (`QgsSpatialIndex`). One new field for `qgis_render_choropleth`. Full mode only. |
 | `qgis_expression` | ✅ v1.19 | Calculated column and/or filter from a QGIS expression; writes GeoPackage/GeoJSON. Built-ins only (`env` refused). Full mode only. |
-| `qgis_zonal_stats` | ✅ v1.12 | Raster stats per polygon (`QgsZonalStatistics`); JAXA LULC onto zones. |
+| `qgis_zonal_stats` | ✅ v1.12 | Raster stats per polygon (`QgsZonalStatistics`); JAXA LULC onto zones. v1.22: `majority`, and a histogram column per class id that occurs (`lulc_2` is built-up). `mean` stays numeric. |
 | `qgis_assign_section_load` | ✅ v1.9 | All-or-nothing OD assignment onto a line network (networkx). Writes `link_id,volume` for `qgis_render_link_density(load_csv=...)`. `[network]` extra. |
 | `qgis_route_on_network` | ✅ v1.14 | Snap consecutive stops onto GUFM DRM/rail TSV (or a line GeoJSON/GPKG). Writes routed `trip_id,seq,lon,lat,mode,datetime,link_id` for `qgis_render_trajectory`. `[network]` extra. |
 | `qgis_eval` | ✅ v1.0 | Arbitrary PyQGIS escape hatch with `return_vars` capture. Plugin's `execute_code` augmented with `_json_safe()` fallback (non-serializable values → `repr()`). v1.19: try `qgis_expression` first; `allow_python_eval` (default true) can refuse it. |

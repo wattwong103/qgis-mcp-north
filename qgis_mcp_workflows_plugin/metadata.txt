@@ -18,7 +18,7 @@ about=Companion QGIS plugin for the qgis-mcp-workflows MCP server. Exposes a TCP
 
     Default socket port: 9877 (vs upstream nkarasiak/qgis-mcp on 9876).
 
-version=1.21.0
+version=1.22.0
 author=North
 email=
 tags=mcp,ai,claude,llm,workflows,transportation,research,pflow,gufm,drm
@@ -30,7 +30,8 @@ category=Plugins
 icon=icons/icon.png
 experimental=True
 deprecated=False
-changelog=1.21.0 : stroke, opacity and label controls on trajectory, OD, link density, diagram, catchment and DuckDB renders.
+changelog=1.22.0 : qgis_zonal_stats majority and a per-class histogram; mean stays the numeric stat.
+ 1.21.0 : stroke, opacity and label controls on trajectory, OD, link density, diagram, catchment and DuckDB renders.
  1.20.0 : qgis_aggregate_to_zones counts, sums, or averages points and lines onto polygons.
  1.19.0 : qgis_expression writes a calculated column or a filtered copy; allow_python_eval defaults to true.
  1.17.0 : Run MCP is the control the errors name; auto does not draw headless while QGIS is open and that button is off.

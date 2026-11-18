@@ -112,7 +112,7 @@ pipelines (PFLOW, GUFM). First call qgis_ping / qgis_diagnose. Then:
 - qgis_layer_inspect before any join/render so field names are real.
 - qgis_spatial_join to copy attributes by location (first match);
   qgis_aggregate_to_zones to count or sum points or lines onto polygons;
-  qgis_zonal_stats for raster-per-polygon (JAXA LULC onto zones).
+  qgis_zonal_stats for raster-per-polygon (JAXA LULC onto zones; majority and a class histogram).
 - qgis_render_choropleth for zone polygons + value CSV (pass scale_bar=True
   and north_arrow=True for a publication PNG). GUFM 23-ward polygons:
   assets/zones_tokyo23.gpkg, join_field=zone_id (JIS N03_007).
@@ -223,8 +223,12 @@ def prompt_gufm_route() -> str:
 def prompt_zonal_stats() -> str:
     return (
         "qgis_zonal_stats(zones_path, raster_path, output_path, "
-        "stats=['count','mean','sum'], prefix=''). output_path may be .gpkg or .csv. "
-        "Then qgis_render_choropleth(zones_path=output_path, value_field=<prefix>mean)."
+        "stats=['count','mean','majority','histogram'], prefix='lulc_'). "
+        "mean stays the numeric mean (lulc_mean). majority is the most frequent "
+        "cell value (lulc_majority). histogram writes one integer column per class "
+        "id that occurs (lulc_1, lulc_2, …); a class that does not occur has no "
+        "column. JAXA built-up is lulc_2. output_path may be .gpkg or .csv. "
+        "Then qgis_render_choropleth on lulc_mean or on a class column such as lulc_2."
     )
 
 
@@ -1173,6 +1177,49 @@ class ZonalStatsResult(BaseModel):
     prefix: str
 
 
+# Same order as qgis_mcp_workflows_plugin.zonal_histogram.STATS. This process
+# does not import the plugin package: QGIS Desktop loads that package, and the
+# server environment may not have it on sys.path.
+_ZONAL_STATS = (
+    "count",
+    "sum",
+    "mean",
+    "median",
+    "stdev",
+    "min",
+    "max",
+    "majority",
+    "histogram",
+)
+
+
+def _normalize_zonal_stats(stats: list[str] | None) -> list[str]:
+    """Lowercase, drop duplicates, keep order. Empty is count, sum, mean.
+
+    ``mean`` stays the numeric stat. ``histogram`` is a class count, not a
+    replacement for ``mean``.
+    """
+    if not stats:
+        return ["count", "sum", "mean"]
+    cleaned: list[str] = []
+    for name in stats:
+        key = str(name).strip().lower()
+        if key in cleaned:
+            continue
+        if key not in _ZONAL_STATS:
+            raise InvalidArgumentError(
+                f"stats {name!r} is not a zonal statistic. Available: {', '.join(_ZONAL_STATS)}.",
+                next_step=(
+                    "pass count, sum, mean, median, stdev, min, max, majority, or histogram, "
+                    "then retry qgis_zonal_stats"
+                ),
+            )
+        cleaned.append(key)
+    if not cleaned:
+        return ["count", "sum", "mean"]
+    return cleaned
+
+
 @_maybe_tool(
     annotations=ToolAnnotations(
         readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
@@ -1183,17 +1230,39 @@ def qgis_zonal_stats(
     raster_path: Annotated[str, Field(description="Raster to summarize (JAXA LULC, DEM, density).")],
     output_path: Annotated[str, Field(description="Absolute output path. .gpkg keeps geometry; .csv is attributes only.")],
     stats: Annotated[
-        list[Literal["count", "sum", "mean", "median", "stdev", "min", "max"]] | None,
-        Field(description="Statistics to compute. Default count+sum+mean."),
+        list[
+            Literal[
+                "count",
+                "sum",
+                "mean",
+                "median",
+                "stdev",
+                "min",
+                "max",
+                "majority",
+                "histogram",
+            ]
+        ]
+        | None,
+        Field(
+            description=(
+                "Statistics. mean is the numeric mean. majority is the most frequent "
+                "cell value. histogram writes one integer column per class id that "
+                "occurs (prefix + id, e.g. lulc_2). Default count+sum+mean."
+            )
+        ),
     ] = None,
-    prefix: Annotated[str, Field(description="Prefix for new fields (e.g. 'lulc_' → lulc_mean).")] = "",
+    prefix: Annotated[str, Field(description="Prefix for new fields (e.g. 'lulc_' → lulc_mean, lulc_2).")] = "",
     raster_band: Annotated[int, Field(description="Raster band (1-based).", ge=1)] = 1,
 ) -> ZonalStatsResult:
     """Raster statistics per polygon, written to GeoPackage or CSV.
 
     When to use: JAXA 100m LULC (or any raster) summarized onto zone polygons
-    before a choropleth. Uses ``QgsZonalStatistics`` (qgis.analysis) — no
-    Processing toolbox, works headless.
+    before a choropleth. Numeric stats use ``QgsZonalStatistics``
+    (qgis.analysis) — no Processing toolbox, works headless. ``mean`` stays
+    the numeric mean. ``histogram`` adds one integer column per class id that
+    occurs inside the zones (``lulc_2`` is JAXA built-up). A class that does
+    not occur has no column.
 
     Returns: ``ZonalStatsResult`` with ``fields_added`` (the new stat columns)
     and ``n_with_value``.
@@ -1206,7 +1275,7 @@ def qgis_zonal_stats(
     abs_zones = user_abs(zones_path)
     abs_raster = user_abs(raster_path)
     abs_out = user_abs(output_path)
-    stat_list = list(stats) if stats else ["count", "sum", "mean"]
+    stat_list = _normalize_zonal_stats(list(stats) if stats else None)
     params = {
         "zones_path": abs_zones,
         "raster_path": abs_raster,
