@@ -307,6 +307,45 @@ def test_zed_entry_carries_dropbox_root(install_mod, monkeypatch):
     assert entry["command"]["env"]["DROPBOX_ROOT"] == "/Users/north/Dropbox"
 
 
+def test_zed_local_entry_uses_real_transport_and_directory(install_mod, monkeypatch):
+    monkeypatch.setattr(install_mod.shutil, "which", lambda name: "/bin/uv" if name == "uv" else None)
+    entry = install_mod._zed_local_entry()
+    command = entry["command"]
+    assert command["env"]["QGIS_MCP_WORKFLOWS_TRANSPORT"] == "auto"
+    assert "QGIS_MCP_TRANSPORT" not in command["env"]
+    assert "stdio" not in command["args"]
+    assert "--no-sync" not in command["args"]
+    assert "--directory" in command["args"]
+    assert "qgis-mcp-workflows-server" in command["args"]
+
+
+def test_zed_remote_entry_uses_real_transport(install_mod):
+    command = install_mod._zed_remote_entry()["command"]
+    assert command["env"]["QGIS_MCP_WORKFLOWS_TRANSPORT"] == "auto"
+    assert "QGIS_MCP_TRANSPORT" not in command["env"]
+
+
+def test_setup_venv_syncs_pipeline_extras(install_mod, monkeypatch):
+    recorded = []
+
+    def fake_which(name):
+        return "/bin/uv" if name == "uv" else None
+
+    def fake_run(cmd, **kwargs):
+        recorded.append(list(cmd))
+        return None
+
+    monkeypatch.setattr(install_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(install_mod.subprocess, "run", fake_run)
+    install_mod.setup_venv()
+    assert recorded
+    cmd = recorded[0]
+    assert cmd[:2] == ["/bin/uv", "sync"]
+    for extra in ("pptx", "network", "duckdb", "drm", "trajectory"):
+        assert extra in cmd
+        assert cmd[cmd.index(extra) - 1] == "--extra"
+
+
 def test_tracked_mcp_json_never_gets_a_machine_path(install_mod, monkeypatch):
     monkeypatch.setenv("DROPBOX_ROOT", "H:/Dropbox")
     assert "env" not in install_mod._server_entry("cursor", remote=False, pass_env=False)

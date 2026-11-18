@@ -127,6 +127,37 @@ def test_missing_figure_is_a_tool_error(tmp_path):
         )
 
 
+def test_missing_pptx_extra_is_a_tool_error_with_a_sync_hint(tmp_path, monkeypatch):
+    """A bare ImportError becomes 'Error executing tool' on mcp >= 2.1."""
+    import builtins
+    import sys
+
+    from qgis_mcp_workflows.server import qgis_figures_to_pptx
+
+    saved = {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name == "pptx" or name.startswith("pptx.")
+    }
+    real_import = builtins.__import__
+
+    def _block_pptx(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "pptx" or name.startswith("pptx."):
+            raise ImportError("no pptx")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _block_pptx)
+
+    try:
+        with pytest.raises(_sdk_tool_error(), match=r"python-pptx.*Next: uv sync --extra pptx"):
+            qgis_figures_to_pptx(
+                figure_paths=[str(tmp_path / "fig.png")],
+                pptx_path=str(tmp_path / "deck.pptx"),
+            )
+    finally:
+        sys.modules.update(saved)
+
+
 def test_network_without_line_rows_is_an_argument_error(tmp_path):
     from qgis_mcp_workflows.route import load_tsv_network
 

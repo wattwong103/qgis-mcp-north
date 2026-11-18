@@ -57,3 +57,15 @@ def test_output_path_resolved_to_absolute(fake_executor):
     qgis_render_map(layer_ids=["L1"], output_png="relative.png")
     params = fake_executor.calls[0][1]
     assert os.path.isabs(params["output_png"])
+
+
+def test_tilde_in_output_path_is_expanded(fake_executor, monkeypatch, tmp_path):
+    """``~/...`` must not be passed through: abspath leaves the tilde in place."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    fake_executor.responses["render_layers_to_path"] = _render_response()
+    result = qgis_render_map(layer_ids=["L1"], output_png="~/out.png")
+    sent = fake_executor.calls[0][1]["output_png"]
+    assert sent == str(tmp_path / "out.png")
+    assert "~" not in sent
+    assert result.transport == "fake"

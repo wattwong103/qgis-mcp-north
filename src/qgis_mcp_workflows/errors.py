@@ -55,8 +55,10 @@ class PluginUnavailableError(QgisMcpWorkflowsError):
     def __init__(self, host: str, port: int) -> None:
         super().__init__(
             f"Cannot reach QGIS plugin at {host}:{port}. "
-            f"Open QGIS, enable the 'QGIS MCP Workflows' plugin, click Start. "
-            f"Next: retry the same tool call."
+            f"Open QGIS, enable the 'QGIS MCP Workflows' plugin, and click Run MCP "
+            f"on the toolbar (Plugins menu: QGIS MCP). "
+            f"That button's menu has Auto-start on startup, which stays off until you tick it. "
+            f"Next: click Run MCP, then retry the same tool call."
         )
         self.host = host
         self.port = port
@@ -127,18 +129,41 @@ class JoinError(QgisMcpWorkflowsError):
         self.description = description
 
 
+class PluginNotStartedError(QgisMcpWorkflowsError):
+    """QGIS Desktop is open, but the toolbar control that listens on the socket was not clicked.
+
+    ``transport=auto`` raises this instead of drawing in an empty headless project.
+    """
+
+    def __init__(self, host: str, port: int) -> None:
+        super().__init__(
+            f"QGIS Desktop is open, but Run MCP was not started, so nothing is listening "
+            f"at {host}:{port}. "
+            f"Click Run MCP on the QGIS toolbar (Plugins menu: QGIS MCP). "
+            f"That button's menu has Auto-start on startup, which stays off until you tick it. "
+            f"Next: click Run MCP, then qgis_ping()."
+        )
+        self.host = host
+        self.port = port
+
+
 class HeadlessUnavailableError(QgisMcpWorkflowsError):
-    """The headless transport's QGIS Python launcher could not be found or started."""
+    """The headless transport's QGIS Python launcher could not be found or started.
+
+    Raised when the caller asked for headless (``--transport=headless`` or the
+    config/env equivalent). The hint stays on that transport.
+    """
 
     def __init__(self, detail: str) -> None:
+        # One Next: only. A launcher message that already names a recovery is
+        # dropped so it cannot point at plugin while the caller asked for headless.
+        self.detail = detail.split(" Next:")[0].rstrip(". ")
         super().__init__(
-            f"Headless transport unavailable: {detail}. "
-            f"Install OSGeo4W (Windows) or QGIS standalone Python with PyQGIS, then set "
-            f"QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER to its python-qgis(-ltr).bat / qgis_python wrapper "
-            f"(macOS: the python inside QGIS.app). "
-            f"Next: re-run with --transport=plugin if QGIS Desktop is open instead."
+            f"Headless transport unavailable: {self.detail}. "
+            f"Install OSGeo4W (Windows) or the QGIS app (macOS) so PyQGIS is available, then set "
+            f"QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER to python-qgis(-ltr).bat or the python inside QGIS.app. "
+            f"Next: fix that launcher path, then restart the server with --transport=headless."
         )
-        self.detail = detail
 
 
 class TransportUnavailableError(QgisMcpWorkflowsError):
@@ -152,8 +177,9 @@ class TransportUnavailableError(QgisMcpWorkflowsError):
         super().__init__(
             f"No QGIS backend: the plugin is not listening at {host}:{port}, and "
             f"headless is unavailable ({headless_detail}). "
-            f"Open QGIS Desktop and start the 'QGIS MCP Workflows' plugin, or set "
-            f"QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER and restart the MCP server. "
+            f"Open QGIS, enable 'QGIS MCP Workflows', and click Run MCP "
+            f"on the toolbar (Plugins menu: QGIS MCP), or set "
+            f"QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER and restart with --transport=headless. "
             f"Next: qgis_ping() once QGIS is open."
         )
         self.host = host

@@ -3,6 +3,38 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.17.0 — 2026-11-18 — first click, transport, and a join that works
+
+### Fixed
+
+- The installer summary, README, `PluginUnavailableError`, and the in-plugin
+  help name the real control: toolbar **Run MCP**, Plugins menu **QGIS MCP**,
+  and **Auto-start on startup** on that button (off until ticked). The help
+  dialog no longer describes this plugin as half of upstream `nkarasiak/qgis-mcp`.
+- `transport=auto` does not draw in an empty headless project when QGIS Desktop
+  is running and port 9877 is closed. The call raises `PluginNotStartedError`
+  (`Run MCP was not started`). Headless is still the fallback when Desktop is
+  not running. A headless session already started stops being used if Desktop
+  opens later and Run MCP is still off.
+- Every tool that draws a map reports `transport` (`plugin` or `headless`).
+- Tool paths expand `~` before `abspath`. The README quickstart joins the
+  committed `assets/zones_tokyo23.gpkg` and `assets/tokyo23_home_counts.csv`.
+  `docs/gufm-usage.md` no longer shows bare `~/Dropbox` paths.
+  `docs/pflow-usage.md` no longer says "QGIS MCP North" or "Start Server".
+- `qgis_figures_to_pptx` raises a typed error ending in `Next: uv sync --extra pptx`
+  when python-pptx is missing, instead of a bare `ImportError` that mcp ≥ 2.1
+  replaces with "Error executing tool".
+- `install.py` syncs the `pptx`, `network`, `duckdb`, `drm`, and `trajectory`
+  extras. Its next steps include `qgis_diagnose`.
+- `~/.config/qgis-mcp-workflows/config.toml` is read (`transport`, optional
+  `host` and `port`). Precedence is `--transport`, then
+  `QGIS_MCP_WORKFLOWS_TRANSPORT`, then the file, then `auto`. The choice is
+  logged at startup. Zed's generated entry sets
+  `QGIS_MCP_WORKFLOWS_TRANSPORT=auto`, passes `--directory`, and does not pass
+  `--no-sync` or `QGIS_MCP_TRANSPORT=stdio`.
+- `HeadlessUnavailableError`'s `Next:` tells you to fix the launcher and
+  restart with `--transport=headless`.
+
 ## v1.16.2 — 2026-11-10 — panel scales ignore CSV keys the zones lack
 
 ### Fixed

@@ -108,7 +108,7 @@ python install.py
 
 The installer:
 - Symlinks `qgis_mcp_workflows_plugin/` into your active QGIS profile.
-- Sets up the Python venv (`uv sync`). Do not reuse a Dropbox-synced `.venv` from another machine — recreate it.
+- Sets up the Python venv (`uv sync` with the `pptx`, `network`, `duckdb`, `drm`, and `trajectory` extras). Do not reuse a Dropbox-synced `.venv` from another machine — recreate it.
 - Optionally configures MCP clients (Claude Desktop, Claude Code, Codex, Grok, Cursor, VS Code, Windsurf, Zed).
 
 Non-interactive:
@@ -127,16 +127,20 @@ python install.py --remote --clients claude-desktop
 
 1. Restart QGIS.
 2. Plugins menu → Manage and Install Plugins → enable "QGIS MCP Workflows".
-3. Click "Start Server" in the MCP dock widget (listens on `localhost:9877`).
+3. Click **Run MCP** on the toolbar (Plugins menu → **QGIS MCP**). It listens on `localhost:9877`. The icon turns green while the socket is up.
+4. Optional: open that button's menu and tick **Auto-start on startup**. It is off until you tick it, so a QGIS restart otherwise needs the click again.
 
 ### 4. Use it
 
-From any MCP client:
+From any MCP client, after `qgis_diagnose` (it reports whether the server and the plugin are the same version):
 
 ```
-> Render a choropleth of zone_trips.csv joined to polbnda_jpn_new.shp on zone_id,
-  total_trips field, YlOrRd palette, quantile breaks. Save to C:\temp\choropleth.png.
+> Render a choropleth of assets/tokyo23_home_counts.csv joined to
+  assets/zones_tokyo23.gpkg on zone_id, field n_persons, palette gufm.
+  Save to /tmp/gufm_wards.png.
 ```
+
+That pair is in the repo: `zone_id` on the wards is the JIS code (`13101` for Chiyoda), and the CSV uses the same codes. A `~/...` path is expanded. Do not join PFLOW `zone_trips.csv` (`MFS##`) to `polbnda_jpn_new.shp` (KSJ `N03_007`) on `zone_id` — that join is empty.
 
 GUFM recipes: [`docs/gufm-usage.md`](docs/gufm-usage.md). PFLOW (historical): [`docs/pflow-usage.md`](docs/pflow-usage.md).
 
@@ -144,7 +148,7 @@ GUFM recipes: [`docs/gufm-usage.md`](docs/gufm-usage.md). PFLOW (historical): [`
 
 | Variable | Default | Description |
 |---|---|---|
-| `QGIS_MCP_WORKFLOWS_TRANSPORT` | `auto` | `plugin` / `headless` / `auto` (probe :9877, fall back to headless) |
+| `QGIS_MCP_WORKFLOWS_TRANSPORT` | `auto` | `plugin` / `headless` / `auto`. `auto` uses the plugin when Run MCP is listening. If QGIS Desktop is open and that button was not clicked, tools error instead of drawing an empty headless project. Headless is used only when Desktop is not running. |
 | `QGIS_MCP_WORKFLOWS_TOOL_MODE` | `full` | `full` (standalone tools) / `compound` (5 grouped tools) |
 | `QGIS_MCP_WORKFLOWS_HOST` | `localhost` | Plugin socket host |
 | `QGIS_MCP_WORKFLOWS_PORT` | `9877` | Plugin socket port (upstream uses 9876) |
@@ -152,7 +156,7 @@ GUFM recipes: [`docs/gufm-usage.md`](docs/gufm-usage.md). PFLOW (historical): [`
 | `QGIS_MCP_WORKFLOWS_LOG_FILE` | `~/.local/share/qgis-mcp-workflows/server.log` | Rotating log (5MB × 3); empty disables |
 | `QGIS_MCP_WORKFLOWS_LOG_LEVEL` | `INFO` | File log level (console always WARNING+) |
 
-CLI flag `--transport=plugin|headless|auto` overrides the env var.
+CLI flag `--transport=plugin|headless|auto` overrides the env var, which overrides `~/.config/qgis-mcp-workflows/config.toml` (`transport = "plugin"` or `"headless"`, optional `host` and `port`). The server logs the choice before the first tool call.
 
 ## Headless mode (cron / unattended renders)
 
@@ -177,7 +181,9 @@ restart per call.
 
 With no plugin listening and no headless launcher found, `--transport=auto` (the
 default) still starts: tools return a "No QGIS backend" error until QGIS is
-reachable, instead of the MCP connection closing at startup.
+reachable, instead of the MCP connection closing at startup. If QGIS Desktop
+itself is running and Run MCP was not clicked, the error says so and headless
+is not used.
 
 ## Platform support
 
@@ -262,7 +268,7 @@ If you previously installed `qgis-mcp-north`:
 1. Re-run the installer: `python install.py` — it will install the new plugin folder (`qgis_mcp_workflows_plugin/`) and add a new MCP client config key (`qgis-workflows`).
 2. Remove the old plugin folder: `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/qgis_mcp_north_plugin` (Windows: `%APPDATA%\QGIS\QGIS3\…`).
 3. Remove the old MCP client entry: `python install.py --uninstall --clients claude-desktop` against the `v1.0.0` version of this repo, or hand-edit `claude_desktop_config.json` to remove the `"qgis-north"` key.
-4. Restart QGIS, enable the "QGIS MCP Workflows" plugin in the Plugins dialog, click Start Server.
+4. Restart QGIS, enable the "QGIS MCP Workflows" plugin in the Plugins dialog, click Run MCP on the toolbar (Plugins menu: QGIS MCP). Tick Auto-start on startup in that button's menu if you do not want to click it after every restart.
 5. Env vars: rename any `QGIS_MCP_NORTH_*` in your shell profile / launch scripts → `QGIS_MCP_WORKFLOWS_*`. Port `9877` is unchanged.
 
 ## License

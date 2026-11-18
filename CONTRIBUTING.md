@@ -68,7 +68,7 @@ This project connects [QGIS](https://qgis.org/) to [Claude AI](https://claude.ai
 
 ## Development Workflow
 
-- Start the QGIS plugin (`Plugins` > `QGIS MCP Workflows` > `Start Server`).
+- Start the QGIS plugin: enable **QGIS MCP Workflows**, then click **Run MCP** on the toolbar (Plugins menu → **QGIS MCP**). Auto-start on startup is in that button's menu.
 - Run the MCP server via Claude Desktop integration.
 - Make your changes and test locally.
 

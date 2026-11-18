@@ -125,8 +125,7 @@ class HeadlessExecutor:
                 "qgis.org, or set QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER to the "
                 "python inside its bundle "
                 "(<QGIS.app>/Contents/MacOS/bin/python3 for QGIS 3, "
-                "<QGIS.app>/Contents/MacOS/python for QGIS 4). "
-                "Next: qgis_render_map(..., transport='plugin') if QGIS Desktop is already running."
+                "<QGIS.app>/Contents/MacOS/python for QGIS 4)."
             )
 
         # Linux: assume sys.executable already has PyQGIS importable.

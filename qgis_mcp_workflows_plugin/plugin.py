@@ -5463,7 +5463,7 @@ class QgisMCPServer(QObject):
 class QgisMCPPlugin:
     """Main plugin class for QGIS MCP"""
 
-    REPO_URL = "https://github.com/nkarasiak/qgis-mcp"
+    REPO_URL = "https://github.com/wattwong103/qgis-mcp-workflows"
 
     SETTINGS_PREFIX = "qgis_mcp"
 
@@ -5570,12 +5570,17 @@ class QgisMCPPlugin:
 
         layout = QVBoxLayout()
         label = QLabel(
-            "<p>This plugin is only one half of the setup. You also need an "
-            "<b>MCP server</b> so that Claude (or another LLM) can talk to QGIS.</p>"
-            "<p><b>Quick setup:</b> Run <code>python install.py</code> from the "
-            "repository root to configure your MCP client(s) automatically.</p>"
-            "<p>Full instructions are on the "
-            f'<a href="{self.REPO_URL}#installation">GitHub repository</a>.</p>'
+            "<p>This plugin is the QGIS side of <b>qgis-mcp-workflows</b>. "
+            "It listens on <b>localhost:9877</b> so an MCP client can draw figures.</p>"
+            "<p><b>Run it:</b> click <b>Run MCP</b> on the toolbar "
+            "(Plugins menu → <b>QGIS MCP</b>). The icon turns green while the socket is up. "
+            "Open that button's menu and tick <b>Auto-start on startup</b> to skip the click "
+            "after QGIS restarts. Auto-start stays off until you tick it.</p>"
+            "<p>Install the MCP server with <code>python install.py</code> from the "
+            "repository. After an upgrade, call <code>qgis_diagnose</code> and restart "
+            "QGIS if the plugin version does not match the server.</p>"
+            "<p>Instructions: "
+            f'<a href="{self.REPO_URL}">qgis-mcp-workflows</a>.</p>'
         )
         label.setWordWrap(True)
         label.setOpenExternalLinks(True)

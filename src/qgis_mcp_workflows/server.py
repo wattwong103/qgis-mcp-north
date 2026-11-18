@@ -43,10 +43,10 @@ except Exception as _mcp_exc:
     raise
 
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from qgis_mcp_workflows.errors import InvalidArgumentError
-from qgis_mcp_workflows.helpers import with_png_preview
+from qgis_mcp_workflows.helpers import user_abs, with_png_preview
 from qgis_mcp_workflows.provenance import with_provenance
 
 # ---------------------------------------------------------------------------
@@ -315,11 +315,28 @@ def _register_compound_tools_if_enabled() -> None:
 
 
 def _executor_transport_name() -> str:
-    """plugin / headless / fake — derived from the active executor class."""
-    from qgis_mcp_workflows.executors import get_executor
+    """plugin / headless / fake — the backend that just ran, not a lazy default.
 
-    name = type(get_executor()).__name__
-    mapping = {"PluginExecutor": "plugin", "HeadlessExecutor": "headless"}
+    ``AutoExecutor.backend()`` is the plugin or headless call it actually
+    dispatched. Peeking avoids ``get_executor()``, which would count a QGIS
+    request and, with nothing set, construct a plugin executor.
+    """
+    from qgis_mcp_workflows.executors import peek_executor
+
+    executor = peek_executor()
+    if executor is None:
+        return "unknown"
+    backend = getattr(executor, "backend", None)
+    if callable(backend):
+        reported = backend()
+        if reported:
+            return reported
+    name = type(executor).__name__
+    mapping = {
+        "PluginExecutor": "plugin",
+        "HeadlessExecutor": "headless",
+        "FakeExecutor": "fake",
+    }
     if name in mapping:
         return mapping[name]
     stem = name[:-8] if name.endswith("Executor") else name
@@ -502,7 +519,19 @@ def _resolve_basemap(basemap: str, opacity: float) -> dict | None:
     }
 
 
-class RenderResult(BaseModel):
+class DrawsMap(BaseModel):
+    """A result that drew a map. ``transport`` is which backend drew it."""
+
+    transport: str = ""
+
+    @model_validator(mode="after")
+    def _fill_transport(self):
+        if not self.transport:
+            self.transport = _executor_transport_name()
+        return self
+
+
+class RenderResult(DrawsMap):
     output_path: str
     width: int
     height: int
@@ -569,7 +598,7 @@ class LinkDensityResult(RenderResult):
     aggregation: str
 
 
-class ExportResult(BaseModel):
+class ExportResult(DrawsMap):
     output_path: str
     format: str
     n_pages: int
@@ -577,7 +606,7 @@ class ExportResult(BaseModel):
     unavailable_layers: Annotated[list[str], Field(description="Layers in the project whose data source is missing (kept as unavailable, not drawn).")] = []
 
 
-class ComposeLayoutResult(BaseModel):
+class ComposeLayoutResult(DrawsMap):
     output_path: str
     format: str
     n_layers: int
@@ -630,7 +659,7 @@ class BatchError(BaseModel):
     error: str
 
 
-class BatchRenderResult(BaseModel):
+class BatchRenderResult(DrawsMap):
     output_dir: str
     n_rendered: int
     manifest: list[BatchManifestEntry]
@@ -841,7 +870,7 @@ def qgis_layer_inspect(
     """
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_path = os.path.abspath(path)
+    abs_path = user_abs(path)
     executor = get_executor()
     layer_id, info, is_raster = _load_and_get_info(executor, abs_path)
     try:
@@ -879,7 +908,7 @@ def qgis_load_layer(
     from qgis_mcp_workflows.errors import CrsMismatchError, ExecutorError
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_path = os.path.abspath(path)
+    abs_path = user_abs(path)
     executor = get_executor()
     layer_id, info, is_raster = _load_and_get_info(executor, abs_path, name=name)
     kwargs = _layer_info_kwargs(abs_path, info, is_raster)
@@ -953,9 +982,9 @@ def qgis_spatial_join(
     )
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_target = os.path.abspath(target_path)
-    abs_join = os.path.abspath(join_path)
-    abs_out = os.path.abspath(output_path)
+    abs_target = user_abs(target_path)
+    abs_join = user_abs(join_path)
+    abs_out = user_abs(output_path)
     params: dict = {
         "target_path": abs_target,
         "join_path": abs_join,
@@ -979,7 +1008,7 @@ def qgis_spatial_join(
             raise FieldNotFoundError(join_fields[0] if join_fields else "?", []) from err
         raise
     return SpatialJoinResult(
-        output_path=os.path.abspath(result["output_path"]),
+        output_path=user_abs(result["output_path"]),
         n_target=int(result.get("n_target") or 0),
         n_join=int(result.get("n_join") or 0),
         n_matched=int(result.get("n_matched") or 0),
@@ -1031,9 +1060,9 @@ def qgis_zonal_stats(
     from qgis_mcp_workflows.errors import ExecutorError, LayerNotFoundError, ZonalStatsError
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_zones = os.path.abspath(zones_path)
-    abs_raster = os.path.abspath(raster_path)
-    abs_out = os.path.abspath(output_path)
+    abs_zones = user_abs(zones_path)
+    abs_raster = user_abs(raster_path)
+    abs_out = user_abs(output_path)
     stat_list = list(stats) if stats else ["count", "sum", "mean"]
     params = {
         "zones_path": abs_zones,
@@ -1053,7 +1082,7 @@ def qgis_zonal_stats(
             raise ZonalStatsError(err.message) from err
         raise
     return ZonalStatsResult(
-        output_path=os.path.abspath(result["output_path"]),
+        output_path=user_abs(result["output_path"]),
         n_zones=int(result.get("n_zones") or 0),
         n_with_value=int(result.get("n_with_value") or 0),
         stats=list(result.get("stats") or stat_list),
@@ -1087,7 +1116,7 @@ def qgis_project_load(
     from qgis_mcp_workflows.errors import ExecutorError, ProjectLoadError
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_qgz = os.path.abspath(qgz_path)
+    abs_qgz = user_abs(qgz_path)
     try:
         result = get_executor().dispatch("project_load", {"qgz_path": abs_qgz}, timeout=30)
     except ExecutorError as err:
@@ -1262,7 +1291,7 @@ def qgis_render_map(
     """
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_output = os.path.abspath(output_png)
+    abs_output = user_abs(output_png)
     params: dict = {
         "layer_ids": list(layer_ids),
         "output_png": abs_output,
@@ -1475,7 +1504,7 @@ def qgis_render_from_duckdb(
             "Next: run `uv sync --extra duckdb`, then retry."
         ) from exc
 
-    abs_db = os.path.abspath(db_path)
+    abs_db = user_abs(db_path)
     if not os.path.exists(abs_db):
         raise QgisMcpWorkflowsError(
             f"DuckDB database not found: {abs_db}. Next: check the path and retry."
@@ -1573,7 +1602,7 @@ def qgis_render_from_duckdb(
 
     result = get_executor().dispatch("render_wkt_features", {
         "features": features,
-        "output_png": os.path.abspath(output_png),
+        "output_png": user_abs(output_png),
         "crs": crs,
         "value_field": value_field,
         "n_classes": n_classes,
@@ -1657,10 +1686,10 @@ def qgis_render_choropleth(
     from qgis_mcp_workflows.errors import ExecutorError, FieldNotFoundError, JoinError
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_zones = os.path.abspath(zones_path)
-    abs_output = os.path.abspath(output_png)
-    abs_basemaps = [os.path.abspath(p) for p in (basemap_paths or [])]
-    abs_csv = os.path.abspath(value_csv) if value_csv else None
+    abs_zones = user_abs(zones_path)
+    abs_output = user_abs(output_png)
+    abs_basemaps = [user_abs(p) for p in (basemap_paths or [])]
+    abs_csv = user_abs(value_csv) if value_csv else None
     if abs_csv is not None:
         _require_file("value_csv", abs_csv)
 
@@ -1795,10 +1824,10 @@ def qgis_render_trajectory(
     from qgis_mcp_workflows.errors import EmptyAfterFilterError, FieldNotFoundError
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_input = os.path.abspath(input_path)
+    abs_input = user_abs(input_path)
     _require_file("input_path", abs_input)
-    abs_output = os.path.abspath(output_png)
-    abs_basemaps = [os.path.abspath(p) for p in (basemap_paths or [])]
+    abs_output = user_abs(output_png)
+    abs_basemaps = [user_abs(p) for p in (basemap_paths or [])]
 
     # GPX path: skip CSV parse, hand path through to plugin's OGR loader.
     if abs_input.lower().endswith(".gpx"):
@@ -2139,11 +2168,11 @@ def qgis_render_od_flows(
     from qgis_mcp_workflows.errors import FieldNotFoundError
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_od = os.path.abspath(od_csv)
+    abs_od = user_abs(od_csv)
     _require_file("od_csv", abs_od)
-    abs_zones = os.path.abspath(zones_layer_path)
-    abs_output = os.path.abspath(output_png)
-    abs_basemaps = [os.path.abspath(p) for p in (basemap_paths or [])]
+    abs_zones = user_abs(zones_layer_path)
+    abs_output = user_abs(output_png)
+    abs_basemaps = [user_abs(p) for p in (basemap_paths or [])]
     basemap_spec = _resolve_basemap(basemap, basemap_opacity)
 
     with open(abs_od, encoding="utf-8", newline="") as f:
@@ -2258,9 +2287,9 @@ def qgis_render_link_density(
     )
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_drm = os.path.abspath(drm_network_path)
-    abs_output = os.path.abspath(output_png)
-    abs_basemaps = [os.path.abspath(p) for p in (basemap_paths or [])]
+    abs_drm = user_abs(drm_network_path)
+    abs_output = user_abs(output_png)
+    abs_basemaps = [user_abs(p) for p in (basemap_paths or [])]
     basemap_spec = _resolve_basemap(basemap, basemap_opacity)
 
     if not os.path.exists(abs_drm):
@@ -2270,14 +2299,14 @@ def qgis_render_link_density(
         raise InvalidArgumentError("Pass trajectory_csvs or load_csv, not both.")
     if load_csv:
         density, n_rows_total = _read_load_csv(
-            os.path.abspath(load_csv),
+            user_abs(load_csv),
             link_id_col=link_id_col,
             volume_col=value_col or "volume",
         )
         aggregation = "sum"
         value_col = value_col or "volume"
     elif trajectory_csvs:
-        abs_csvs = [os.path.abspath(p) for p in trajectory_csvs]
+        abs_csvs = [user_abs(p) for p in trajectory_csvs]
         density, n_rows_total = _aggregate_link_density(
             csv_paths=abs_csvs,
             link_id_col=link_id_col,
@@ -2395,11 +2424,11 @@ def qgis_assign_section_load(
         write_volume_csv,
     )
 
-    abs_od = os.path.abspath(od_csv)
+    abs_od = user_abs(od_csv)
     _require_file("od_csv", abs_od)
-    abs_net = os.path.abspath(network_path)
+    abs_net = user_abs(network_path)
     _require_file("network_path", abs_net)
-    abs_out = os.path.abspath(output_csv)
+    abs_out = user_abs(output_csv)
     rows, columns = read_od_csv(abs_od)
     for required in (origin_col, dest_col, value_col):
         if required not in columns:
@@ -2412,7 +2441,7 @@ def qgis_assign_section_load(
         to_node_field=to_node_field,
     )
     if zones_path:
-        centroids = load_zone_centroids(os.path.abspath(zones_path), zone_id_field=zone_id_field)
+        centroids = load_zone_centroids(user_abs(zones_path), zone_id_field=zone_id_field)
         snapped = snap_to_nodes(centroids, node_xy)
         origin_nodes = dest_nodes = snapped
     else:
@@ -2486,9 +2515,9 @@ def qgis_route_on_network(
         write_routed_csv,
     )
 
-    abs_in = os.path.abspath(os.path.expanduser(input_csv))
-    abs_net = os.path.abspath(os.path.expanduser(network_path))
-    abs_out = os.path.abspath(os.path.expanduser(output_csv))
+    abs_in = user_abs(input_csv)
+    abs_net = user_abs(network_path)
+    abs_out = user_abs(output_csv)
     if not os.path.isfile(abs_in):
         raise LayerNotFoundError(abs_in)
     if not os.path.isfile(abs_net):
@@ -2509,7 +2538,7 @@ def qgis_route_on_network(
     )
     rail = None
     if rail_network_path:
-        abs_rail = os.path.abspath(os.path.expanduser(rail_network_path))
+        abs_rail = user_abs(rail_network_path)
         if not os.path.isfile(abs_rail):
             raise LayerNotFoundError(abs_rail)
         rail = load_route_network(abs_rail)
@@ -2561,8 +2590,8 @@ def qgis_render_diagram_map(
     """
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_layer = os.path.abspath(layer_path)
-    abs_output = os.path.abspath(output_png)
+    abs_layer = user_abs(layer_path)
+    abs_output = user_abs(output_png)
     params = {
         "layer_path": abs_layer,
         "value_fields": list(value_fields),
@@ -2617,8 +2646,8 @@ def qgis_render_catchment(
     """
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_points = os.path.abspath(points_path)
-    abs_output = os.path.abspath(output_png)
+    abs_points = user_abs(points_path)
+    abs_output = user_abs(output_png)
     params = {
         "points_path": abs_points,
         "output_png": abs_output,
@@ -2672,8 +2701,8 @@ def qgis_export_layout(
     from qgis_mcp_workflows.errors import ExecutorError, LayoutNotFoundError
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_qgz = os.path.abspath(qgz_path)
-    abs_output = os.path.abspath(output_path)
+    abs_qgz = user_abs(qgz_path)
+    abs_output = user_abs(output_path)
     params = {
         "qgz_path": abs_qgz,
         "layout_name": layout_name,
@@ -2707,7 +2736,7 @@ def qgis_export_layout(
     )
 
 
-class AtlasExportResult(BaseModel):
+class AtlasExportResult(DrawsMap):
     output_dir: str
     output_path: str
     format: str
@@ -2741,8 +2770,8 @@ def qgis_export_atlas(
     from qgis_mcp_workflows.errors import AtlasDisabledError, ExecutorError, LayoutNotFoundError
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_qgz = os.path.abspath(qgz_path)
-    abs_dir = os.path.abspath(output_dir)
+    abs_qgz = user_abs(qgz_path)
+    abs_dir = user_abs(output_dir)
     os.makedirs(abs_dir, exist_ok=True)
     params = {
         "qgz_path": abs_qgz,
@@ -2759,7 +2788,7 @@ def qgis_export_atlas(
         if "ATLAS_DISABLED" in err.message:
             raise AtlasDisabledError(layout_name) from err
         raise
-    files = [os.path.abspath(p) for p in result.get("files") or []]
+    files = [user_abs(p) for p in result.get("files") or []]
     return AtlasExportResult(
         output_dir=result.get("output_dir", abs_dir),
         output_path=result.get("output_path") or (files[0] if files else abs_dir),
@@ -2801,8 +2830,8 @@ def qgis_compose_layout(
     """
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_layers = [os.path.abspath(p) for p in layer_paths]
-    abs_output = os.path.abspath(output_path)
+    abs_layers = [user_abs(p) for p in layer_paths]
+    abs_output = user_abs(output_path)
     params = {
         "layer_paths": abs_layers,
         "output_path": abs_output,
@@ -3022,9 +3051,9 @@ def qgis_compose_panels(
         row_labels=row_labels, palettes=palettes, colorbar_labels=colorbar_labels, tick_format=tick_format,
         n_ticks=n_ticks, cap_percentile=cap_percentile, extent=extent, output_path=output_path,
     )
-    abs_csv = os.path.abspath(value_csv)
+    abs_csv = user_abs(value_csv)
     _require_file("value_csv", abs_csv)
-    abs_zones = os.path.abspath(zones_path)
+    abs_zones = user_abs(zones_path)
     columns, csv_keys = _read_panel_columns(abs_csv, join_field, value_fields)
     columns, off_layer = _drop_keys_off_the_layer(columns, csv_keys, _layer_join_keys(abs_zones, join_field),
                                                   join_field)
@@ -3057,7 +3086,7 @@ def qgis_compose_panels(
         "zones_path": abs_zones, "join_field": join_field, "rows": rows, "cols": cols,
         "panels": [{"values": columns[i], "group": panel_group(i, rows, cols, share_scale)}
                    for i in range(rows * cols)],
-        "groups": groups, "output_path": os.path.abspath(output_path),
+        "groups": groups, "output_path": user_abs(output_path),
         "column_titles": column_titles, "row_labels": row_labels, "unmatched": unmatched,
         "colorbar": colorbar, "colorbar_position": "bottom" if share_scale == "column" else "right",
         "extent": list(extent) if extent is not None else None, "width_mm": width_mm, "height_mm": height_mm,
@@ -3107,8 +3136,8 @@ def qgis_batch_render(
     from qgis_mcp_workflows.errors import ExecutorError, FieldNotFoundError
     from qgis_mcp_workflows.executors import get_executor
 
-    abs_template = os.path.abspath(template_qgz)
-    abs_output_dir = os.path.abspath(output_dir)
+    abs_template = user_abs(template_qgz)
+    abs_output_dir = user_abs(output_dir)
 
     if not values:
         return BatchRenderResult(
@@ -3185,10 +3214,18 @@ def qgis_figures_to_pptx(
     Returns: ``PptxResult`` with pptx_path, slides added/total, and
     per-slide titles (None for slides without titles).
     """
-    from pptx import Presentation
-    from pptx.dml.color import RGBColor
-    from pptx.enum.text import PP_ALIGN
-    from pptx.util import Inches, Pt
+    try:
+        from pptx import Presentation
+        from pptx.dml.color import RGBColor
+        from pptx.enum.text import PP_ALIGN
+        from pptx.util import Inches, Pt
+    except ImportError as exc:
+        from qgis_mcp_workflows.errors import QgisMcpWorkflowsError
+
+        raise QgisMcpWorkflowsError(
+            "qgis_figures_to_pptx needs python-pptx (the pptx extra). "
+            "Next: uv sync --extra pptx, then retry."
+        ) from exc
 
     if captions is not None and len(captions) != len(figure_paths):
         raise InvalidArgumentError(
@@ -3202,14 +3239,14 @@ def qgis_figures_to_pptx(
         bundled_asset,
     )
 
-    abs_figs = [os.path.abspath(fig) for fig in figure_paths]
+    abs_figs = [user_abs(fig) for fig in figure_paths]
     for fig in abs_figs:
         _require_file("figure_paths", fig)
     if template_pptx:
-        _require_file("template_pptx", os.path.abspath(template_pptx))
-    abs_pptx = os.path.abspath(pptx_path)
+        _require_file("template_pptx", user_abs(template_pptx))
+    abs_pptx = user_abs(pptx_path)
     if template_pptx:
-        prs = Presentation(os.path.abspath(template_pptx))
+        prs = Presentation(user_abs(template_pptx))
     else:
         bundled = bundled_asset("assets", "sekilab_blank.pptx")
         if bundled:
@@ -3420,6 +3457,151 @@ _register_compound_tools_if_enabled()
 # ---------------------------------------------------------------------------
 
 
+_TRANSPORTS = ("plugin", "headless", "auto")
+
+# Process basenames for QGIS Desktop. The headless backend is a Python
+# interpreter running headless_runner.py, so it does not match. Exact names
+# only: a substring would also match this server.
+_DESKTOP_BASENAMES = frozenset({
+    "qgis",
+    "qgis.bin",
+    "qgis-bin",
+    "qgis-bin.exe",
+    "qgis.exe",
+    "qgis-ltr",
+    "qgis-ltr-bin",
+    "qgis-ltr-bin.exe",
+})
+
+
+def config_path():
+    """Per-machine override. DESIGN §2. Missing file means no override."""
+    from pathlib import Path
+
+    return Path.home() / ".config" / "qgis-mcp-workflows" / "config.toml"
+
+
+def load_user_config() -> dict:
+    """Read ``config.toml``. A missing or unreadable file is an empty config."""
+    path = config_path()
+    if not path.is_file():
+        return {}
+    import tomllib
+
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        logger.warning("ignoring %s (%s)", path, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_transport(cli: str | None) -> tuple[str, str]:
+    """``(transport, source)``. CLI, then env, then config.toml, then auto."""
+    if cli:
+        return cli, "--transport"
+    env = os.environ.get("QGIS_MCP_WORKFLOWS_TRANSPORT", "").strip().lower()
+    if env in _TRANSPORTS:
+        return env, "QGIS_MCP_WORKFLOWS_TRANSPORT"
+    if env:
+        logger.warning("Unknown QGIS_MCP_WORKFLOWS_TRANSPORT=%r; ignoring", env)
+    file_value = str(load_user_config().get("transport", "")).strip().lower()
+    if file_value in _TRANSPORTS:
+        return file_value, str(config_path())
+    if file_value:
+        logger.warning("ignoring transport=%r in %s", file_value, config_path())
+    return "auto", "default"
+
+
+def resolve_endpoint() -> tuple[str, int]:
+    """Host and port. Env wins over config.toml, which wins over the defaults."""
+    from qgis_mcp_workflows.helpers import DEFAULT_HOST, DEFAULT_PORT
+
+    cfg = load_user_config()
+    host = os.environ.get("QGIS_MCP_WORKFLOWS_HOST") or str(cfg.get("host") or DEFAULT_HOST)
+    port_raw = os.environ.get("QGIS_MCP_WORKFLOWS_PORT")
+    if port_raw is None or port_raw == "":
+        port_raw = cfg.get("port", DEFAULT_PORT)
+    return str(host), int(port_raw)
+
+
+def _is_qgis_desktop_process(name: str) -> bool:
+    """True for a QGIS Desktop executable name, not for this server or Python.
+
+    Splits on both separators so a Windows image path is recognized on any host.
+    """
+    base = name.strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return base in _DESKTOP_BASENAMES
+
+
+def _qgis_desktop_running() -> bool:
+    """Whether QGIS Desktop's process is up.
+
+    A failure to look (no ``ps``, a hung task list) is treated as "not running"
+    so an unattended ``auto`` session can still reach headless. The warning is
+    the record of that guess.
+    """
+    try:
+        if sys.platform == "win32":
+            return _windows_qgis_desktop_running()
+        if sys.platform.startswith("linux") and os.path.isdir("/proc"):
+            return _proc_qgis_desktop_running()
+        return _ps_qgis_desktop_running()
+    except Exception:
+        logger.warning("could not tell whether QGIS Desktop is running", exc_info=True)
+        return False
+
+
+def _proc_qgis_desktop_running() -> bool:
+    me = str(os.getpid())
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or entry == me:
+            continue
+        try:
+            with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as fh:
+                comm = fh.read()
+        except OSError:
+            continue
+        if _is_qgis_desktop_process(comm):
+            return True
+    return False
+
+
+def _ps_qgis_desktop_running() -> bool:
+    import subprocess
+
+    out = subprocess.run(
+        ["ps", "-ax", "-o", "comm="],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        stdin=subprocess.DEVNULL,
+    )
+    if out.returncode != 0:
+        return False
+    return any(_is_qgis_desktop_process(line) for line in out.stdout.splitlines())
+
+
+def _windows_qgis_desktop_running() -> bool:
+    import subprocess
+
+    out = subprocess.run(
+        ["tasklist", "/FO", "CSV", "/NH"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        stdin=subprocess.DEVNULL,
+    )
+    if out.returncode != 0:
+        return False
+    for line in out.stdout.splitlines():
+        image = line.split(",", 1)[0].strip().strip('"')
+        if _is_qgis_desktop_process(image):
+            return True
+    return False
+
+
 def _plugin_reachable(host: str, port: int, timeout_s: float = 0.5) -> bool:
     """Probe ``host:port`` with a short connect timeout. Used by ``auto`` mode."""
     import socket as _socket
@@ -3431,57 +3613,78 @@ def _plugin_reachable(host: str, port: int, timeout_s: float = 0.5) -> bool:
         return False
 
 
-class UnavailableExecutor:
-    """``auto`` mode with no backend at startup: start anyway, fail per call.
+class AutoExecutor:
+    """``transport=auto``: plugin if the socket is up, else a guarded headless.
 
-    Raising from ``_build_executor`` exits the process before the MCP
-    handshake, so the client only reports "connection closed". Instead every
-    dispatch re-probes the plugin port: once QGIS Desktop is up with the plugin
-    started, this swaps a ``PluginExecutor`` in as the active executor (no MCP
-    restart); until then it raises ``TransportUnavailableError`` carrying both
-    reasons.
+    The server must start even when nothing is listening, or the MCP client
+    only sees a closed connection. Each call re-checks the socket. If QGIS
+    Desktop is running and Run MCP was not clicked, the call fails instead of
+    drawing in a separate empty project. When the socket comes up later, the
+    same executor switches to the plugin without an MCP restart.
     """
 
-    def __init__(self, host: str, port: int, headless_detail: str) -> None:
+    def __init__(self, host: str, port: int) -> None:
         self.host = host
         self.port = port
-        # The headless detail may end with its own "Next:" hint; the combined
-        # error supplies the one that applies here.
-        self.headless_detail = headless_detail.split(" Next:")[0].rstrip(". ")
-        self._delegate = None  # PluginExecutor once the plugin was reached
+        self._plugin = None
+        self._headless = None
+        self._backend = ""
+
+    def backend(self) -> str:
+        """``plugin`` / ``headless`` after a dispatch, else ``auto``."""
+        return self._backend or "auto"
 
     def dispatch(self, command: str, params: dict | None = None, timeout: int | None = None) -> dict:
-        # Tools that hold this executor in a local keep calling it after the
-        # swap; forward those straight to the plugin instead of re-probing.
-        if self._delegate is not None:
-            return self._delegate.dispatch(command, params, timeout=timeout)
-
-        from qgis_mcp_workflows import executors
-        from qgis_mcp_workflows.errors import TransportUnavailableError
+        from qgis_mcp_workflows.errors import (
+            HeadlessUnavailableError,
+            PluginNotStartedError,
+            TransportUnavailableError,
+        )
         from qgis_mcp_workflows.executors.plugin import PluginExecutor
 
-        if not _plugin_reachable(self.host, self.port):
-            raise TransportUnavailableError(self.host, self.port, self.headless_detail)
-        self._delegate = PluginExecutor(host=self.host, port=self.port)
-        executors.set_executor(self._delegate)
-        logger.info("plugin came up at %s:%d; switched transport to plugin", self.host, self.port)
-        return self._delegate.dispatch(command, params, timeout=timeout)
+        if _plugin_reachable(self.host, self.port):
+            if self._plugin is None:
+                self._plugin = PluginExecutor(host=self.host, port=self.port)
+                logger.info("plugin up at %s:%d", self.host, self.port)
+            self._backend = "plugin"
+            return self._plugin.dispatch(command, params, timeout=timeout)
+
+        if _qgis_desktop_running():
+            self._backend = ""
+            raise PluginNotStartedError(self.host, self.port)
+
+        if self._headless is None:
+            from qgis_mcp_workflows.executors.headless import HeadlessExecutor
+
+            try:
+                self._headless = HeadlessExecutor()
+            except HeadlessUnavailableError as exc:
+                # The launcher detail may carry its own "Next:"; this error has one.
+                detail = exc.detail.split(" Next:")[0].rstrip(". ")
+                raise TransportUnavailableError(self.host, self.port, detail) from exc
+        self._backend = "headless"
+        return self._headless.dispatch(command, params, timeout=timeout)
 
 
-def _build_executor(transport: str):
+def _build_executor(transport: str, host: str | None = None, port: int | None = None):
     """Construct the executor for the chosen transport.
 
-    ``auto`` first probes the plugin port; falls back to headless if the plugin
-    is not reachable. If headless is unavailable too, ``auto`` starts degraded
-    (``UnavailableExecutor``) so tools return an actionable error instead of the
-    server exiting. An explicit ``headless`` still raises
+    ``auto`` uses the plugin when the socket is open. Otherwise it returns an
+    ``AutoExecutor`` that starts anyway: headless only when QGIS Desktop is not
+    running, and ``PluginNotStartedError`` when Desktop is open but Run MCP was
+    not clicked. Headless is not constructed at startup, so a missing launcher
+    does not close the MCP connection. An explicit ``headless`` still raises
     ``HeadlessUnavailableError`` at startup.
     """
     from qgis_mcp_workflows.executors.plugin import PluginExecutor
     from qgis_mcp_workflows.helpers import DEFAULT_HOST, DEFAULT_PORT
 
-    host = os.environ.get("QGIS_MCP_WORKFLOWS_HOST", DEFAULT_HOST)
-    port = int(os.environ.get("QGIS_MCP_WORKFLOWS_PORT", str(DEFAULT_PORT)))
+    if host is None:
+        host = os.environ.get("QGIS_MCP_WORKFLOWS_HOST", DEFAULT_HOST)
+    if port is None:
+        port = int(os.environ.get("QGIS_MCP_WORKFLOWS_PORT", str(DEFAULT_PORT)))
+    else:
+        port = int(port)
 
     if transport == "plugin":
         return PluginExecutor(host=host, port=port), "plugin"
@@ -3492,18 +3695,13 @@ def _build_executor(transport: str):
     if transport == "auto":
         if _plugin_reachable(host, port):
             return PluginExecutor(host=host, port=port), "plugin"
-        from qgis_mcp_workflows.errors import HeadlessUnavailableError
-        from qgis_mcp_workflows.executors.headless import HeadlessExecutor
-
-        try:
-            return HeadlessExecutor(), "headless"
-        except HeadlessUnavailableError as exc:
+        if _qgis_desktop_running():
             logger.warning(
-                "no QGIS backend at startup (plugin %s:%d closed; headless: %s); "
-                "starting degraded, tools will error until QGIS is reachable",
-                host, port, exc.detail,
+                "QGIS Desktop is running but %s:%d is closed. "
+                "Click Run MCP (Plugins menu: QGIS MCP). Not falling back to headless.",
+                host, port,
             )
-            return UnavailableExecutor(host, port, exc.detail), "unavailable"
+        return AutoExecutor(host, port), "auto"
     raise ValueError(f"Unknown transport: {transport!r}. Use plugin / headless / auto.")
 
 
@@ -3527,25 +3725,42 @@ def _version() -> str:
 
 
 def main() -> None:
-    """Run the MCP server. CLI flag ``--transport`` overrides the env default."""
+    """Run the MCP server.
+
+    Transport: ``--transport``, else ``QGIS_MCP_WORKFLOWS_TRANSPORT``, else
+    ``~/.config/qgis-mcp-workflows/config.toml``, else ``auto``. The chosen
+    value is logged at WARNING so it shows up before the first tool call
+    (console logging is WARNING and above).
+    """
     import argparse
 
     parser = argparse.ArgumentParser(prog="qgis-mcp-workflows-server")
     parser.add_argument(
         "--transport",
-        choices=("plugin", "headless", "auto"),
-        default=os.environ.get("QGIS_MCP_WORKFLOWS_TRANSPORT", "auto"),
+        choices=_TRANSPORTS,
+        default=None,
         help="QGIS backend: plugin (TCP socket to running QGIS Desktop), "
-        "headless (PyQGIS subprocess), auto (probe plugin port, fall back to "
-        "headless). Default: auto. Env: QGIS_MCP_WORKFLOWS_TRANSPORT.",
+        "headless (PyQGIS subprocess), auto (plugin if Run MCP is listening; "
+        "refuse headless while QGIS Desktop is open and the socket is closed; "
+        "otherwise headless). Default: auto, unless env or config.toml sets it.",
     )
     args = parser.parse_args()
 
     from qgis_mcp_workflows.executors import set_executor
 
-    executor, chosen = _build_executor(args.transport)
+    transport, source = resolve_transport(args.transport)
+    host, port = resolve_endpoint()
+    executor, chosen = _build_executor(transport, host=host, port=port)
     set_executor(executor)
-    logger.info("qgis-mcp-workflows server starting (v%s, transport=%s)", _version(), chosen)
+    # WARNING, not INFO: the console handler drops INFO, and this line is how
+    # the chosen backend is visible before any tool call.
+    logger.warning(
+        "qgis-mcp-workflows v%s transport=%s (from %s). "
+        "auto uses the plugin on %s:%d when Run MCP is clicked; if QGIS Desktop "
+        "is open and Run MCP was not, tools fail instead of drawing an empty "
+        "headless project. Call qgis_diagnose to compare server and plugin versions.",
+        _version(), chosen, source, host, port,
+    )
     mcp.run()
 
 

@@ -9,6 +9,9 @@ is the same field as GUFM `home_zone` on persona CSVs. Mesh tokens are JIS L3
 (8-digit); `assets/zones_mesh_l3.gpkg` dissolves the L4 `Tokyo23_mesh.shp`
 (`KEY_CODE[:8]`).
 
+Paths below use `<dropbox>` for the Dropbox folder. Pass the absolute path
+(`$DROPBOX_ROOT` in the shell). A leading `~` in a tool argument is expanded.
+
 Rebuild zone assets after a UKG shapefile update:
 
 ```bash
@@ -43,7 +46,7 @@ GUFM `dump_trajectories_for_qgis.py` writes `trip_id,seq,lon,lat,mode,datetime`.
 
 ```python
 qgis_render_trajectory(
-    input_path="~/Dropbox/gufm/21_decks/2026-06-12_lab_meeting/_mapdata/gt_routed.csv",
+    input_path="<dropbox>/gufm/21_decks/2026-06-12_lab_meeting/_mapdata/gt_routed.csv",
     output_png="/tmp/gufm_traj.png",
     mode_col="mode",
     render_mode="lines",
@@ -54,14 +57,14 @@ qgis_render_trajectory(
 ```
 
 Offline underlays (not tiles): pass `basemap_paths` with
-`~/Dropbox/gufm/10_data/urban_kg/urban_data/polygon/Tokyo23.shp` and
+`<dropbox>/gufm/10_data/urban_kg/urban_data/polygon/Tokyo23.shp` and
 `.../road/Tokyo_railway.shp`. Tokyo23 has no `.prj`; inspect reports unknown CRS
 until `qgis_load_layer(..., crs="EPSG:4326")`.
 
 ## 3. JAXA LULC underlay / zonal stats
 
 The 100 m JAXA raster still lives next to PFLOW
-(`~/Dropbox/PFLOW/Pseudo-PFLOW/src/truck/2024JPN_v25.04_100m/2024JPN_v25.04_100m.tif`).
+(`<dropbox>/PFLOW/Pseudo-PFLOW/src/truck/2024JPN_v25.04_100m/2024JPN_v25.04_100m.tif`).
 It is optional — GUFM maps usually use ward + railway underlays.
 
 ```python
@@ -71,7 +74,7 @@ qgis_render_choropleth(
     value_csv="<repo>/assets/tokyo23_home_counts.csv",
     join_field="zone_id",
     output_png="/tmp/gufm_lulc.png",
-    basemap_paths=["~/Dropbox/PFLOW/Pseudo-PFLOW/src/truck/2024JPN_v25.04_100m/2024JPN_v25.04_100m.tif"],
+    basemap_paths=["<dropbox>/PFLOW/Pseudo-PFLOW/src/truck/2024JPN_v25.04_100m/2024JPN_v25.04_100m.tif"],
 )
 qgis_zonal_stats(
     zones_path="<repo>/assets/zones_tokyo23.gpkg",
@@ -92,9 +95,9 @@ does not copy the 57 MB cache; it reads it in place.
 
 ```python
 qgis_route_on_network(
-    input_csv="~/Dropbox/gufm/21_decks/2026-06-12_lab_meeting/_mapdata/hero_stops.csv",
-    network_path="~/Dropbox/gufm/10_data/network_cache/drm_inner_tokyo.tsv",
-    rail_network_path="~/Dropbox/gufm/10_data/network_cache/rail_inner_tokyo.tsv",
+    input_csv="<dropbox>/gufm/21_decks/2026-06-12_lab_meeting/_mapdata/hero_stops.csv",
+    network_path="<dropbox>/gufm/10_data/network_cache/drm_inner_tokyo.tsv",
+    rail_network_path="<dropbox>/gufm/10_data/network_cache/rail_inner_tokyo.tsv",
     output_csv="/tmp/gufm_hero_routed.csv",
     seq_col="seq",
     lon_col="lon",
@@ -110,8 +113,8 @@ qgis_render_trajectory(
     scale_bar=True,
     north_arrow=True,
     basemap_paths=[
-        "~/Dropbox/gufm/10_data/urban_kg/urban_data/polygon/Tokyo23.shp",
-        "~/Dropbox/gufm/10_data/urban_kg/urban_data/road/Tokyo_railway.shp",
+        "<dropbox>/gufm/10_data/urban_kg/urban_data/polygon/Tokyo23.shp",
+        "<dropbox>/gufm/10_data/urban_kg/urban_data/road/Tokyo_railway.shp",
     ],
 )
 ```
