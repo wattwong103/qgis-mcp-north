@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.24.0**, 2026-11-18
+Status: **v1.25.0**, 2026-11-18
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -12,7 +12,7 @@ This document is the spec. Implementation follows. If a tool's signature, respon
 
 Three problems with upstream that the fork solves:
 
-**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **33 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
+**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **34 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
 
 **No headless mode.** Upstream requires QGIS Desktop running with the plugin enabled. That's incompatible with scheduled overnight runs, CI, or any automation. We add a **PyQGIS-subprocess transport** alongside the existing plugin transport. Same tools, two backends, selected by config or CLI flag.
 
@@ -98,7 +98,7 @@ Upstream's plugin and server stay untouched. If the user installs both, Claude D
 
 ---
 
-## 4. Tool surface (33 workflow + 1 escape hatch)
+## 4. Tool surface (34 workflow + 1 escape hatch)
 
 For each tool: signature, what it does, response shape, and the typical chain.
 
@@ -160,9 +160,9 @@ ProjectInfo = {
 
 Chains into: `qgis_export_layout`, `qgis_render_map`, `qgis_batch_render`.
 
-### Analysis (7)
+### Analysis (8)
 
-GitHub analogue: nkarasiak `spatial_join` / `zonal_statistics` / `get_unique_values`. Wrapped as atomic workflows (load + compute + write + cleanup). No Processing toolbox. `qgis_buffer`, `qgis_dissolve`, `qgis_clip` and `qgis_voronoi` write a polygon or line file another tool can join. They do not call Processing.
+GitHub analogue: nkarasiak `spatial_join` / `zonal_statistics` / `get_unique_values`. Wrapped as atomic workflows (load + compute + write + cleanup). No Processing toolbox. `qgis_buffer`, `qgis_dissolve`, `qgis_clip`, `qgis_voronoi` and `qgis_make_grid` write a polygon or line file another tool can join. They do not call Processing. `qgis_make_grid` is a metre fishnet for cells that are not an existing zone layer. `assets/zones_mesh_l3.gpkg` stays the JIS L3 mesh from `scripts/build_gufm_zones.py`.
 
 #### `qgis_spatial_join(target_path: str, join_path: str, output_path: str, predicate: str = "intersects", method: str = "one_to_one", join_fields: list[str] | None = None, prefix: str = "", keep_unmatched: bool = True) → SpatialJoinResult`
 
@@ -291,6 +291,34 @@ VoronoiResult = {
 ```
 
 Chains into: `qgis_spatial_join`, `qgis_aggregate_to_zones`, `qgis_render_choropleth`. `qgis_render_catchment` still draws the PNG.
+
+#### `qgis_make_grid(extent: list[float], output_path: str, cell_m: float, crs: str) → GridResult`
+
+Write a fishnet of square polygons for cells that are not an existing zone layer. `extent` is `[xmin, ymin, xmax, ymax]` in `crs`. It is the box, not a layer path. `cell_m` is the cell size in metres and must be finite and greater than 0. `crs` is a projected CRS whose map units are metres (`EPSG:32654`, `EPSG:6677`). A bare integer is read as an EPSG code.
+
+The cells are axis-aligned squares of `cell_m` in that CRS. They are aligned to multiples of `cell_m` from the CRS origin, so two calls with the same `crs` and `cell_m` share edges and `cell_id` values where the squares are the same. Every cell that intersects the extent is written. A cell that only partly overlaps the extent is still a full square, so `grid_extent` may extend past `extent` out to the next cell line. An edge that already sits on a cell line does not grow an extra cell.
+
+`cell_id` is the text `"{col}_{row}"`. `col` and `row` are the integer indices of the cell's southwest corner divided by `cell_m`, and they may be negative (`-2_-1`). Those fields are what another tool joins on. `id_field` in the result is `cell_id`. The open project is unchanged. The handler does not touch `iface`.
+
+A geographic CRS, or a projected CRS whose map units are not metres, raises `GridCrsError`. The message names the CRS and the map unit. A string QGIS cannot use as a CRS raises `GridCrsError` too. `xmin < xmax` and `ymin < ymax` are required, and every value must be finite. Anything else raises `InvalidArgumentError` before dispatch. More than 250,000 cells raises `GridTooManyError` before a file is written. The message includes the row count, the column count and `cell_m`. Output is GeoPackage (`.gpkg`) or GeoJSON (`.geojson` or `.json`). Full mode only. No Processing.
+
+This is not the JIS L3 mesh. `assets/zones_mesh_l3.gpkg` stays the mesh `scripts/build_gufm_zones.py` builds. This tool does not write that file and does not take a `code`. Passing that checkout path as `output_path` raises `InvalidArgumentError` before dispatch. A `code="jis_l3"` mode can wrap that script later. It is a second product and does not belong on this call.
+
+```python
+GridResult = {
+    "output_path": str,
+    "n_output": int,
+    "n_rows": int,
+    "n_cols": int,
+    "cell_m": float,
+    "crs": str,
+    "extent": [float, float, float, float],
+    "grid_extent": [float, float, float, float],
+    "id_field": str,  # "cell_id"
+}
+```
+
+Chains into: `qgis_aggregate_to_zones`, `qgis_spatial_join`, `qgis_clip`, `qgis_render_choropleth`.
 
 ### Styling (2)
 
@@ -831,7 +859,7 @@ Every typed error derives from `QgisMcpWorkflowsError`, which subclasses the SDK
 - 3D view. Not on the roadmap.
 - Map server / WMS / WFS. Not on the roadmap.
 
-If a v1 user needs any of these, the answer is: install upstream alongside, or write the call inside `qgis_eval`. A calculated column or a feature filter is `qgis_expression`, not `qgis_eval`. A buffer, dissolve, study-area clip, or Voronoi polygon file is `qgis_buffer`, `qgis_dissolve`, `qgis_clip`, or `qgis_voronoi`, not a Processing algorithm. Network isochrones stay out.
+If a v1 user needs any of these, the answer is: install upstream alongside, or write the call inside `qgis_eval`. A calculated column or a feature filter is `qgis_expression`, not `qgis_eval`. A buffer, dissolve, study-area clip, or Voronoi polygon file is `qgis_buffer`, `qgis_dissolve`, `qgis_clip`, or `qgis_voronoi`, not a Processing algorithm. A metre fishnet is `qgis_make_grid`, not Processing `native:creategrid`. Network isochrones stay out. JIS L3 regeneration stays `scripts/build_gufm_zones.py`.
 
 ---
 
@@ -885,6 +913,8 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 
 **v1.24 — layout type and panel frames.** ✅ `qgis_compose_layout` takes optional `width_mm` and `height_mm`, `font_family`, `title_size_pt`, `legend_size_pt` and `legend_corner`. Omitted, the page preset, the 18 pt title and the top-right legend stay. `qgis_compose_panels` takes `difference_columns` (`name = left - right`, joined into the CSV before the scale) and `panel_extents` (one box per panel). An older plugin that ignores the new keys raises `PluginOutdatedError`.
 
+**v1.25 — fishnet polygons.** ✅ `qgis_make_grid` writes square polygons of `cell_m` metres over an extent, in a projected CRS whose map units are metres. Cells align to the CRS origin, so the same `crs` and `cell_m` share `cell_id`. The file is a GeoPackage or GeoJSON another tool can join. `assets/zones_mesh_l3.gpkg` is unchanged. JIS L3 stays `scripts/build_gufm_zones.py`. Full mode only. No Processing. Named recipes are not this release.
+
 ---
 
 ## 8. Resolved & open questions
@@ -901,7 +931,7 @@ Closed in v1.13 (GUFM, not PFLOW MFS):
 5. ~~**No master MFS-zone polygon shapefile exists in PFLOW.**~~ Closed in v1.13 against GUFM, not PFLOW MFS. Canonical polygons:
     - `assets/zones_tokyo23.gpkg` — 23 wards, `zone_id` = KSJ `N03_007` (matches GUFM `home_zone`).
     - `assets/zones_mesh_l3.gpkg` — JIS L3 (1 km, ADR-15), dissolved from `Tokyo23_mesh.shp` L4 `KEY_CODE[:8]`.
-    Rebuild: `uv run --no-sync --extra drm scripts/build_gufm_zones.py`. Source shapefiles stay in `~/Dropbox/gufm/10_data/urban_kg/urban_data/polygon/`.
+    Rebuild: `uv run --no-sync --extra drm scripts/build_gufm_zones.py`. Source shapefiles stay in `~/Dropbox/gufm/10_data/urban_kg/urban_data/polygon/`. A fishnet for any other cell size is `qgis_make_grid`. It does not write this file.
 
 6. ~~**PPTX template.**~~ Closed in v1.13. `qgis_figures_to_pptx` defaults to `assets/sekilab_blank.pptx` (Sekimoto-lab 20×11.25 in widescreen, zero content slides). The filled `21_decks/_templates/Seki_Lab_Template_latest.pptx` is 17 slides / one DEFAULT layout and must not be the default (appending would dump figures after lab content). Rebuild: `uv run --no-sync --extra pptx scripts/make_sekilab_blank.py`.
 

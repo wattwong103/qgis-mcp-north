@@ -414,6 +414,32 @@ class ClipEmptyError(QgisMcpWorkflowsError):
         self.detail = detail
 
 
+class GridCrsError(QgisMcpWorkflowsError):
+    """A fishnet needs a projected CRS whose map units are metres."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"cell_m is metres in that CRS. A geographic CRS, or a CRS in feet, "
+            f"cannot take a square metre cell. "
+            f"Next: pass a projected CRS whose map units are metres, such as a UTM zone "
+            f"(EPSG:32654) or a Japan Plane Rectangular zone, then retry qgis_make_grid."
+        )
+        self.detail = detail
+
+
+class GridTooManyError(QgisMcpWorkflowsError):
+    """The fishnet would write more cells than the tool allows."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"Next: raise cell_m or pass a smaller extent [xmin, ymin, xmax, ymax], "
+            f"then retry qgis_make_grid."
+        )
+        self.detail = detail
+
+
 class VoronoiError(QgisMcpWorkflowsError):
     """Voronoi polygons need at least three points, or the diagram was empty."""
 

@@ -241,6 +241,7 @@ WRITTEN_BY_MODEL: dict[str, Callable[[Any], list[str]]] = {
     "DissolveResult": lambda r: [r.output_path],
     "ClipResult": lambda r: [r.output_path],
     "VoronoiResult": lambda r: [r.output_path],
+    "GridResult": lambda r: [r.output_path],
     "ZonalStatsResult": lambda r: [r.output_path],
     "ExpressionResult": lambda r: [r.output_path],
 }

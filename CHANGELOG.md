@@ -3,6 +3,20 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.25.0 — 2026-11-18 — fishnet polygons
+
+### Added
+
+- `qgis_make_grid` writes square polygons of `cell_m` metres over
+  `[xmin, ymin, xmax, ymax]` in a projected CRS whose map units are metres.
+  Cells align to the CRS origin, so the same `crs` and `cell_m` share
+  `cell_id`. A partial edge cell is still a full square. More than 250,000
+  cells is refused before a file is written. Output is GeoPackage or GeoJSON.
+  Full mode only. No Processing.
+- `assets/zones_mesh_l3.gpkg` is unchanged. JIS L3 stays
+  `scripts/build_gufm_zones.py`. Passing that checkout path as `output_path`
+  is refused. There is no `code="jis_l3"` mode.
+
 ## v1.24.0 — 2026-11-18 — layout type and panel frames
 
 ### Added

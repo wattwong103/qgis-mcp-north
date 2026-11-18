@@ -370,6 +370,7 @@ class QgisMCPServer(QObject):
                 "dissolve": self.dissolve,
                 "clip": self.clip,
                 "voronoi": self.voronoi,
+                "make_grid": self.make_grid,
                 "apply_expression": self.apply_expression,
                 "zonal_stats": self.zonal_stats,
                 "compose_layout": self.compose_layout,
@@ -5849,6 +5850,111 @@ class QgisMCPServer(QObject):
             "output_path": os.path.abspath(path_written),
             "n_input": n_input,
             "n_output": len(written),
+        }
+
+    def make_grid(self, extent, output_path, cell_m, crs):
+        """Write a metre fishnet. Does not touch iface or the open project.
+
+        Cells are square polygons aligned to the CRS origin. This is not the
+        JIS L3 mesh. The caller chooses output_path.
+        """
+        from .grid import (
+            ID_FIELD,
+            MAX_CELLS,
+            cell_box,
+            cell_id,
+            grid_crs_detail,
+            grid_too_many_detail,
+            plan_grid,
+        )
+
+        text = crs if isinstance(crs, str) else ""
+        text = text.strip()
+        crs_obj = QgsCoordinateReferenceSystem(text)
+        if not crs_obj.isValid():
+            factory = getattr(QgsCoordinateReferenceSystem, "fromUserInput", None)
+            if callable(factory):
+                try:
+                    made = factory(text)
+                except Exception:
+                    made = None
+                if made is not None and made.isValid():
+                    crs_obj = made
+        if not crs_obj.isValid():
+            raise Exception(grid_crs_detail(text or "unknown", "invalid"))
+        unit = self._distance_unit_key(crs_obj)
+        if unit != "m":
+            label = ""
+            try:
+                label = crs_obj.authid() or ""
+            except Exception:
+                label = ""
+            raise Exception(grid_crs_detail(label or text or "unknown", unit))
+        plan = plan_grid(extent, cell_m)
+        if plan is None:
+            raise Exception(
+                "GRID_EXTENT: extent must be four finite numbers "
+                "[xmin, ymin, xmax, ymax] with xmin < xmax and ymin < ymax, "
+                "and cell_m must be metres greater than 0."
+            )
+        if plan["n_cells"] > MAX_CELLS:
+            raise Exception(grid_too_many_detail(plan))
+        auth = ""
+        try:
+            auth = crs_obj.authid() or ""
+        except Exception:
+            auth = ""
+        label = auth or text
+        uri = f"Polygon?crs={auth}" if auth else "Polygon"
+        mem = QgsVectorLayer(uri, "grid", "memory")
+        if not mem.isValid():
+            raise Exception("WRITE_FAILED: could not create the fishnet layer")
+        with contextlib.suppress(Exception):
+            mem.setCrs(crs_obj)
+        long_type = getattr(QVariant, "LongLong", QVariant.Int)
+        provider = mem.dataProvider()
+        if not provider.addAttributes(
+            [
+                QgsField(ID_FIELD, QVariant.String),
+                QgsField("row", long_type),
+                QgsField("col", long_type),
+            ]
+        ):
+            raise Exception("WRITE_FAILED: could not add fishnet fields")
+        mem.updateFields()
+        fields = mem.fields()
+        step = plan["cell_m"]
+        features = []
+        for row in range(plan["row0"], plan["row1"]):
+            for col in range(plan["col0"], plan["col1"]):
+                x0, y0, x1, y1 = cell_box(col, row, step)
+                ring = [
+                    QgsPointXY(x0, y0),
+                    QgsPointXY(x1, y0),
+                    QgsPointXY(x1, y1),
+                    QgsPointXY(x0, y1),
+                    QgsPointXY(x0, y0),
+                ]
+                geom = QgsGeometry.fromPolygonXY([ring])
+                if geom is None or geom.isEmpty():
+                    raise Exception(f"WRITE_FAILED: could not build fishnet cell {cell_id(col, row)}")
+                feature = QgsFeature(fields)
+                feature.setAttributes([cell_id(col, row), row, col])
+                feature.setGeometry(geom)
+                features.append(feature)
+        if len(features) != plan["n_cells"]:
+            raise Exception(grid_too_many_detail(plan))
+        path_written = self._write_features(mem, features, output_path)
+        return {
+            "output_path": os.path.abspath(path_written),
+            "n_output": len(features),
+            "n_rows": plan["n_rows"],
+            "n_cols": plan["n_cols"],
+            "cell_m": step,
+            "crs": label,
+            "extent": [float(value) for value in plan["extent"]],
+            "grid_extent": [float(value) for value in plan["grid_extent"]],
+            "id_field": ID_FIELD,
         }
 
     def _expression_context(self, layer):

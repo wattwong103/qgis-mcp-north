@@ -116,6 +116,9 @@ pipelines (PFLOW, GUFM). First call qgis_ping / qgis_diagnose. Then:
 - qgis_buffer (metres; a geographic layer is measured in a projected CRS),
   qgis_dissolve, qgis_clip, and qgis_voronoi write a polygon or line file
   another tool can join. qgis_render_catchment stays the Voronoi PNG.
+- qgis_make_grid(extent, output_path, cell_m, crs) writes a metre fishnet of
+  square polygons. crs is a projected metre CRS. This does not replace
+  assets/zones_mesh_l3.gpkg (JIS L3 from scripts/build_gufm_zones.py).
 - qgis_render_choropleth for zone polygons + value CSV (pass scale_bar=True
   and north_arrow=True for a publication PNG). GUFM 23-ward polygons:
   assets/zones_tokyo23.gpkg, join_field=zone_id (JIS N03_007).
@@ -233,6 +236,19 @@ def prompt_geometry() -> str:
         "qgis_voronoi(path, output_path) writes polygons from the same QgsGeometry.voronoiDiagram "
         "as qgis_render_catchment. The PNG tool stays a PNG. At least 3 points. "
         "Then qgis_spatial_join or qgis_render_choropleth on the written file."
+    )
+
+
+@mcp.prompt(title="Fishnet", description="Square metre cells over an extent, as polygons.")
+def prompt_make_grid() -> str:
+    return (
+        "qgis_make_grid(extent=[xmin, ymin, xmax, ymax], output_path=..., "
+        "cell_m=500, crs='EPSG:32654') writes square polygons. "
+        "extent is the box in that CRS, not a layer path. crs must be a projected "
+        "CRS whose map units are metres. Cells align to the CRS origin, and cell_id "
+        "is the join field. assets/zones_mesh_l3.gpkg stays the JIS L3 mesh from "
+        "scripts/build_gufm_zones.py. Then qgis_aggregate_to_zones or "
+        "qgis_render_choropleth on the written file."
     )
 
 
@@ -1470,6 +1486,143 @@ def qgis_voronoi(
         output_path=user_abs(result["output_path"]),
         n_input=int(result.get("n_input") or 0),
         n_output=int(result.get("n_output") or 0),
+    )
+
+
+class GridResult(BaseModel):
+    output_path: str
+    n_output: int
+    n_rows: int
+    n_cols: int
+    cell_m: float
+    crs: str
+    extent: list[float]
+    grid_extent: list[float]
+    id_field: str
+
+
+def _require_grid_plan(extent, cell_m):
+    """The cell plan, or an InvalidArgumentError / GridTooManyError before dispatch."""
+    from qgis_mcp_workflows.errors import GridTooManyError
+    from qgis_mcp_workflows.grid import (
+        MAX_CELLS,
+        check_cell_m,
+        check_extent,
+        grid_too_many_detail,
+        plan_grid,
+    )
+
+    if check_cell_m(cell_m) is None:
+        raise InvalidArgumentError(
+            f"cell_m {cell_m!r} must be metres greater than 0.",
+            next_step="pass cell_m as a positive number of metres, then retry qgis_make_grid",
+        )
+    if check_extent(extent) is None:
+        raise InvalidArgumentError(
+            "extent must be four finite numbers [xmin, ymin, xmax, ymax] "
+            "with xmin < xmax and ymin < ymax. It is the box in the grid CRS, not a layer path.",
+            next_step=(
+                "pass extent as [xmin, ymin, xmax, ymax] in the grid CRS, then retry qgis_make_grid"
+            ),
+        )
+    plan = plan_grid(extent, cell_m)
+    if plan is None:
+        raise InvalidArgumentError(
+            "extent is empty once it is aligned to cell_m.",
+            next_step="widen extent or lower cell_m, then retry qgis_make_grid",
+        )
+    if plan["n_cells"] > MAX_CELLS:
+        raise GridTooManyError(grid_too_many_detail(plan))
+    return plan
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_make_grid(
+    extent: Annotated[
+        list[float],
+        Field(description="[xmin, ymin, xmax, ymax] in crs. The box, not a layer path."),
+    ],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+    cell_m: Annotated[float, Field(description="Square cell size in metres. Must be finite and greater than 0.")],
+    crs: Annotated[
+        str,
+        Field(description="Projected CRS whose map units are metres, such as EPSG:32654. A bare integer is an EPSG code."),
+    ],
+) -> GridResult:
+    """Write a metre fishnet of square polygons.
+
+    When to use: cells that are not an existing zone layer, so
+    ``qgis_aggregate_to_zones`` or a choropleth has polygons to join.
+    ``extent`` is ``[xmin, ymin, xmax, ymax]`` in ``crs``. ``cell_m`` is metres.
+    ``crs`` must be a projected CRS whose map units are metres. Cells align to
+    multiples of ``cell_m`` from the CRS origin, so the same ``crs`` and
+    ``cell_m`` share ``cell_id``. A cell that only partly covers the extent is
+    still a full square. The open project is unchanged. Full mode only.
+    No Processing.
+
+    ``assets/zones_mesh_l3.gpkg`` stays the JIS L3 mesh from
+    ``scripts/build_gufm_zones.py``. This tool does not write that file.
+
+    Returns: ``GridResult`` with ``n_output``, ``grid_extent`` and ``id_field``
+    (``cell_id``).
+
+    Chains into: ``qgis_aggregate_to_zones``, ``qgis_spatial_join``,
+    ``qgis_clip``, ``qgis_render_choropleth``.
+    """
+    from qgis_mcp_workflows.errors import ExecutorError, GridCrsError, GridTooManyError
+    from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.grid import ID_FIELD, normalize_crs
+    from qgis_mcp_workflows.helpers import bundled_asset
+
+    plan = _require_grid_plan(extent, cell_m)
+    auth = normalize_crs(crs)
+    if auth is None:
+        raise InvalidArgumentError(
+            f"crs {crs!r} must name a projected CRS whose map units are metres, such as EPSG:32654.",
+            next_step="pass a metre CRS, then retry qgis_make_grid",
+        )
+    abs_out = _geometry_output("qgis_make_grid", output_path)
+    mesh = bundled_asset("assets", "zones_mesh_l3.gpkg")
+    if mesh and os.path.normcase(os.path.realpath(abs_out)) == os.path.normcase(os.path.realpath(mesh)):
+        raise InvalidArgumentError(
+            "output_path is assets/zones_mesh_l3.gpkg. That file is the JIS L3 mesh "
+            "from scripts/build_gufm_zones.py.",
+            next_step="pass a different output_path, then retry qgis_make_grid",
+        )
+    params = {
+        "extent": plan["extent"],
+        "output_path": abs_out,
+        "cell_m": plan["cell_m"],
+        "crs": auth,
+    }
+    try:
+        result = get_executor().dispatch("make_grid", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "GRID_CRS" in message:
+            raise GridCrsError(message) from err
+        if "GRID_TOO_MANY" in message:
+            raise GridTooManyError(message) from err
+        if "GRID_EXTENT" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="pass extent as [xmin, ymin, xmax, ymax] in the grid CRS, then retry qgis_make_grid",
+            ) from err
+        raise
+    return GridResult(
+        output_path=user_abs(result["output_path"]),
+        n_output=int(result["n_output"]) if "n_output" in result else plan["n_cells"],
+        n_rows=int(result["n_rows"]) if "n_rows" in result else plan["n_rows"],
+        n_cols=int(result["n_cols"]) if "n_cols" in result else plan["n_cols"],
+        cell_m=float(result["cell_m"]) if "cell_m" in result else plan["cell_m"],
+        crs=str(result["crs"]) if result.get("crs") else auth,
+        extent=list(result["extent"]) if "extent" in result else plan["extent"],
+        grid_extent=list(result["grid_extent"]) if "grid_extent" in result else plan["grid_extent"],
+        id_field=str(result["id_field"]) if result.get("id_field") else ID_FIELD,
     )
 
 
