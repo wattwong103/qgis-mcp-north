@@ -129,6 +129,9 @@ from .compat import (
     RASTER_STATS_ALL,
     RENDER_MM,
     RENDER_PIXELS,
+    SYMBOL_FILL,
+    SYMBOL_LINE,
+    SYMBOL_MARKER,
     SHAPE_RECTANGLE,
     TOOLBUTTON_ICON_ONLY,
     TOOLBUTTON_MENU_POPUP,
@@ -1738,8 +1741,118 @@ class QgisMCPServer(QObject):
         step = max(n - 1, 1)
         return [ramp.color(i / step) for i in range(n)]
 
+    def _apply_figure_symbol(self, symbol, outline_color=None, outline_width_mm=None, fill_opacity=None):
+        """Stroke, line colour, and opacity. The fill colour stays the palette colour.
+
+        A line symbol has no separate stroke: ``outline_color`` and
+        ``outline_width_mm`` are the line. A marker keeps its fill and takes
+        the stroke. ``None`` leaves that property alone, so an omitted control
+        does not redraw the symbol.
+        """
+        if symbol is None:
+            return
+        if fill_opacity is not None:
+            symbol.setOpacity(float(fill_opacity))
+        kind = symbol.type()
+        color = QColor(outline_color) if outline_color is not None else None
+        width = None if outline_width_mm is None else float(outline_width_mm)
+        if kind == SYMBOL_LINE and color is not None:
+            symbol.setColor(color)
+        for _index in range(symbol.symbolLayerCount()):
+            layer = symbol.symbolLayer(_index)
+            if kind == SYMBOL_LINE:
+                if color is not None and hasattr(layer, "setColor"):
+                    layer.setColor(color)
+                if width is not None and hasattr(layer, "setWidth"):
+                    layer.setWidth(width)
+                    if hasattr(layer, "setWidthUnit"):
+                        layer.setWidthUnit(RENDER_MM)
+            elif kind in (SYMBOL_FILL, SYMBOL_MARKER):
+                if color is not None and hasattr(layer, "setStrokeColor"):
+                    layer.setStrokeColor(color)
+                if width is not None and hasattr(layer, "setStrokeWidth"):
+                    layer.setStrokeWidth(width)
+                    if hasattr(layer, "setStrokeWidthUnit"):
+                        layer.setStrokeWidthUnit(RENDER_MM)
+
+    def _paint_renderer(self, renderer, outline_color=None, outline_width_mm=None, fill_opacity=None):
+        """Apply figure controls to every symbol of a categorized or graduated renderer."""
+        if outline_color is None and outline_width_mm is None and fill_opacity is None:
+            return
+        source = renderer.sourceSymbol()
+        if source is not None:
+            cloned = source.clone()
+            self._apply_figure_symbol(cloned, outline_color, outline_width_mm, fill_opacity)
+            renderer.setSourceSymbol(cloned)
+        if isinstance(renderer, QgsGraduatedSymbolRenderer):
+            for index, rng in enumerate(renderer.ranges()):
+                cloned = rng.symbol().clone()
+                self._apply_figure_symbol(cloned, outline_color, outline_width_mm, fill_opacity)
+                renderer.updateRangeSymbol(index, cloned)
+        elif isinstance(renderer, QgsCategorizedSymbolRenderer):
+            for index, category in enumerate(renderer.categories()):
+                cloned = category.symbol().clone()
+                self._apply_figure_symbol(cloned, outline_color, outline_width_mm, fill_opacity)
+                renderer.updateCategorySymbol(index, cloned)
+
+    def _refuse_if_breaks_miss_the_data(self, layer, field, breaks):
+        """Values outside the outer edges are not drawn. None inside is an error."""
+        from .figure_style import outside_breaks
+
+        numeric = []
+        for feat in layer.getFeatures():
+            try:
+                numeric.append(float(feat.attribute(field)))
+            except (TypeError, ValueError):
+                continue
+        n_outside, data_min, data_max, all_outside = outside_breaks(numeric, breaks)
+        if all_outside:
+            if numeric:
+                raise Exception(
+                    "All values of %s fall outside breaks [%s, %s]; data min %s, max %s. "
+                    "Next: widen the outer edges to include the data min and max"
+                    % (field, breaks[0], breaks[-1], data_min, data_max)
+                )
+            raise Exception(
+                "No numeric values in %s to class. "
+                "Next: check the field has numbers, then retry" % field
+            )
+        return n_outside
+
+    def _figure_style_applied(
+        self, outline_color=None, outline_width_mm=None, fill_opacity=None,
+        breaks=None, colors=None, label_size_pt=None, label_font=None,
+        label_color=None, label_halo_mm=None, label_halo_color=None,
+    ):
+        """The controls the caller set. Empty when every control was omitted."""
+        applied = {}
+        if outline_color is not None:
+            applied["outline_color"] = outline_color
+        if outline_width_mm is not None:
+            applied["outline_width_mm"] = float(outline_width_mm)
+        if fill_opacity is not None:
+            applied["fill_opacity"] = float(fill_opacity)
+        if breaks is not None:
+            applied["breaks"] = [float(edge) for edge in breaks]
+        if colors is not None:
+            applied["colors"] = list(colors)
+        label_set = (
+            label_size_pt is not None or label_font is not None or label_color is not None
+            or label_halo_mm is not None or label_halo_color is not None
+        )
+        if label_set:
+            applied["label_size_pt"] = float(9.0 if label_size_pt is None else label_size_pt)
+            applied["label_halo_mm"] = float(1.0 if label_halo_mm is None else label_halo_mm)
+            applied["label_halo_color"] = "#ffffff" if label_halo_color is None else label_halo_color
+            if label_font is not None:
+                applied["label_font"] = label_font
+            if label_color is not None:
+                applied["label_color"] = label_color
+        return applied
+
     def _build_graduated_renderer(
-        self, layer, field, *, n_classes, mode, palette, diverging=False, center=0.0
+        self, layer, field, *, n_classes, mode, palette, diverging=False, center=0.0,
+        breaks=None,
     ):
         """Build a graduated renderer; return (renderer, breaks, one_sided).
 
@@ -1747,7 +1860,30 @@ class QgisMCPServer(QObject):
         identical to the legacy path. Diverging: symmetric class breaks around
         ``center`` with colors sampled so ``center`` sits on the ramp's neutral
         midpoint (``mode`` is ignored). See colormaps.diverging_breaks.
+        ``breaks``, when set, is the class edges (first lower, then each upper)
+        and replaces both of those.
         """
+        if breaks is not None:
+            if diverging:
+                raise Exception(
+                    "breaks and diverging both classify the field. "
+                    "Next: drop diverging or drop breaks"
+                )
+            n = len(breaks) - 1
+            symbol = QgsSymbol.defaultSymbol(layer.geometryType())
+            colors = self._category_colors(
+                palette, n, "classes", "ask for at most {k} classes"
+            )
+            ranges = []
+            for index in range(n):
+                low = float(breaks[index])
+                high = float(breaks[index + 1])
+                cloned = symbol.clone()
+                cloned.setColor(colors[index])
+                ranges.append(QgsRendererRange(low, high, cloned, "%s-%s" % (low, high)))
+            renderer = QgsGraduatedSymbolRenderer(field, ranges)
+            return renderer, [float(edge) for edge in breaks], False
+
         symbol = QgsSymbol.defaultSymbol(layer.geometryType())
         ramp = self._resolve_color_ramp(palette)
         self._check_palette_size(palette, ramp, int(n_classes), "classes", "ask for at most {k} classes")
@@ -1788,8 +1924,16 @@ class QgisMCPServer(QObject):
         renderer = QgsGraduatedSymbolRenderer(field, ranges)
         return renderer, list(bc.breaks), bc.one_sided
 
-    def _apply_label_halo(self, layer, field, size=9.0, buffer_mm=1.0, along_line=False):
-        """Enable simple labeling on ``field`` with a white halo (text buffer)."""
+    def _apply_label_halo(
+        self, layer, field, size=9.0, buffer_mm=1.0, along_line=False,
+        font_family=None, text_color=None, halo_color=None,
+    ):
+        """Enable simple labeling on ``field`` with a halo.
+
+        Defaults stay 9 pt, a 1 mm white halo, the default font and text colour.
+        A missing ``font_family`` is returned and the default font draws.
+        Headless Qt is shown the OS fonts before that check.
+        """
         from qgis.core import (
             QgsPalLayerSettings,
             QgsTextBufferSettings,
@@ -1808,18 +1952,30 @@ class QgisMCPServer(QObject):
                 except Exception:
                     pass
         fmt = QgsTextFormat()
+        missing = []
+        if font_family:
+            if is_offscreen():
+                register_system_fonts()
+            if font_family not in font_families():
+                missing.append(font_family)
+            else:
+                from qgis.PyQt.QtGui import QFont
+                fmt.setFont(QFont(str(font_family)))
         try:
             fmt.setSize(float(size))
         except Exception:
             pass
+        if text_color:
+            fmt.setColor(QColor(text_color))
         buf = QgsTextBufferSettings()
         buf.setEnabled(True)
         buf.setSize(float(buffer_mm))
-        buf.setColor(QColor("white"))
+        buf.setColor(QColor(halo_color) if halo_color else QColor("white"))
         fmt.setBuffer(buf)
         settings.setFormat(fmt)
         layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
         layer.setLabelsEnabled(True)
+        return missing
 
     @staticmethod
     @staticmethod
@@ -2030,6 +2186,15 @@ class QgisMCPServer(QObject):
         height=1200,
         dpi=150,
         background="white",
+        outline_color=None,
+        outline_width_mm=None,
+        fill_opacity=None,
+        breaks=None,
+        label_size_pt=None,
+        label_font=None,
+        label_color=None,
+        label_halo_mm=None,
+        label_halo_color=None,
         **kwargs,
     ):
         """Render a zone-level choropleth in one call. v0.3 workflow primitive.
@@ -2038,11 +2203,13 @@ class QgisMCPServer(QObject):
         CSV-merged value column → graduated style → render with optional
         basemaps → cleanup. The user's project sees no surviving state changes.
         """
-        method_cls = self._CLASSIFICATION_METHODS.get(mode)
-        if method_cls is None:
-            raise Exception(
-                f"Unknown mode {mode!r}. Use one of: {list(self._CLASSIFICATION_METHODS)}."
-            )
+        explicit_breaks = breaks
+        if explicit_breaks is None:
+            method_cls = self._CLASSIFICATION_METHODS.get(mode)
+            if method_cls is None:
+                raise Exception(
+                    f"Unknown mode {mode!r}. Use one of: {list(self._CLASSIFICATION_METHODS)}."
+                )
 
         project = QgsProject.instance()
         transient_ids = []  # everything we need to remove on cleanup
@@ -2133,11 +2300,27 @@ class QgisMCPServer(QObject):
             renderer, breaks, diverging_one_sided = self._build_graduated_renderer(
                 mem, value_field, n_classes=n_classes, mode=mode,
                 palette=palette, diverging=diverging, center=center,
+                breaks=explicit_breaks,
             )
+            self._paint_renderer(renderer, outline_color, outline_width_mm, fill_opacity)
             mem.setRenderer(renderer)
+            fonts_missing = []
             if label_field:
-                self._apply_label_halo(mem, "_label")
+                fonts_missing = self._apply_label_halo(
+                    mem, "_label",
+                    size=9.0 if label_size_pt is None else float(label_size_pt),
+                    buffer_mm=1.0 if label_halo_mm is None else float(label_halo_mm),
+                    font_family=label_font,
+                    text_color=label_color,
+                    halo_color=label_halo_color,
+                ) or []
             ranges = list(renderer.ranges())
+            n_outside_breaks = None
+            if explicit_breaks is not None:
+                n_outside_breaks = self._refuse_if_breaks_miss_the_data(
+                    mem, value_field, explicit_breaks
+                )
+                mode = "explicit"
 
             values_only = []
             for feat in mem.getFeatures():
@@ -2214,7 +2397,7 @@ class QgisMCPServer(QObject):
             save_kwargs["legend_items"] = legend_items
             self._save_map_image(img, output_png, ms, save_kwargs, attr)
 
-            return {
+            result = {
                 "output_path": output_png,
                 "width": int(width),
                 "height": int(height),
@@ -2240,6 +2423,20 @@ class QgisMCPServer(QObject):
                 "basemap_attribution": basemap_spec.get("attribution") if basemap_spec else None,
                 "basemap_source": basemap_source,
             }
+            applied = self._figure_style_applied(
+                outline_color=outline_color, outline_width_mm=outline_width_mm,
+                fill_opacity=fill_opacity, breaks=explicit_breaks,
+                label_size_pt=label_size_pt, label_font=label_font,
+                label_color=label_color, label_halo_mm=label_halo_mm,
+                label_halo_color=label_halo_color,
+            )
+            if applied:
+                result["style_applied"] = applied
+            if n_outside_breaks is not None:
+                result["n_outside_breaks"] = n_outside_breaks
+            if label_font is not None:
+                result["fonts_missing"] = fonts_missing
+            return result
         finally:
             for tid in transient_ids:
                 try:
@@ -3314,6 +3511,11 @@ class QgisMCPServer(QObject):
         diverging=False,
         center=0.0,
         classes_subset=None,
+        outline_color=None,
+        outline_width_mm=None,
+        fill_opacity=None,
+        breaks=None,
+        colors=None,
         **kwargs,
     ):
         """Apply categorical / graduated / single-symbol style to a vector layer.
@@ -3324,6 +3526,8 @@ class QgisMCPServer(QObject):
         natural_breaks, pretty} for graduated style.
         """
         layer = self._get_vector_layer(layer_id)
+        explicit_breaks = breaks
+        class_colors = colors
 
         if style_type == "single":
             symbol = QgsSymbol.defaultSymbol(layer.geometryType())
@@ -3352,14 +3556,23 @@ class QgisMCPServer(QObject):
                 listed = self._order_category_subset(unique_values, classes_subset)
 
             # No palette asked for (the MCP tool's default): pick one that fits.
-            palette = color_ramp or self._default_category_palette(len(listed))
-            colors = self._category_colors(
-                palette, len(listed), "categories",
-                "pass classes=[...] with at most {k} values (the rest share one grey class)",
-            )
+            # ``class_colors`` pins one colour per classes entry; the grey catch-all stays grey.
+            if class_colors is not None:
+                if classes_subset is None or len(class_colors) != len(listed):
+                    raise Exception(
+                        "colors needs classes of the same length. "
+                        "Next: pass classes= with one #RGB or #RRGGBB per value"
+                    )
+                paint = [QColor(c) for c in class_colors]
+            else:
+                palette = color_ramp or self._default_category_palette(len(listed))
+                paint = self._category_colors(
+                    palette, len(listed), "categories",
+                    "pass classes=[...] with at most {k} values (the rest share one grey class)",
+                )
             categories = []
             class_entries = []
-            for value, color in zip(listed, colors):
+            for value, color in zip(listed, paint):
                 symbol = QgsSymbol.defaultSymbol(layer.geometryType())
                 symbol.setColor(color)
                 label = str(value) if value is not None else "NULL"
@@ -3389,6 +3602,7 @@ class QgisMCPServer(QObject):
                 })
 
             renderer = QgsCategorizedSymbolRenderer(field, categories)
+            self._paint_renderer(renderer, outline_color, outline_width_mm, fill_opacity)
             layer.setRenderer(renderer)
             response = {
                 "ok": True,
@@ -3403,18 +3617,27 @@ class QgisMCPServer(QObject):
             if idx < 0:
                 raise Exception(f"Field not found: {field}")
 
-            method_cls = self._CLASSIFICATION_METHODS.get(mode)
-            if method_cls is None:
-                raise Exception(
-                    f"Unknown mode {mode!r}. Use one of: {list(self._CLASSIFICATION_METHODS)}."
-                )
+            if explicit_breaks is None:
+                method_cls = self._CLASSIFICATION_METHODS.get(mode)
+                if method_cls is None:
+                    raise Exception(
+                        f"Unknown mode {mode!r}. Use one of: {list(self._CLASSIFICATION_METHODS)}."
+                    )
 
-            renderer, breaks, diverging_one_sided = self._build_graduated_renderer(
+            renderer, class_breaks, diverging_one_sided = self._build_graduated_renderer(
                 layer, field, n_classes=classes, mode=mode,
                 palette=color_ramp, diverging=diverging, center=center,
+                breaks=explicit_breaks,
             )
+            self._paint_renderer(renderer, outline_color, outline_width_mm, fill_opacity)
             layer.setRenderer(renderer)
             ranges = list(renderer.ranges())
+            n_outside_breaks = None
+            if explicit_breaks is not None:
+                n_outside_breaks = self._refuse_if_breaks_miss_the_data(
+                    layer, field, explicit_breaks
+                )
+                mode = "explicit"
 
             # Per-range feature counts via in-memory iteration (no QGIS API for this).
             class_entries = []
@@ -3440,16 +3663,27 @@ class QgisMCPServer(QObject):
                 "ok": True,
                 "n_classes": len(class_entries),
                 "classes": class_entries,
-                "breaks": breaks,
+                "breaks": class_breaks,
                 "mode": mode,
                 "diverging": diverging,
                 "center": center,
                 "diverging_one_sided": diverging_one_sided,
             }
+            if n_outside_breaks is not None:
+                response["n_outside_breaks"] = n_outside_breaks
         else:
             raise Exception(
                 f"Unknown style_type: {style_type}. Use 'single', 'categorized', or 'graduated'"
             )
+
+        applied = self._figure_style_applied(
+            outline_color=outline_color, outline_width_mm=outline_width_mm,
+            fill_opacity=fill_opacity,
+            breaks=explicit_breaks if style_type == "graduated" else None,
+            colors=class_colors if style_type == "categorized" else None,
+        )
+        if applied:
+            response["style_applied"] = applied
 
         layer.triggerRepaint()
         try:

@@ -3,6 +3,32 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.18.0 — 2026-11-18 — choropleth and style figure controls
+
+### Added
+
+- `qgis_render_choropleth`, `qgis_style_graduated` and `qgis_style_categorized`
+  take optional `outline_color` (`#RGB` or `#RRGGBB`), `outline_width_mm`
+  (0 to 5; 0 is a one-pixel hairline) and `fill_opacity` (0 to 1). On a line
+  layer the outline arguments are the line. Omitted arguments are not sent,
+  so a v1.17.0 call draws the same figure.
+- `breaks` on the choropleth and on `qgis_style_graduated`: explicit class
+  edges (first lower bound, then each upper bound, length 2 to 16). The
+  response `mode` is `"explicit"`. Values outside the outer edges are not
+  drawn (`n_outside_breaks`). A field whose numbers all fall outside is refused
+  with the data min and max. `diverging=True` together with `breaks` is refused.
+- `colors` on `qgis_style_categorized`: one hex colour per `classes` entry.
+  The grey "all other values" class stays grey.
+- Choropleth labels take `label_size_pt`, `label_font`, `label_color`,
+  `label_halo_mm` and `label_halo_color`, and they require `label_field`.
+  With `label_field` and these omitted, the halo stays 9 pt, 1 mm and white.
+  A missing font is listed in `fonts_missing` and the default font draws.
+- Compound `qgis_style` and `qgis_render(mode="choropleth")` forward the same
+  arguments. `breaks` on a categorized style, `colors` on a graduated style,
+  and these controls on any other render mode are refused.
+- An older plugin that ignores the new keys raises `PluginOutdatedError`.
+  Plugin transport: restart QGIS. Headless: restart the MCP server.
+
 ## v1.17.0 — 2026-11-18 — first click, transport, and a join that works
 
 ### Fixed

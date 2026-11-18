@@ -129,6 +129,28 @@ class JoinError(QgisMcpWorkflowsError):
         self.description = description
 
 
+class PluginOutdatedError(QgisMcpWorkflowsError):
+    """The running QGIS side ignored figure controls it does not know.
+
+    ``set_layer_style`` and ``render_choropleth`` accept ``**kwargs``, so an
+    older plugin process returns success and draws the old figure. The server
+    asks for ``style_applied`` whenever the caller set a control.
+    """
+
+    def __init__(self, transport: str) -> None:
+        if transport == "headless":
+            hint = "restart the MCP server so the headless runner loads this checkout's plugin"
+        elif transport == "plugin":
+            hint = "restart QGIS so the workflows plugin reloads"
+        else:
+            hint = "restart QGIS (plugin transport) or the MCP server (headless) so the figure controls load"
+        super().__init__(
+            "The QGIS plugin did not apply the figure controls, so it is older than this server. "
+            f"Next: {hint}."
+        )
+        self.transport = transport
+
+
 class PluginNotStartedError(QgisMcpWorkflowsError):
     """QGIS Desktop is open, but the toolbar control that listens on the socket was not clicked.
 

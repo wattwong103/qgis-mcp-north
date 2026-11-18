@@ -403,6 +403,7 @@ class StyleResult(BaseModel):
     layer_id: str
     n_classes: int
     classes: list[ClassEntry]
+    style_applied: dict | None = None
 
 
 class GraduatedStyleResult(StyleResult):
@@ -411,6 +412,7 @@ class GraduatedStyleResult(StyleResult):
     diverging: bool = False
     center: float = 0.0
     diverging_one_sided: bool = False
+    n_outside_breaks: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +564,9 @@ class ChoroplethResult(RenderResult):
     diverging: bool = False
     center: float = 0.0
     diverging_one_sided: bool = False
+    style_applied: dict | None = None
+    n_outside_breaks: int | None = None
+    fonts_missing: list[str] = []
 
 
 class TrajectoryResult(RenderResult):
@@ -1155,6 +1160,10 @@ def qgis_style_categorized(
     field: Annotated[str, Field(description="Field name to categorize on (string-typed).")],
     palette: Annotated[str | None, Field(description='ColorBrewer palette name, e.g. "Set2", "Paired", "Dark2", or a continuous ramp such as "Spectral". Default: Set2 while there are at most 8 categories, else Spectral. A named qualitative scheme has a fixed number of colours (Set2: 8, Paired: 12); more categories are refused, so pass classes= or a continuous ramp.')] = None,
     classes: Annotated[list[str] | None, Field(description="Optional subset/order of category values to render; every other value (and NULL) shares one grey 'all other values' class.")] = None,
+    outline_color: Annotated[str | None, Field(description="Stroke colour, #RGB or #RRGGBB. On a line layer this is the line colour. Omit to leave the symbol unchanged.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Stroke width in mm, 0 to 5. 0 is a one-pixel hairline. Omit to leave the width unchanged.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    colors: Annotated[list[str] | None, Field(description="One #RGB or #RRGGBB per classes entry, same length. The grey 'all other values' class stays grey. Requires classes.")] = None,
 ) -> StyleResult:
     """Apply categorical (one-color-per-value) symbology to a vector layer.
 
@@ -1167,6 +1176,11 @@ def qgis_style_categorized(
     """
     from qgis_mcp_workflows.errors import ExecutorError, FieldNotFoundError, LayerNotFoundError
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import (
+        color_params,
+        require_style_applied,
+        symbol_params,
+    )
 
     params = {
         "layer_id": layer_id,
@@ -1176,6 +1190,13 @@ def qgis_style_categorized(
     }
     if classes is not None:
         params["classes_subset"] = list(classes)
+    sent = symbol_params(
+        outline_color=outline_color,
+        outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity,
+    )
+    sent.update(color_params(colors, classes))
+    params.update(sent)
 
     try:
         result = get_executor().dispatch("set_layer_style", params, timeout=30)
@@ -1185,6 +1206,7 @@ def qgis_style_categorized(
         if "Layer not found" in err.message:
             raise LayerNotFoundError(layer_id) from err
         raise
+    require_style_applied(result, sent, _executor_transport_name())
 
     return StyleResult(
         layer_id=layer_id,
@@ -1193,6 +1215,7 @@ def qgis_style_categorized(
             ClassEntry(value=c["value"], color=c["color"], n_features=c["n_features"])
             for c in result.get("classes", [])
         ],
+        style_applied=result.get("style_applied"),
     )
 
 
@@ -1209,6 +1232,10 @@ def qgis_style_graduated(
     palette: Annotated[str, Field(description='Sequential colorbrewer palette, e.g. "YlOrRd", "Blues", "Viridis".')] = "YlOrRd",
     diverging: Annotated[bool, Field(description="Diverging color scheme with a fixed neutral midpoint, for signed data (e.g. net flux). Replaces mode-based boundaries with symmetric breaks around center; pair with a diverging palette (vik/RdBu/balance).")] = False,
     center: Annotated[float, Field(description="Neutral midpoint for diverging mode (e.g. 0). Ignored when diverging is False.")] = 0.0,
+    outline_color: Annotated[str | None, Field(description="Stroke colour, #RGB or #RRGGBB. On a line layer this is the line colour. Omit to leave the symbol unchanged.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Stroke width in mm, 0 to 5. 0 is a one-pixel hairline. Omit to leave the width unchanged.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    breaks: Annotated[list[float] | None, Field(description="Explicit class edges: first lower bound, then each upper bound. Length 2 to 16. mode, n_classes and center are ignored. Refused together with diverging.")] = None,
 ) -> GraduatedStyleResult:
     """Apply graduated (value-based color ramp) symbology — the choropleth primitive.
 
@@ -1220,6 +1247,11 @@ def qgis_style_graduated(
     """
     from qgis_mcp_workflows.errors import ExecutorError, FieldNotFoundError, LayerNotFoundError
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import (
+        break_params,
+        require_style_applied,
+        symbol_params,
+    )
 
     params = {
         "layer_id": layer_id,
@@ -1231,6 +1263,13 @@ def qgis_style_graduated(
         "diverging": diverging,
         "center": center,
     }
+    sent = symbol_params(
+        outline_color=outline_color,
+        outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity,
+    )
+    sent.update(break_params(breaks, diverging=diverging))
+    params.update(sent)
 
     try:
         result = get_executor().dispatch("set_layer_style", params, timeout=30)
@@ -1240,6 +1279,7 @@ def qgis_style_graduated(
         if "Layer not found" in err.message:
             raise LayerNotFoundError(layer_id) from err
         raise
+    require_style_applied(result, sent, _executor_transport_name())
 
     return GraduatedStyleResult(
         layer_id=layer_id,
@@ -1253,6 +1293,8 @@ def qgis_style_graduated(
         diverging=result.get("diverging", diverging),
         center=result.get("center", center),
         diverging_one_sided=result.get("diverging_one_sided", False),
+        style_applied=result.get("style_applied"),
+        n_outside_breaks=result.get("n_outside_breaks"),
     )
 
 
@@ -1659,6 +1701,15 @@ def qgis_render_choropleth(
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
     scale_bar: Annotated[bool, Field(description="Draw a metric scale bar in the lower-left of the PNG.")] = False,
     north_arrow: Annotated[bool, Field(description="Draw a north arrow in the upper-right of the PNG.")] = False,
+    outline_color: Annotated[str | None, Field(description="Polygon stroke colour, #RGB or #RRGGBB. Omit to leave the symbol unchanged.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Polygon stroke width in mm, 0 to 5. 0 is a one-pixel hairline. Omit to leave the width unchanged.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    breaks: Annotated[list[float] | None, Field(description="Explicit class edges: first lower bound, then each upper bound. Length 2 to 16. mode, n_classes and center are ignored. Refused together with diverging. Values outside the outer edges are not drawn.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 9 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> ChoroplethResult:
     """Render a zone-level choropleth in one call. PFLOW workflow tool.
 
@@ -1685,6 +1736,12 @@ def qgis_render_choropleth(
 
     from qgis_mcp_workflows.errors import ExecutorError, FieldNotFoundError, JoinError
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import (
+        break_params,
+        label_params,
+        require_style_applied,
+        symbol_params,
+    )
 
     abs_zones = user_abs(zones_path)
     abs_output = user_abs(output_png)
@@ -1736,6 +1793,21 @@ def qgis_render_choropleth(
         "scale_bar": scale_bar,
         "north_arrow": north_arrow,
     }
+    sent = symbol_params(
+        outline_color=outline_color,
+        outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity,
+    )
+    sent.update(break_params(breaks, diverging=diverging))
+    sent.update(label_params(
+        label_field=label_field,
+        label_size_pt=label_size_pt,
+        label_font=label_font,
+        label_color=label_color,
+        label_halo_mm=label_halo_mm,
+        label_halo_color=label_halo_color,
+    ))
+    params.update(sent)
 
     try:
         result = get_executor().dispatch("render_choropleth", params, timeout=60)
@@ -1743,6 +1815,7 @@ def qgis_render_choropleth(
         if "JOIN_NO_MATCH" in str(err):
             raise JoinError(err.message) from err
         raise
+    require_style_applied(result, sent, _executor_transport_name())
 
     join_block = None
     if value_dict is not None:
@@ -1773,6 +1846,9 @@ def qgis_render_choropleth(
         diverging_one_sided=result.get("diverging_one_sided", False),
         basemap_attribution=result.get("basemap_attribution"),
         basemap_source=result.get("basemap_source"),
+        style_applied=result.get("style_applied"),
+        n_outside_breaks=result.get("n_outside_breaks"),
+        fonts_missing=result.get("fonts_missing") or [],
     )
 
 

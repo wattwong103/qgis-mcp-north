@@ -16,6 +16,7 @@ from qgis.core import (
     QgsMapLayer,
     QgsProcessingParameterDefinition,
     QgsRasterBandStats,
+    QgsSymbol,
     QgsSymbolLayer,
     QgsUnitTypes,
     QgsWkbTypes,
@@ -93,6 +94,16 @@ try:
 except AttributeError:
     RENDER_MM = QgsUnitTypes.RenderMillimeters
     RENDER_PIXELS = QgsUnitTypes.RenderPixels
+
+# SymbolType moved into Qgis in 3.30. 3.28 only has the QgsSymbol aliases.
+try:
+    SYMBOL_LINE = Qgis.SymbolType.Line
+    SYMBOL_FILL = Qgis.SymbolType.Fill
+    SYMBOL_MARKER = Qgis.SymbolType.Marker
+except AttributeError:
+    SYMBOL_LINE = QgsSymbol.Line
+    SYMBOL_FILL = QgsSymbol.Fill
+    SYMBOL_MARKER = QgsSymbol.Marker
 
 # ── Processing parameter flags ───────────────────────────────────────
 try:

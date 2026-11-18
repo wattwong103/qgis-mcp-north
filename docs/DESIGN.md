@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.17.0**, 2026-11-18
+Status: **v1.18.0**, 2026-11-18
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -196,24 +196,32 @@ Chains into: `qgis_render_choropleth(zones_path=output_path, value_field=...)`.
 
 ### Styling (2)
 
-#### `qgis_style_categorized(layer_id: str, field: str, palette: str | None = None, classes: list[str] | None = None) → StyleResult`
+#### `qgis_style_categorized(layer_id: str, field: str, palette: str | None = None, classes: list[str] | None = None, outline_color: str | None = None, outline_width_mm: float | None = None, fill_opacity: float | None = None, colors: list[str] | None = None) → StyleResult`
 
 Categorical symbology — one color per unique value of `field`. `palette` is a colorbrewer name; with none given the plugin picks Set2 for up to 8 categories, else Spectral (the same rule colours trajectory modes, by their sorted order). A qualitative scheme (`Set1/2/3`, `Paired`, `Dark2`, `Pastel1/2`, `Accent`) gives its first colors in order and refuses more categories than it has (Set2: 8) with a `Next:` hint to pass `classes` or a continuous palette; a continuous ramp is sampled end to end. An unknown palette name is refused in every tool, never replaced (until v1.15.0 it silently became Spectral, and QGIS's default style has no qualitative ramps, so `"Set2"` always did). `classes` optionally restricts to a subset/order: the listed values take palette colors in the given order (matched on their string form, so `"3"` matches an integer 3), and every other value plus NULL shares one grey `"all other values"` class, reported last in `classes`. The catch-all is omitted when the subset covers every feature. A listed value the layer lacks stays as a 0-feature class, so weekly batches keep one legend and one color per value; a repeated value keeps its first position. NULL cannot be listed by name — it always falls in the catch-all.
+
+`colors` is one `#RGB` or `#RRGGBB` per `classes` entry (same length) and is refused without `classes`. Those values take the listed colours in order; the grey `"all other values"` class stays grey. `outline_color` (`#RGB` or `#RRGGBB`), `outline_width_mm` (0 to 5; `0` is QGIS's one-pixel hairline) and `fill_opacity` (0 to 1) change the stroke and the symbol opacity. On a line layer `outline_color` and `outline_width_mm` are the line. Omitted controls are not sent, and the symbol is unchanged.
 
 ```python
 StyleResult = {
     "layer_id": str,
     "n_classes": int,
     "classes": [{"value": str, "color": str, "n_features": int}],
+    "style_applied": dict | None,  # the controls the caller set; absent from the plugin result when none were
 }
 ```
 
-#### `qgis_style_graduated(layer_id: str, field: str, n_classes: int = 5, mode: str = "quantile", palette: str = "YlOrRd") → GraduatedStyleResult`
+#### `qgis_style_graduated(layer_id: str, field: str, n_classes: int = 5, mode: str = "quantile", palette: str = "YlOrRd", diverging: bool = False, center: float = 0.0, outline_color: str | None = None, outline_width_mm: float | None = None, fill_opacity: float | None = None, breaks: list[float] | None = None) → GraduatedStyleResult`
 
 Numeric symbology — value-based color ramp. `mode ∈ {"quantile", "equal_interval", "natural_breaks", "pretty"}`. This is the **primitive under `qgis_render_choropleth`**; expose it directly for cases where the user wants styling without immediately rendering.
 
+`breaks`, when set, is the class edges the tool already returns (first lower bound, then each upper bound), length 2–16. The response then has `mode="explicit"` and `n_classes=len(breaks)-1`. `mode`, `n_classes` and `center` do not move those edges. `diverging=True` together with `breaks` is refused. Values outside `[breaks[0], breaks[-1]]` are not drawn; `n_outside_breaks` counts them. If every numeric value is outside, or the field has no number, the call fails and the message includes the data min and max when there are numbers. A class with zero features stays in the legend. The palette is still sampled across the classes, and a qualitative palette that is shorter than the class count is still refused. Stroke and opacity are the same optional arguments as `qgis_style_categorized`.
+
 ```python
-GraduatedStyleResult = StyleResult | {"breaks": [float, ...], "mode": str}
+GraduatedStyleResult = StyleResult | {
+    "breaks": [float, ...], "mode": str,
+    "n_outside_breaks": int | None,
+}
 ```
 
 ### Rendering (5)
@@ -233,7 +241,7 @@ RenderResult = {
 }
 ```
 
-#### `qgis_render_choropleth(zones_path: str, value_field: str, output_png: str, value_csv: str | None = None, join_field: str = "zone_id", n_classes: int = 5, mode: str = "quantile", palette: str = "YlOrRd", title: str | None = None, legend: bool = True, basemap_paths: list[str] | None = None, width: int = 1600, height: int = 1200, dpi: int = 150) → ChoroplethResult`
+#### `qgis_render_choropleth(zones_path: str, value_field: str, output_png: str, value_csv: str | None = None, join_field: str = "zone_id", n_classes: int = 5, mode: str = "quantile", palette: str = "YlOrRd", title: str | None = None, legend: bool = True, basemap_paths: list[str] | None = None, width: int = 1600, height: int = 1200, dpi: int = 150, outline_color: str | None = None, outline_width_mm: float | None = None, fill_opacity: float | None = None, breaks: list[float] | None = None, label_size_pt: float | None = None, label_font: str | None = None, label_color: str | None = None, label_halo_mm: float | None = None, label_halo_color: str | None = None) → ChoroplethResult`
 
 **Workflow tool.** Renders a zone-level choropleth in one call.
 
@@ -244,6 +252,8 @@ Two data shapes supported:
 The CSV-join path is the PFLOW reality: `zone_trips.csv` (columns `zone_id, origin_trips, dest_trips, total_trips`) joined to a polygon layer keyed by `zone_id`. Zone IDs in PFLOW are string-typed (`MFS01`–`MFS111`, `Z01`–`Z65`, `PRF01`–`PRF47`); `join_field` is whatever the polygon layer uses.
 
 `basemap_paths` lets the caller supply Japan basemap layers (e.g., `polbnda_jpn_new.shp`, `coastl_jpn.shp`) drawn under the choropleth. Optional, but the W17 deck uses them.
+
+Stroke, opacity and `breaks` match `qgis_style_graduated` (v1.18). `label_size_pt` (above 0, at most 72), `label_font`, `label_color`, `label_halo_mm` (0 to 5) and `label_halo_color` extend `label_field`. Any of them without `label_field` is refused. With `label_field` and those omitted, the halo stays 9 pt, 1 mm, white, the default font and the default text colour. A missing `label_font` is listed in `fonts_missing` and the default font draws. An older plugin that accepts the new keys and does not return `style_applied` raises `PluginOutdatedError`: restart QGIS on the plugin transport, or restart the MCP server on headless.
 
 ```python
 ChoroplethResult = RenderResult | {
@@ -699,6 +709,8 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 **v1.16 — panel grids.** ✅ Built 2026-11-10 (TASK-22). `qgis_compose_panels` composes a rows × cols grid of one polygon layer on linked colour scales with colour bars, for camera-ready comparison figures (PFLOW `fig_spatial`); scales are computed server-side in `panels.py`, fonts and line weights are arguments, and headless QGIS registers the OS fonts when a requested family is missing. Next: mesh-grid polygons.
 
 **v1.17 — first-use transport and paths.** ✅ `auto` refuses headless while QGIS Desktop is open and Run MCP is not listening (`PluginNotStartedError`). Drawn results carry `transport`. Tool paths expand `~`. `~/.config/qgis-mcp-workflows/config.toml` is read (CLI, then env, then the file). `qgis_figures_to_pptx` raises a typed error when the `pptx` extra is missing. `install.py` syncs the pipeline extras and names the real toolbar control.
+
+**v1.18 — polygon figure controls.** ✅ Optional `outline_color`, `outline_width_mm` and `fill_opacity` on `qgis_render_choropleth`, `qgis_style_graduated` and `qgis_style_categorized` (and the compound forwarders). Explicit `breaks` on the two graduated tools. `colors` on categorized, one hex per `classes` entry. Choropleth label size, font, colour and halo. Omitted arguments are not dispatched, so a v1.17.0 call draws the same figure.
 
 ---
 
