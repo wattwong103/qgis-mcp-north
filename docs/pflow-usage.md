@@ -11,15 +11,22 @@ that exist only on the user's local machine — the synthetic fixtures committed
 
 ```powershell
 # Plugin mode (interactive — recommended for iteration)
-# 1. Start QGIS Desktop, enable the "QGIS MCP North" plugin from Plugins menu.
-# 2. Click "Start Server" in the MCP dock widget (listens on :9877).
-# 3. From any MCP client (Claude Desktop, Cursor, etc.), call the tools.
+# 1. Start QGIS Desktop and enable the "QGIS MCP Workflows" plugin.
+# 2. Click Run MCP on the toolbar (Plugins menu: QGIS MCP). Listens on :9877.
+#    That button's menu has Auto-start on startup; it is off until you tick it.
+# 3. From any MCP client (Claude Desktop, Cursor, etc.), call qgis_diagnose, then the tools.
 
-# Headless mode (cron / unattended renders)
+# Headless mode (cron / unattended renders — QGIS Desktop must not be the open project you meant)
 $env:QGIS_MCP_WORKFLOWS_TRANSPORT='headless'
 $env:QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER='M:\QGIS LTR\bin\python-qgis-ltr.bat'
 uv run --no-sync qgis-mcp-workflows-server
 ```
+
+The choropleth that works from a fresh clone, with no Dropbox path, is
+`assets/zones_tokyo23.gpkg` joined to `assets/tokyo23_home_counts.csv` on
+`zone_id` (see the README). A leading `~` in a tool path is expanded. The
+recipes below are the historical PFLOW files on one machine; `polbnda_jpn_new.shp`
+does not have a `zone_id` field (the municipality code is `N03_007`).
 
 ## 1. Prefecture-level choropleth from PFLOW `zone_trips.csv`
 

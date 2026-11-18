@@ -30,6 +30,15 @@ _current: Executor | None = None
 _requests = 0
 
 
+def peek_executor() -> Executor | None:
+    """Return the active executor without creating one or counting a request.
+
+    Provenance uses ``executor_requests()`` to decide whether a call touched
+    QGIS. A transport label stamped onto a result must not increment that.
+    """
+    return _current
+
+
 def get_executor() -> Executor:
     """Return the active executor; lazily creates a ``PluginExecutor`` default."""
     global _current, _requests
@@ -52,4 +61,4 @@ def set_executor(executor: Executor | None) -> None:
     _current = executor
 
 
-__all__ = ["Executor", "executor_requests", "get_executor", "set_executor"]
+__all__ = ["Executor", "executor_requests", "get_executor", "peek_executor", "set_executor"]

@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.16.2**, 2026-11-10
+Status: **v1.17.0**, 2026-11-18
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -48,7 +48,7 @@ Out of scope: replacing upstream as a general-purpose QGIS MCP. We intentionally
 
 **Two transports, one tool surface.** The MCP server exposes the same tools regardless of transport. A thin executor abstraction (`src/qgis_mcp_workflows/executors/{plugin,headless}.py`) hides the difference. Tools are written against the executor interface; they never directly speak socket or PyQGIS.
 
-**Transport selection.** CLI flag `--transport={plugin,headless,auto}`. `auto` (default) checks for a running plugin on port 9877 and falls back to headless. If headless is unavailable too, `auto` still starts (degraded): every tool call re-probes the plugin port, switches to the plugin once QGIS Desktop is up, and otherwise raises `TransportUnavailableError` naming both reasons. Exiting at startup instead would close the MCP connection before the client could show any error. An explicit `--transport=headless` keeps failing at startup with `HeadlessUnavailableError`. Config file in `~/.config/qgis-mcp-workflows/config.toml` can override per-machine.
+**Transport selection.** CLI flag `--transport={plugin,headless,auto}`, then `QGIS_MCP_WORKFLOWS_TRANSPORT`, then `~/.config/qgis-mcp-workflows/config.toml` (`transport`, and optionally `host` / `port`), then `auto`. The server logs the chosen value and where it came from at startup, before any tool call. `auto` uses the plugin when port 9877 accepts a connection. If the port is closed and a QGIS Desktop process is running, `auto` does **not** fall through to headless: the call raises `PluginNotStartedError` telling the user that Run MCP was not started (toolbar button; Plugins menu **QGIS MCP**; the button's menu has Auto-start on startup, off until ticked). That is the open project the caller meant. If Desktop is not running, `auto` uses headless. If headless is unavailable too, `auto` still starts: every tool call re-probes the plugin port, switches to the plugin once Run MCP is listening, and otherwise raises `TransportUnavailableError` naming both reasons. Exiting at startup instead would close the MCP connection before the client could show any error. An explicit `--transport=headless` still fails at startup with `HeadlessUnavailableError`, and that error's `Next:` stays on headless (fix `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER`, restart with `--transport=headless`).
 
 **Headless runtime.** Standalone PyQGIS via `qgis_process` (CLI) for simple ops, with a long-lived Python subprocess holding `QgsApplication` for complex ops. Headless mode forces `QT_QPA_PLATFORM=offscreen` and disables any GUI calls. Render only — no project save, no plugin install, no UI mutation.
 
@@ -224,6 +224,7 @@ Generic render. Renders the listed layers (in order, bottom→top) to a PNG. If 
 
 ```python
 RenderResult = {
+    "transport": "plugin" | "headless",  # which backend drew this figure
     "output_path": str,
     "width": int, "height": int, "dpi": int,
     "extent": [xmin, ymin, xmax, ymax],
@@ -644,7 +645,7 @@ Every typed error derives from `QgisMcpWorkflowsError`, which subclasses the SDK
 
 **Idempotency annotations.** All `render_*`, `export_*`, `figures_to_pptx`, and `batch_render` are non-idempotent (they write files). Annotate accordingly. `layer_inspect`, `style_*` (in headless mode, where styling is in-memory) are read-only or idempotent.
 
-**Output discipline.** Every tool that writes a file returns the absolute path in `output_path`. The path is canonical. When the written file is an existing PNG under 1.5 MB, the MCP result also includes `ImageContent` so the model can see the figure in the same turn. Oversize / missing / non-PNG outputs stay path-only. Tools do not return a parallel `render_map_base64` payload.
+**Output discipline.** Every tool that writes a file returns the absolute path in `output_path`. A leading `~` in a tool path is expanded before that resolution (`os.path.abspath` alone leaves the tilde in place). The path is canonical. Every tool that draws a map (`qgis_render_*`, `qgis_render_from_duckdb`, `qgis_compose_layout`, `qgis_compose_panels`, `qgis_export_layout`, `qgis_export_atlas`, `qgis_batch_render`) includes `transport` (`plugin` or `headless`) so a successful figure says which backend drew it. When the written file is an existing PNG under 1.5 MB, the MCP result also includes `ImageContent` so the model can see the figure in the same turn. Oversize / missing / non-PNG outputs stay path-only. Tools do not return a parallel `render_map_base64` payload.
 
 **Logging.** Server logs to `~/.local/share/qgis-mcp-workflows/logs/server-{date}.log`. Plugin logs go to QGIS Message Log under tab `qgis-mcp-workflows`.
 
@@ -696,6 +697,8 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 **v1.15 — figure provenance and upstream review fixes.** ✅ Shipped 2026-10-20. Every file a tool writes gets a `.provenance.json` sidecar (§5); `qgis_export_session` turns sidecars into a replay script that checks its source inputs, replays state-reading figures from the session ledger, and runs recorded `qgis_eval` code only with `--allow-eval`. Project and shapefile datasources are fingerprinted; `qgis_render_from_duckdb` reaches only tables stored in the database. Also: the upstream-review tool fixes (atlas export, `classes`, batch render, unavailable-layer dialogs), typed errors that survive mcp 2.x, and the macOS QGIS 4 headless launcher.
 
 **v1.16 — panel grids.** ✅ Built 2026-11-10 (TASK-22). `qgis_compose_panels` composes a rows × cols grid of one polygon layer on linked colour scales with colour bars, for camera-ready comparison figures (PFLOW `fig_spatial`); scales are computed server-side in `panels.py`, fonts and line weights are arguments, and headless QGIS registers the OS fonts when a requested family is missing. Next: mesh-grid polygons.
+
+**v1.17 — first-use transport and paths.** ✅ `auto` refuses headless while QGIS Desktop is open and Run MCP is not listening (`PluginNotStartedError`). Drawn results carry `transport`. Tool paths expand `~`. `~/.config/qgis-mcp-workflows/config.toml` is read (CLI, then env, then the file). `qgis_figures_to_pptx` raises a typed error when the `pptx` extra is missing. `install.py` syncs the pipeline extras and names the real toolbar control.
 
 ---
 

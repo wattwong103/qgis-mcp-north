@@ -120,28 +120,29 @@ def _venv_python() -> Path:
     return REPO_DIR / ".venv" / "bin" / "python"
 
 
-def _is_venv_ready() -> bool:
-    """Check if the venv exists and qgis_mcp_workflows is importable."""
-    python = _venv_python()
-    if not python.exists():
-        return False
-    result = subprocess.run(
-        [str(python), "-c", "import qgis_mcp_workflows"],
-        capture_output=True,
-    )
-    return result.returncode == 0
+# Weekly deck, GUFM routing, DuckDB renders, the DRM prep script, and
+# speed-binned trajectories. Names match pyproject optional-dependencies.
+PIPELINE_EXTRAS = ("pptx", "network", "duckdb", "drm", "trajectory")
+
+
+def _sync_command(uv: str) -> list[str]:
+    cmd = [uv, "sync"]
+    for extra in PIPELINE_EXTRAS:
+        cmd.extend(["--extra", extra])
+    return cmd
 
 
 def setup_venv() -> None:
-    """Create venv and install dependencies, using uv if available, else pip."""
-    if _is_venv_ready():
-        print("  Dependencies already installed.")
-        return
+    """Create venv and install dependencies, including the figure-pipeline extras.
 
+    Always syncs. A venv that can import the package may still lack python-pptx,
+    networkx, or duckdb, and ``qgis_figures_to_pptx`` is the call that used to
+    die without a hint.
+    """
     uv = shutil.which("uv")
     if uv:
-        print("  Setting up dependencies with uv...")
-        subprocess.run([uv, "sync"], cwd=str(REPO_DIR), check=True)
+        print(f"  Setting up dependencies with uv (extras: {', '.join(PIPELINE_EXTRAS)})...")
+        subprocess.run(_sync_command(uv), cwd=str(REPO_DIR), check=True)
     else:
         print("  uv not found, falling back to pip...")
         venv_dir = REPO_DIR / ".venv"
@@ -149,7 +150,12 @@ def setup_venv() -> None:
             print("  Creating virtual environment...")
             subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
         python = str(_venv_python())
-        subprocess.run([python, "-m", "pip", "install", "-e", str(REPO_DIR)], check=True)
+        extras = ",".join(PIPELINE_EXTRAS)
+        subprocess.run(
+            [python, "-m", "pip", "install", "-e", f".[{extras}]"],
+            cwd=str(REPO_DIR),
+            check=True,
+        )
 
     print("  Dependencies installed.")
 
@@ -185,12 +191,17 @@ def _remote_entry() -> dict:
 
 
 def _zed_local_entry() -> dict:
+    # QGIS_MCP_WORKFLOWS_TRANSPORT is the real variable. "stdio" is not a
+    # transport (the MCP channel is already stdio). --directory so uv finds
+    # this repo no matter which folder Zed was opened from. No --no-sync: a
+    # wiped .venv otherwise dies as a closed connection.
+    transport_env = {"QGIS_MCP_WORKFLOWS_TRANSPORT": "auto"}
     if shutil.which("uv"):
         return {
             "command": {
                 "path": "uv",
-                "args": ["run", "--no-sync", "qgis-mcp-workflows-server"],
-                "env": {"QGIS_MCP_TRANSPORT": "stdio"},
+                "args": ["run", "--directory", str(REPO_DIR), "qgis-mcp-workflows-server"],
+                "env": transport_env,
             },
             "settings": {},
         }
@@ -198,7 +209,7 @@ def _zed_local_entry() -> dict:
         "command": {
             "path": str(_venv_python()),
             "args": [str(REPO_DIR / "src" / "qgis_mcp_workflows" / "server.py")],
-            "env": {"QGIS_MCP_TRANSPORT": "stdio"},
+            "env": transport_env,
         },
         "settings": {},
     }
@@ -209,7 +220,7 @@ def _zed_remote_entry() -> dict:
         "command": {
             "path": "uvx",
             "args": ["--from", GITHUB_URL, "qgis-mcp-workflows-server"],
-            "env": {"QGIS_MCP_TRANSPORT": "stdio"},
+            "env": {"QGIS_MCP_WORKFLOWS_TRANSPORT": "auto"},
         },
         "settings": {},
     }
@@ -574,8 +585,15 @@ def main() -> None:
         print("Installation complete.")
         print("\nNext steps:")
         print("  1. Restart QGIS and enable the 'QGIS MCP Workflows' plugin")
-        print("  2. Click 'Start Server' in the MCP dock widget")
+        print("  2. Click Run MCP on the toolbar (Plugins menu: QGIS MCP).")
+        print("     The same button's menu has Auto-start on startup; it is off until you tick it.")
         print("  3. Restart your MCP client to pick up the new config")
+        print("  4. Call qgis_diagnose. It compares the server and plugin versions")
+        print("     (a mismatch is the 'Unknown command' you get after an upgrade).")
+        print("  Transport defaults to auto. While QGIS Desktop is open and Run MCP")
+        print("  was not clicked, tools fail instead of drawing an empty headless project.")
+        print("  Set transport in ~/.config/qgis-mcp-workflows/config.toml")
+        print("  (transport = \"plugin\" or \"headless\") or QGIS_MCP_WORKFLOWS_TRANSPORT.")
 
 
 if __name__ == "__main__":

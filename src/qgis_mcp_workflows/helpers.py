@@ -40,6 +40,15 @@ SEKILAB_SLIDE_WIDTH = 18288000
 SEKILAB_SLIDE_HEIGHT = 10287000
 
 
+def user_abs(path: str) -> str:
+    """Absolute path with ``~`` expanded.
+
+    ``os.path.abspath`` leaves a leading tilde in place, so ``~/Dropbox/...``
+    never matches the file the caller named.
+    """
+    return os.path.abspath(os.path.expanduser(str(path)))
+
+
 def repo_root() -> Path:
     """Repo root when running from a checkout; otherwise the package parent."""
     return Path(__file__).resolve().parents[2]
