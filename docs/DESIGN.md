@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.21.0**, 2026-11-18
+Status: **v1.26.0**, 2026-11-18
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -12,7 +12,7 @@ This document is the spec. Implementation follows. If a tool's signature, respon
 
 Three problems with upstream that the fork solves:
 
-**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **29 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
+**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **35 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
 
 **No headless mode.** Upstream requires QGIS Desktop running with the plugin enabled. That's incompatible with scheduled overnight runs, CI, or any automation. We add a **PyQGIS-subprocess transport** alongside the existing plugin transport. Same tools, two backends, selected by config or CLI flag.
 
@@ -50,7 +50,9 @@ Out of scope: replacing upstream as a general-purpose QGIS MCP. We intentionally
 
 **Transport selection.** CLI flag `--transport={plugin,headless,auto}`, then `QGIS_MCP_WORKFLOWS_TRANSPORT`, then `~/.config/qgis-mcp-workflows/config.toml` (`transport`, and optionally `host` / `port`), then `auto`. The server logs the chosen value and where it came from at startup, before any tool call. `auto` uses the plugin when port 9877 accepts a connection. If the port is closed and a QGIS Desktop process is running, `auto` does **not** fall through to headless: the call raises `PluginNotStartedError` telling the user that Run MCP was not started (toolbar button; Plugins menu **QGIS MCP**; the button's menu has Auto-start on startup, off until ticked). That is the open project the caller meant. If Desktop is not running, `auto` uses headless. If headless is unavailable too, `auto` still starts: every tool call re-probes the plugin port, switches to the plugin once Run MCP is listening, and otherwise raises `TransportUnavailableError` naming both reasons. Exiting at startup instead would close the MCP connection before the client could show any error. An explicit `--transport=headless` still fails at startup with `HeadlessUnavailableError`, and that error's `Next:` stays on headless (fix `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER`, restart with `--transport=headless`).
 
-**Python eval.** The same `config.toml` reads `allow_python_eval`, default true, so `qgis_eval` stays available and a replay's `--allow-eval` switch is unchanged. `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` (`1` or `0`) overrides the file. There is no CLI flag. An unknown value is ignored and the next source is used (environment, then the file, then the default). When the effective value is false, `qgis_eval` raises `PythonEvalDisabledError` before any code runs. The hint names `qgis_expression` and setting the key back to true.
+**Python eval.** The same `config.toml` reads `allow_python_eval`, default true, so `qgis_eval` stays available and a replay's `--allow-eval` switch is unchanged. `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` (`1` or `0`) overrides the file. There is no CLI flag. An unknown value is ignored and the next source is used (environment, then the file, then the default). When the effective value is false, `qgis_eval` raises `PythonEvalDisabledError` before any code runs. The hint names `qgis_expression`, `qgis_recipe`, and setting the key back to true.
+
+**Named recipes.** The same `config.toml` may set `recipe_dir` to a directory of user recipe files. The directory is off when the key is missing, blank, or not a string. `QGIS_MCP_WORKFLOWS_RECIPE_DIR` overrides the file; an empty value, `0`, `off`, or `false` turns the directory off even when the file names one. A user recipe is JSON that pins a built-in recipe. It is not Python, and this server does not sandbox Python. `allow_python_eval` does not enable the directory, and turning eval off does not disable the built-in recipes. A call that used a user recipe is left out of `qgis_export_session` unless `trust_foreign=True`, the same gate a foreign `qgis_eval` uses. A built-in recipe does not read the directory and replays without that flag.
 
 **Headless runtime.** Standalone PyQGIS via `qgis_process` (CLI) for simple ops, with a long-lived Python subprocess holding `QgsApplication` for complex ops. Headless mode forces `QT_QPA_PLATFORM=offscreen` and disables any GUI calls. Render only — no project save, no plugin install, no UI mutation.
 
@@ -98,7 +100,7 @@ Upstream's plugin and server stay untouched. If the user installs both, Claude D
 
 ---
 
-## 4. Tool surface (29 workflow + 1 escape hatch)
+## 4. Tool surface (35 workflow + 1 escape hatch)
 
 For each tool: signature, what it does, response shape, and the typical chain.
 
@@ -160,9 +162,9 @@ ProjectInfo = {
 
 Chains into: `qgis_export_layout`, `qgis_render_map`, `qgis_batch_render`.
 
-### Analysis (3)
+### Analysis (8)
 
-GitHub analogue: nkarasiak `spatial_join` / `zonal_statistics` / `get_unique_values`. Wrapped as atomic workflows (load + compute + write + cleanup). No Processing toolbox.
+GitHub analogue: nkarasiak `spatial_join` / `zonal_statistics` / `get_unique_values`. Wrapped as atomic workflows (load + compute + write + cleanup). No Processing toolbox. `qgis_buffer`, `qgis_dissolve`, `qgis_clip`, `qgis_voronoi` and `qgis_make_grid` write a polygon or line file another tool can join. They do not call Processing. `qgis_make_grid` is a metre fishnet for cells that are not an existing zone layer. `assets/zones_mesh_l3.gpkg` stays the JIS L3 mesh from `scripts/build_gufm_zones.py`.
 
 #### `qgis_spatial_join(target_path: str, join_path: str, output_path: str, predicate: str = "intersects", method: str = "one_to_one", join_fields: list[str] | None = None, prefix: str = "", keep_unmatched: bool = True) → SpatialJoinResult`
 
@@ -206,7 +208,13 @@ Chains into: `qgis_render_choropleth(zones_path=output_path, value_field=<field_
 
 #### `qgis_zonal_stats(zones_path: str, raster_path: str, output_path: str, stats: list[str] | None = None, prefix: str = "", raster_band: int = 1) → ZonalStatsResult`
 
-Raster statistics per polygon via `QgsZonalStatistics` (qgis.analysis — works headless). Default `stats=["count","sum","mean"]`. `.gpkg` keeps geometry; `.csv` is attributes only. The path for JAXA LULC (or any raster) onto zone polygons.
+Raster statistics per polygon. Numeric stats go through `QgsZonalStatistics` (qgis.analysis — works headless). `stats` may include `count`, `sum`, `mean`, `median`, `stdev`, `min`, `max`, `majority`, and `histogram`. Default `stats=["count","sum","mean"]`. An unknown name raises `InvalidArgumentError` before dispatch. `.gpkg` keeps geometry; `.csv` is attributes only.
+
+`mean` stays the numeric mean of the cell values (`prefix + "mean"`). It is not a land-cover share. `majority` is the most frequent cell value, still from `QgsZonalStatistics`, in the field `prefix + "majority"`.
+
+`histogram` is the class count. It writes one integer column per class id that occurs inside the zones, named `prefix + class id` (`lulc_1`, `lulc_2`, …). Columns are sorted by class id. A class that does not occur gets no column. A zone that lacks a class which occurs in another zone stores 0. The raster's nodata value is not a class. Class ids are whole numbers; a band that is not integer is refused, and the message says to use `mean` for a continuous raster. A histogram field name already on the zones layer is refused; pass another prefix. On the JAXA LULC raster, built-up is class 2, so `prefix="lulc_"` writes numeric `lulc_2`.
+
+Zones are transformed into the raster CRS first, as before. A cell counts when its center falls in the polygon. A polygon smaller than a cell counts when the cell rectangle intersects it. The handler does not touch `iface`.
 
 ```python
 ZonalStatsResult = {
@@ -217,7 +225,102 @@ ZonalStatsResult = {
 }
 ```
 
-Chains into: `qgis_render_choropleth(zones_path=output_path, value_field=...)`.
+Chains into: `qgis_render_choropleth(zones_path=output_path, value_field=...)`. A histogram column such as `lulc_2` is a `value_field` the same way `lulc_mean` is.
+
+#### `qgis_buffer(path: str, output_path: str, distance_m: float) → BufferResult`
+
+Write a buffer around every feature. `distance_m` is metres and must be finite and greater than 0. Points, lines and polygons are accepted. Each output feature keeps the input attributes and a polygon geometry (a multipart buffer stays one feature). The open project is unchanged. The handler does not touch `iface`.
+
+A geographic layer is projected for the measurement and the file is written in the source CRS. The measurement CRS is the UTM zone of the layer-extent centroid after transforming that centroid to EPSG:4326, EPSG:326xx in the north and EPSG:327xx in the south. North of 84° the measurement CRS is EPSG:3995. South of −80° it is EPSG:3031. Quarter-circles use 8 segments. That segment count is not an argument.
+
+A projected layer whose map units are metres, kilometres, centimetres, millimetres, feet, US survey feet, yards, miles or nautical miles is buffered in that CRS. `distance_m` is converted into those units first, so a foot-based CRS still means metres. `measure_crs` is the CRS the distance was applied in. `source_crs` is the layer CRS as opened. When no projected CRS can be chosen, `BufferCrsError` names the layer CRS. A layer with no features, or whose buffers are all empty, raises `BufferEmptyError`. Output is GeoPackage (`.gpkg`) or GeoJSON (`.geojson` or `.json`). Anything else raises `InvalidArgumentError` before dispatch. Full mode only. No Processing.
+
+```python
+BufferResult = {
+    "output_path": str,
+    "n_input": int,
+    "n_output": int,
+    "distance_m": float,
+    "measure_crs": str,
+    "source_crs": str,
+}
+```
+
+Chains into: `qgis_spatial_join`, `qgis_aggregate_to_zones`, `qgis_render_choropleth`.
+
+#### `qgis_dissolve(path: str, output_path: str, field: str | None = None) → DissolveResult`
+
+Write one feature, or one feature per value of `field`. The geometry is the union of that group and may be multipart when the parts do not touch. `field` omitted, or blank, dissolves the layer into one feature. A value groups with Python equality of the plain field value, so `1` and `1.0` are one group and `"1"` is another. NULL is one group. Attributes on the written feature come from the first feature in the group. Empty geometries are skipped and are not a group of their own. A missing `field` raises `FieldNotFoundError`. Zero features written raises `DissolveEmptyError`. Output formats, project, `iface` and full-mode rules match `qgis_buffer`. No Processing.
+
+```python
+DissolveResult = {
+    "output_path": str,
+    "n_input": int,
+    "n_output": int,
+    "field": str | None,
+}
+```
+
+Chains into: `qgis_render_choropleth`, `qgis_spatial_join`, `qgis_layer_inspect`.
+
+#### `qgis_clip(path: str, overlay_path: str, output_path: str) → ClipResult`
+
+Cut `path` to the study area in `overlay_path`. The overlay must be polygons. The input may be points, lines or polygons. Overlay polygons are unioned into one mask and transformed into the input CRS before the cut. Each input feature that meets the mask is written once, with its own attributes and the intersection geometry. A feature wholly outside is dropped. A feature the mask splits stays one feature (multipart). The output CRS is the input CRS. Zero features kept raises `ClipEmptyError`. The message names both layers' CRS and geometry types. A non-polygon overlay, or an input that is not point, line or polygon, raises `InvalidArgumentError` and names both geometry types and both CRS. Output formats, project, `iface` and full-mode rules match `qgis_buffer`. No Processing.
+
+```python
+ClipResult = {
+    "output_path": str,
+    "n_input": int,
+    "n_overlay": int,
+    "n_output": int,
+}
+```
+
+Chains into: `qgis_render_choropleth`, `qgis_aggregate_to_zones`, `qgis_spatial_join`.
+
+#### `qgis_voronoi(path: str, output_path: str) → VoronoiResult`
+
+Write Voronoi polygons for a point layer. The diagram is `QgsGeometry.voronoiDiagram()` with no extent argument, the same call `qgis_render_catchment` uses to draw the PNG. This tool writes the cells so another tool can join them. The PNG tool stays a PNG. At least 3 points with geometry are required, matching the PNG tool. Fewer than 3, or an empty diagram, raises `VoronoiError`. A layer that is not points raises `InvalidArgumentError` and names the geometry type and the CRS.
+
+Each written cell takes the attributes of the point that falls in it. The first point wins a shared boundary. Coincident points share one cell, so `n_output` can be below `n_input`. The output CRS is the source CRS. The cells are not reprojected. Output formats, project, `iface` and full-mode rules match `qgis_buffer`. No Processing. Network isochrones are not this tool.
+
+```python
+VoronoiResult = {
+    "output_path": str,
+    "n_input": int,
+    "n_output": int,
+}
+```
+
+Chains into: `qgis_spatial_join`, `qgis_aggregate_to_zones`, `qgis_render_choropleth`. `qgis_render_catchment` still draws the PNG.
+
+#### `qgis_make_grid(extent: list[float], output_path: str, cell_m: float, crs: str) → GridResult`
+
+Write a fishnet of square polygons for cells that are not an existing zone layer. `extent` is `[xmin, ymin, xmax, ymax]` in `crs`. It is the box, not a layer path. `cell_m` is the cell size in metres and must be finite and greater than 0. `crs` is a projected CRS whose map units are metres (`EPSG:32654`, `EPSG:6677`). A bare integer is read as an EPSG code.
+
+The cells are axis-aligned squares of `cell_m` in that CRS. They are aligned to multiples of `cell_m` from the CRS origin, so two calls with the same `crs` and `cell_m` share edges and `cell_id` values where the squares are the same. Every cell that intersects the extent is written. A cell that only partly overlaps the extent is still a full square, so `grid_extent` may extend past `extent` out to the next cell line. An edge that already sits on a cell line does not grow an extra cell.
+
+`cell_id` is the text `"{col}_{row}"`. `col` and `row` are the integer indices of the cell's southwest corner divided by `cell_m`, and they may be negative (`-2_-1`). Those fields are what another tool joins on. `id_field` in the result is `cell_id`. The open project is unchanged. The handler does not touch `iface`.
+
+A geographic CRS, or a projected CRS whose map units are not metres, raises `GridCrsError`. The message names the CRS and the map unit. A string QGIS cannot use as a CRS raises `GridCrsError` too. `xmin < xmax` and `ymin < ymax` are required, and every value must be finite. Anything else raises `InvalidArgumentError` before dispatch. More than 250,000 cells raises `GridTooManyError` before a file is written. The message includes the row count, the column count and `cell_m`. Output is GeoPackage (`.gpkg`) or GeoJSON (`.geojson` or `.json`). Full mode only. No Processing.
+
+This is not the JIS L3 mesh. `assets/zones_mesh_l3.gpkg` stays the mesh `scripts/build_gufm_zones.py` builds. This tool does not write that file and does not take a `code`. Passing that checkout path as `output_path` raises `InvalidArgumentError` before dispatch. A `code="jis_l3"` mode can wrap that script later. It is a second product and does not belong on this call.
+
+```python
+GridResult = {
+    "output_path": str,
+    "n_output": int,
+    "n_rows": int,
+    "n_cols": int,
+    "cell_m": float,
+    "crs": str,
+    "extent": [float, float, float, float],
+    "grid_extent": [float, float, float, float],
+    "id_field": str,  # "cell_id"
+}
+```
+
+Chains into: `qgis_aggregate_to_zones`, `qgis_spatial_join`, `qgis_clip`, `qgis_render_choropleth`.
 
 ### Styling (2)
 
@@ -472,11 +575,53 @@ ExpressionResult = {
 
 Chains into: `qgis_render_choropleth`, `qgis_style_graduated`, `qgis_layer_inspect`.
 
+### Recipes (1)
+
+#### `qgis_recipe(name: str, layer_path: str, output_path: str, crs: str | None = None, lon_field: str | None = None, lat_field: str | None = None) → RecipeResult`
+
+Run one named recipe and write a new file. These are the PyQGIS operations `qgis_expression` does not cover and the geometry writers, the fishnet, aggregation, and zonal stats do not cover. `qgis_expression` adds a column or filters features. It does not change the layer CRS, replace the geometry, or write one feature per part. The caller passes `name`, not Python. This is not a sandbox. `qgis_eval` stays available while `allow_python_eval` is true (see §2). Full mode only. Compound mode does not grow a kind for it. No Processing. The open project is unchanged. The handler does not touch `iface`, so plugin and headless both run it.
+
+Output is GeoPackage (`.gpkg`) or GeoJSON (`.geojson` or `.json`). Anything else raises `InvalidArgumentError` before dispatch.
+
+Built-in names are always available. They do not read `recipe_dir`.
+
+| `name` | Writes | Arguments |
+|---|---|---|
+| `reproject` | Every feature, transformed into `crs`. The output CRS is `crs`. | `crs` required |
+| `centroids` | One point per feature. Attributes are kept. The CRS stays the source CRS. An empty geometry is skipped. | none |
+| `explode` | One feature per part. A single-part feature stays one feature. Attributes are copied onto each part. The CRS stays the source CRS. | none |
+| `points_from_xy` | A point at (`lon_field`, `lat_field`) for each feature whose values are finite numbers. Other attributes are kept. | `lon_field` and `lat_field` required. `crs` defaults to `EPSG:4326` |
+| `extent` | One polygon of the layer extent. `extent` in the result is `[xmin, ymin, xmax, ymax]` in the layer CRS, which is the box `qgis_make_grid` takes. | none |
+
+An argument a recipe does not take is refused before dispatch. The message names the recipe and the argument. A missing required argument is refused the same way. A name that is not a built-in, and is not a user recipe, is refused. The message lists the built-in names.
+
+A user recipe is `{recipe_dir}/{name}.json`. The directory stays off unless `recipe_dir` is set (§2). The file is JSON, not Python. A `code` key is refused; Python stays on `qgis_eval`. The file must contain `recipe`, and that value must be a built-in name. It may pin `crs`, `lon_field`, and `lat_field` for that recipe. It may not set `layer_path`, `output_path`, or any other key. A call argument overrides the file. A file whose stem is a built-in name is never read, so a user file cannot replace `reproject`. The name must be a single path segment (`letters`, digits, `_`); a slash or `..` is refused before the directory is opened. `source` is `builtin` or `user`. `recipe` is the built-in that ran. `name` is the name the caller passed.
+
+A CRS QGIS cannot use raises `RecipeCrsError` and names the CRS. A recipe that writes nothing raises `RecipeEmptyError`. The message includes `n_input` and the layer CRS. A `points_from_xy` field that is not on the layer raises `InvalidArgumentError` and names the field and the fields that are. A layer that is not points, lines, or polygons raises `InvalidArgumentError` for `reproject`, `centroids`, `explode`, and `extent`, and names the geometry type and the CRS. `points_from_xy` accepts a table with no geometry.
+
+`qgis_export_session` replays a built-in `qgis_recipe` with the other file-writing tools. A call whose `name` is not a built-in is a user recipe. It is left out unless `trust_foreign=True`, and the warning tells the caller to pass that flag. That is the same gate foreign `qgis_eval` calls use. The user recipe is not recorded as a `qgis_eval` and does not change `allow_python_eval`.
+
+```python
+RecipeResult = {
+    "output_path": str,
+    "name": str,
+    "recipe": str,          # the built-in that ran
+    "source": str,          # "builtin" or "user"
+    "n_input": int,
+    "n_output": int,
+    "crs": str | None,      # CRS of the written file
+    "source_crs": str | None,
+    "extent": [float, float, float, float] | None,  # set by the extent recipe
+}
+```
+
+Chains into: `qgis_make_grid` (pass `extent`), `qgis_spatial_join`, `qgis_aggregate_to_zones`, `qgis_render_choropleth`, `qgis_expression`.
+
 ### Escape hatch (1)
 
 #### `qgis_eval(code: str, return_vars: list[str] | None = None) → EvalResult`
 
-Execute arbitrary PyQGIS. Try `qgis_expression` first for a calculated column or a filter. Available in plugin transport (executes in QGIS); in headless transport, runs in the standalone PyQGIS subprocess. `return_vars` lists local variables to capture and return JSON-serialized. Stays available while `allow_python_eval` is true (the default; see §2). When that flag is false, the call raises `PythonEvalDisabledError` and does not run the code.
+Execute arbitrary PyQGIS. Try `qgis_expression` first for a calculated column or a filter, and `qgis_recipe` for a reproject, centroids, exploding parts, points from longitude and latitude, or an extent polygon. Available in plugin transport (executes in QGIS); in headless transport, runs in the standalone PyQGIS subprocess. `return_vars` lists local variables to capture and return JSON-serialized. Stays available while `allow_python_eval` is true (the default; see §2). When that flag is false, the call raises `PythonEvalDisabledError` and does not run the code. Turning the flag off does not disable `qgis_recipe`.
 
 ```python
 EvalResult = {
@@ -487,7 +632,7 @@ EvalResult = {
 }
 ```
 
-Use for the long tail that `qgis_expression` and the workflow tools do not cover. This is an escape hatch, not a first choice.
+Use for the long tail that `qgis_expression`, `qgis_recipe`, and the workflow tools do not cover. This is an escape hatch, not a first choice. There is no Python sandbox around it.
 
 ---
 
@@ -497,9 +642,9 @@ Shipped on `feat/choropleth-diverging-colormaps`, grounded in the `N:\TransInfor
 transit-figure pipeline. Each a separate commit, unit-tested + live-verified.
 
 **New tools (3):**
-- `qgis_compose_layout(layer_paths, output_path, title=None, extent=None, page="a4_landscape", legend=True, scale_bar=True, north_arrow=True, dpi=300) → ComposeLayoutResult` — programmatic `QgsPrintLayout`: a titled map panel with linked legend, scale bar and north arrow, exported PNG/PDF/SVG. Complements `qgis_export_layout` (which only exports pre-authored `.qgz`). Single panel; multi-panel/inset is future.
+- `qgis_compose_layout(layer_paths, output_path, title=None, extent=None, page="a4_landscape", legend=True, scale_bar=True, north_arrow=True, dpi=300, width_mm=None, height_mm=None, font_family=None, title_size_pt=None, legend_size_pt=None, legend_corner=None) → ComposeLayoutResult` — programmatic `QgsPrintLayout`: a titled map panel with linked legend, scale bar and north arrow, exported PNG/PDF/SVG. Complements `qgis_export_layout` (which only exports pre-authored `.qgz`). Single panel; multi-panel/inset is future. v1.24 adds optional page millimetres, a font, title and legend sizes, and a legend corner (below). Omitted, the page preset and the 18 pt title stay.
 - `qgis_render_diagram_map(layer_path, value_fields, output_png, diagram_type="pie", size=10.0, palette="Set2", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150, outline_color=None, outline_width_mm=None, fill_opacity=None, label_field=None, label_size_pt=None, label_font=None, label_color=None, label_halo_mm=None, label_halo_color=None) → DiagramMapResult` — chart-in-map: a pie/bar `QgsDiagramRenderer` glyph per feature, one slice/bar per `value_field`. v1.21: stroke and opacity on the base symbol, and the same stroke on the diagram pen (omitted pen stays white, 0.2). `size` is unchanged. `label_field` is a field on the layer; omitted label type is 9 pt, 1 mm, white.
-- `qgis_render_catchment(points_path, output_png, method="voronoi", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150, outline_color=None, outline_width_mm=None, fill_opacity=None, label_field=None, label_size_pt=None, label_font=None, label_color=None, label_halo_mm=None, label_halo_color=None) → CatchmentResult` — Voronoi (Thiessen) service-area catchments around points via `QgsGeometry.voronoiDiagram` (no Processing dependency). v1.21: stroke and opacity on the cells. Omitted cells stay `200,220,240` at alpha 90 with outline `70,90,120` at 0.3 mm; `fill_opacity` replaces that alpha. Point markers take the same stroke and opacity; omitted markers stay `#b2182b` with no outline. `label_field` is a field on the point layer (9 pt when the label type is omitted).
+- `qgis_render_catchment(points_path, output_png, method="voronoi", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150, outline_color=None, outline_width_mm=None, fill_opacity=None, label_field=None, label_size_pt=None, label_font=None, label_color=None, label_halo_mm=None, label_halo_color=None) → CatchmentResult` — Voronoi (Thiessen) service-area catchments around points via `QgsGeometry.voronoiDiagram` (no Processing dependency). The cells are a PNG. `qgis_voronoi` writes the same diagram as a polygon file. v1.21: stroke and opacity on the cells. Omitted cells stay `200,220,240` at alpha 90 with outline `70,90,120` at 0.3 mm; `fill_opacity` replaces that alpha. Point markers take the same stroke and opacity; omitted markers stay `#b2182b` with no outline. `label_field` is a field on the point layer (9 pt when the label type is omitted).
 
 **New parameters on existing tools:**
 - `qgis_render_choropleth` / `qgis_style_graduated`: `diverging: bool = False` + `center: float = 0.0` — diverging colormap with symmetric class breaks pinned at `center`, for signed / net-flux data. `palette` now also resolves scientific colormaps (viridis, cividis, magma, batlow, vik, roma, balance, RdBu, BrBG) vendored in `qgis_mcp_workflows_plugin/colormaps.py` via the shared `_resolve_color_ramp` / `_build_graduated_renderer` helpers. Response echoes `diverging`, `center`, `diverging_one_sided`.
@@ -606,17 +751,28 @@ database cursor, an API — renders through the same path.
 
 ---
 
+### Print-layout fonts and millimetres (v1.24)
+
+`qgis_compose_layout` keeps the page presets (`a4_landscape` 297×210, `a4_portrait` 210×297, `a3_landscape` 420×297, `square` 250×250). `width_mm` and `height_mm` are optional and are set together. Both omitted: the preset is the page, and the command body is the v1.23 body. Both set: they are the page (greater than 20 mm, at most 1000) and `page` does not change the size. One without the other is refused.
+
+`font_family` is the title, the legend, and the scale bar. A missing family is listed in `fonts_missing` and QGIS's default font draws. Headless QGIS registers the OS fonts first, the same way panels do. `title_size_pt` (just above 0, at most 72) needs `title`; omitted, the title stays 18 pt bold in a 12 mm band. `legend_size_pt` is the legend text and needs `legend=True`; omitted, the legend font stays QGIS's default. `legend_corner` is `top_left`, `top_right`, `bottom_left` or `bottom_right`, and needs `legend=True`. Omitted, the legend stays inset from the top-right of the map, where v1.23 put it. The scale bar and the north arrow do not move.
+
+Omitted arguments are not dispatched. When any of these is set, the plugin returns `layout_applied` (the keys it applied) and `fonts_missing`. If `layout_applied` is absent, the server raises `PluginOutdatedError`: the running plugin accepted the keys and drew the old page. On plugin transport the hint is to restart QGIS. On headless the hint is to restart the MCP server. Compound `qgis_export(kind="compose_layout")` forwards the same arguments. `ComposeLayoutResult` gains `fonts_missing` and `layout_applied`.
+
+---
+
 ### Panel grids with linked scales (v1.16)
 
 `qgis_compose_panels(zones_path, value_csv, value_fields, rows, cols, output_path,
 join_field="zone_id", column_titles=None, row_labels=None, share_scale="row",
 palettes=None, vmin=None, cap_percentile=100.0, colorbar=True, colorbar_labels=None,
-tick_format=".3g", n_ticks=5, unmatched="hide", extent=None, width_mm=160.0,
-height_mm=140.0, font_family=None, title_size_pt=9.0, label_size_pt=9.0,
-tick_size_pt=7.0, outline_width_mm=0.05, outline_color="#cccccc", dpi=300) → PanelsResult`
+tick_format=".3g", n_ticks=5, unmatched="hide", extent=None, panel_extents=None,
+difference_columns=None, width_mm=160.0, height_mm=140.0, font_family=None,
+title_size_pt=9.0, label_size_pt=9.0, tick_size_pt=7.0, outline_width_mm=0.05,
+outline_color="#cccccc", dpi=300) → PanelsResult`
 draws a rows × cols grid of one polygon layer: one panel per CSV column, row by
-row, all within one extent so simulated and observed panels frame identically.
-That extent defaults to the zones drawn in any panel plus 2%: with
+row. Every panel frames the same extent unless `panel_extents` is set.
+That shared extent defaults to the zones drawn in any panel plus 2%: with
 `unmatched="hide"`, a 23-ward CSV over a larger szone layer frames the wards,
 as the matplotlib figure does.
 It exists for camera-ready comparison figures (PFLOW's `fig_spatial`: simulated
@@ -666,6 +822,25 @@ folders once per process before any label (724 files, 0.13 s on Windows); QGIS
 Desktop already has them and is left alone. A family still missing is listed in
 `fonts_missing`, and QGIS's default font draws instead.
 
+**Difference columns (v1.24).** `difference_columns` is a list of
+`name = left - right` (double quotes optional around each name). That is the
+subtraction `qgis_expression` writes as `sim - obs`, computed on the CSV and
+joined in as a column `value_fields` can name. Both operands are CSV columns.
+A blank, non-numeric or non-finite operand leaves that zone out of the
+difference and out of its scale. The result lists the names in
+`difference_columns`. Any other expression stays on `qgis_expression`; the
+number is written into the CSV before this call. The server still decides the
+scale. The plugin receives finished `{key: value}` panels, so an older plugin
+draws a difference map without a new command.
+
+**Per-panel extents (v1.24).** `panel_extents` is one `[xmin, ymin, xmax, ymax]`
+per panel, row by row, in the zones' CRS. Omitted, every panel keeps the shared
+`extent` (or the drawn-zones default), and `extents` is not sent. Set, it
+replaces that shared frame: `extent` and `panel_extents` together are refused.
+Each box is four finite numbers with `xmin < xmax` and `ymin < ymax`. The
+plugin returns `extents_applied`. If that key is absent, `PluginOutdatedError`,
+because an older plugin would draw every panel in one frame.
+
 **Refused before QGIS runs:** a `value_fields` length other than rows × cols;
 `row_labels`, `column_titles` or `extent` of the wrong length; `palettes` or
 `colorbar_labels` with neither 1 nor one entry per group; `n_ticks < 2`; a
@@ -674,15 +849,19 @@ output that is not .png, .pdf or .svg; a `vmin` above a group's top, which
 would run its colours backwards; a CSV that is not UTF-8 (CP932 is common for
 Japanese data); and a CSV that repeats a key, since keeping either row would
 draw a map the CSV does not say. Blank, non-numeric and non-finite CSV cells are
-left out of the panel and its scale. A layer with no key in any panel fails with
-`JOIN_NO_MATCH` and samples of both sides' keys. A grid whose panels would be
-under 10 mm after titles, labels and bars fails with `PAGE_TOO_SMALL`. Zones
-without a value in a panel are hidden, or drawn light grey
-(`unmatched="nodata"`). Panel layers take the zones' CRS object itself, so a
+left out of the panel and its scale. Also refused: a `difference_columns` entry
+that is not `name = left - right`; a difference name that is already a CSV
+column, or that `value_fields` does not name; a difference operand that is not
+a CSV column; `panel_extents` of the wrong length; a box that is not four finite
+numbers in order; and `panel_extents` together with `extent`. A layer with no key in any
+panel fails with `JOIN_NO_MATCH` and samples of both sides' keys. A grid whose
+panels would be under 10 mm after titles, labels and bars fails with
+`PAGE_TOO_SMALL`. Zones without a value in a panel are hidden, or drawn light
+grey (`unmatched="nodata"`). Panel layers take the zones' CRS object itself, so a
 custom `.prj` with no EPSG code stays in place.
 
 Full mode only, like `qgis_export_session`. Not in scope: mesh grids (next),
-values computed from points, difference maps, inset panels, per-panel extents.
+values computed from points, inset panels.
 
 ---
 
@@ -724,7 +903,7 @@ Every typed error derives from `QgisMcpWorkflowsError`, which subclasses the SDK
 - 3D view. Not on the roadmap.
 - Map server / WMS / WFS. Not on the roadmap.
 
-If a v1 user needs any of these, the answer is: install upstream alongside, or write the call inside `qgis_eval`. A calculated column or a feature filter is `qgis_expression`, not `qgis_eval`.
+If a v1 user needs any of these, the answer is: install upstream alongside, or write the call inside `qgis_eval`. A calculated column or a feature filter is `qgis_expression`, not `qgis_eval`. A reproject, centroids, exploding parts, points from longitude and latitude, or an extent polygon is `qgis_recipe`, not `qgis_eval`. A buffer, dissolve, study-area clip, or Voronoi polygon file is `qgis_buffer`, `qgis_dissolve`, `qgis_clip`, or `qgis_voronoi`, not a Processing algorithm. A metre fishnet is `qgis_make_grid`, not Processing `native:creategrid`. Network isochrones stay out. JIS L3 regeneration stays `scripts/build_gufm_zones.py`. There is no Python sandbox.
 
 ---
 
@@ -772,6 +951,16 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 
 **v1.21 — line and point figure controls.** ✅ The choropleth stroke, opacity and label arguments on `qgis_render_trajectory`, `qgis_render_od_flows`, `qgis_render_link_density`, `qgis_render_diagram_map`, `qgis_render_catchment` and `qgis_render_from_duckdb`, and on compound `qgis_render` for those modes. Omitted arguments are not dispatched. A line's outline is the line; a point's outline is the marker stroke and the fill stays. OD flow width and the link-density ramp stay as they are until the caller sets the control. OD labels stay 8 pt and link-density labels stay 7 pt when the new label arguments are omitted. `breaks` stays on the choropleth.
 
+**v1.22 — categorical zonal stats.** ✅ `qgis_zonal_stats` accepts `majority` and `histogram`. `majority` is the most frequent cell value. `histogram` writes one integer column per class id that occurs inside the zones (`lulc_2` is JAXA built-up). A class that does not occur gets no column. `mean` stays the numeric mean.
+
+**v1.23 — geometry writers.** ✅ `qgis_buffer`, `qgis_dissolve`, `qgis_clip` and `qgis_voronoi` write a GeoPackage or GeoJSON another tool can join. Buffer distance is metres. A geographic layer is measured in a projected CRS and written back in the source CRS. Dissolve writes one feature, or one feature per field value. Clip cuts to a polygon study area. Voronoi polygons use the same `QgsGeometry.voronoiDiagram` as the catchment PNG, which stays a PNG. Full mode only. No Processing.
+
+**v1.24 — layout type and panel frames.** ✅ `qgis_compose_layout` takes optional `width_mm` and `height_mm`, `font_family`, `title_size_pt`, `legend_size_pt` and `legend_corner`. Omitted, the page preset, the 18 pt title and the top-right legend stay. `qgis_compose_panels` takes `difference_columns` (`name = left - right`, joined into the CSV before the scale) and `panel_extents` (one box per panel). An older plugin that ignores the new keys raises `PluginOutdatedError`.
+
+**v1.25 — fishnet polygons.** ✅ `qgis_make_grid` writes square polygons of `cell_m` metres over an extent, in a projected CRS whose map units are metres. Cells align to the CRS origin, so the same `crs` and `cell_m` share `cell_id`. The file is a GeoPackage or GeoJSON another tool can join. `assets/zones_mesh_l3.gpkg` is unchanged. JIS L3 stays `scripts/build_gufm_zones.py`. Full mode only. No Processing. Named recipes are not this release.
+
+**v1.26 — named recipes.** ✅ `qgis_recipe` writes a file from `reproject`, `centroids`, `explode`, `points_from_xy`, or `extent`. A user recipe directory stays off unless `recipe_dir` is set. A user recipe is JSON that pins a built-in, not Python. Those calls are left out of a replay unless `trust_foreign=True`. No Python sandbox. `qgis_eval` stays available while `allow_python_eval` is true. Full mode only.
+
 ---
 
 ## 8. Resolved & open questions
@@ -788,7 +977,7 @@ Closed in v1.13 (GUFM, not PFLOW MFS):
 5. ~~**No master MFS-zone polygon shapefile exists in PFLOW.**~~ Closed in v1.13 against GUFM, not PFLOW MFS. Canonical polygons:
     - `assets/zones_tokyo23.gpkg` — 23 wards, `zone_id` = KSJ `N03_007` (matches GUFM `home_zone`).
     - `assets/zones_mesh_l3.gpkg` — JIS L3 (1 km, ADR-15), dissolved from `Tokyo23_mesh.shp` L4 `KEY_CODE[:8]`.
-    Rebuild: `uv run --no-sync --extra drm scripts/build_gufm_zones.py`. Source shapefiles stay in `~/Dropbox/gufm/10_data/urban_kg/urban_data/polygon/`.
+    Rebuild: `uv run --no-sync --extra drm scripts/build_gufm_zones.py`. Source shapefiles stay in `~/Dropbox/gufm/10_data/urban_kg/urban_data/polygon/`. A fishnet for any other cell size is `qgis_make_grid`. It does not write this file.
 
 6. ~~**PPTX template.**~~ Closed in v1.13. `qgis_figures_to_pptx` defaults to `assets/sekilab_blank.pptx` (Sekimoto-lab 20×11.25 in widescreen, zero content slides). The filled `21_decks/_templates/Seki_Lab_Template_latest.pptx` is 17 slides / one DEFAULT layout and must not be the default (appending would dump figures after lab content). Rebuild: `uv run --no-sync --extra pptx scripts/make_sekilab_blank.py`.
 

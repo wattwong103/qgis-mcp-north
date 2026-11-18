@@ -46,14 +46,20 @@ The headless runner injects a stub `iface` that no-ops UI calls. Every command
 handler that doesn't touch the canvas / layer-tree-view works in both transports
 for free — a v0.4 architectural promise that v0.5+ tools inherit.
 
-## Tools (30 standalone — 29 workflow + `qgis_eval`; 5 grouped in compound mode)
+## Tools (36 standalone — 35 workflow + `qgis_eval`; 5 grouped in compound mode)
 
 | Tool | Purpose |
 |---|---|
 | `qgis_spatial_join` | Join attributes by location; writes GeoPackage / GeoJSON |
 | `qgis_aggregate_to_zones` | Count, sum, or mean points or lines onto polygons; writes GeoPackage / GeoJSON. Full mode only |
+| `qgis_buffer` | Buffer points, lines, or polygons by a distance in metres; writes GeoPackage / GeoJSON. Full mode only |
+| `qgis_dissolve` | One feature, or one feature per field value; writes GeoPackage / GeoJSON. Full mode only |
+| `qgis_clip` | Cut a layer to a polygon study area; writes GeoPackage / GeoJSON. Full mode only |
+| `qgis_voronoi` | Voronoi polygons from the same diagram as the catchment PNG; writes GeoPackage / GeoJSON. Full mode only |
+| `qgis_make_grid` | Metre fishnet of square polygons over an extent; writes GeoPackage / GeoJSON. Does not replace the JIS L3 mesh. Full mode only |
 | `qgis_expression` | Calculated column and/or filter from a QGIS expression; writes GeoPackage / GeoJSON. Full mode only |
-| `qgis_zonal_stats` | Raster statistics per polygon (JAXA LULC, DEM) → GeoPackage or CSV |
+| `qgis_recipe` | Named recipes: reproject, centroids, explode, points from lon/lat, extent polygon. User recipes stay off unless `recipe_dir` is set. Full mode only |
+| `qgis_zonal_stats` | Raster statistics per polygon (JAXA LULC, DEM), plus majority and a class histogram → GeoPackage or CSV |
 | `qgis_export_atlas` | Export every atlas page from a print layout (PNG per feature or one PDF) |
 | `qgis_assign_section_load` | All-or-nothing OD → link volumes (`[network]` extra); feed `load_csv` to link-density |
 | `qgis_route_on_network` | Snap stop sequences onto DRM/rail (GUFM Tokyo TSV); writes routed CSV |
@@ -71,7 +77,8 @@ for free — a v0.4 architectural promise that v0.5+ tools inherit.
 | `qgis_render_trajectory` | Lines/points/heatmap from CSV/GPX. Stride sampling; optional stroke, opacity and labels |
 | `qgis_render_od_flows` | Origin-destination arcs over a zones layer. Width scales with flow unless a stroke width is set |
 | `qgis_export_layout` | Print-composer → PNG/PDF/SVG |
-| `qgis_compose_panels` | Grid of map panels on linked colour scales with colour bars, set fonts and line weights → PDF/SVG/PNG |
+| `qgis_compose_layout` | Print layout from layers: title, legend, scale bar, north arrow. Optional page millimetres, font, title and legend size, legend corner |
+| `qgis_compose_panels` | Grid of map panels on linked colour scales, with difference columns and optional per-panel extents → PDF/SVG/PNG |
 | `qgis_batch_render` | Fan-out per attribute value; manifest + per-value errors |
 | `qgis_figures_to_pptx` | Assemble PNGs into a PowerPoint deck (defaults to Sekimoto-lab blank) |
 | `qgis_export_session` | Write a replay script that re-makes figures from their `.provenance.json` sidecars |

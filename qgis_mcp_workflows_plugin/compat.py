@@ -12,7 +12,9 @@ from qgis.core import (
     QgsAggregateCalculator,
     QgsGradientFillSymbolLayer,
     QgsLayoutExporter,
+    QgsLayoutItem,
     QgsLayoutItemShape,
+    QgsLegendStyle,
     QgsMapLayer,
     QgsProcessingParameterDefinition,
     QgsRasterBandStats,
@@ -167,6 +169,31 @@ try:
     SHAPE_RECTANGLE = QgsLayoutItemShape.Shape.Rectangle
 except AttributeError:
     SHAPE_RECTANGLE = QgsLayoutItemShape.Rectangle
+
+# Layout-item anchor. Scoped ReferencePoint is QGIS 3.30+ / Qt6; 3.28 has the flat names.
+try:
+    REF_UPPER_LEFT = QgsLayoutItem.ReferencePoint.UpperLeft
+    REF_UPPER_RIGHT = QgsLayoutItem.ReferencePoint.UpperRight
+    REF_LOWER_LEFT = QgsLayoutItem.ReferencePoint.LowerLeft
+    REF_LOWER_RIGHT = QgsLayoutItem.ReferencePoint.LowerRight
+except AttributeError:
+    REF_UPPER_LEFT = QgsLayoutItem.UpperLeft
+    REF_UPPER_RIGHT = QgsLayoutItem.UpperRight
+    REF_LOWER_LEFT = QgsLayoutItem.LowerLeft
+    REF_LOWER_RIGHT = QgsLayoutItem.LowerRight
+
+try:
+    LEGEND_TITLE = QgsLegendStyle.Style.Title
+    LEGEND_GROUP = QgsLegendStyle.Style.Group
+    LEGEND_SUBGROUP = QgsLegendStyle.Style.Subgroup
+    LEGEND_SYMBOL_LABEL = QgsLegendStyle.Style.SymbolLabel
+except AttributeError:
+    LEGEND_TITLE = QgsLegendStyle.Title
+    LEGEND_GROUP = QgsLegendStyle.Group
+    LEGEND_SUBGROUP = QgsLegendStyle.Subgroup
+    LEGEND_SYMBOL_LABEL = QgsLegendStyle.SymbolLabel
+
+LEGEND_TEXT_STYLES = (LEGEND_TITLE, LEGEND_GROUP, LEGEND_SUBGROUP, LEGEND_SYMBOL_LABEL)
 
 
 def font_families():

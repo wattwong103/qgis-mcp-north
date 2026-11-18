@@ -301,6 +301,38 @@ def _foreign(record: dict) -> bool:
     return _same(claimed) != _same(located)
 
 
+def drop_user_recipes(
+    records: list[dict], trust_foreign: bool
+) -> tuple[list[dict], list[dict], list[str]]:
+    """Leave user-recipe calls out unless the caller passes trust_foreign.
+
+    A built-in ``qgis_recipe`` name replays with the other file-writing tools.
+    A name that is not built in is a user recipe file. It is omitted the way a
+    foreign ``qgis_eval`` is: the warning names ``trust_foreign=True``.
+    """
+    from qgis_mcp_workflows.recipes import BUILTIN_NAMES
+
+    if trust_foreign:
+        return records, [], []
+    builtin = set(BUILTIN_NAMES)
+    kept: list[dict] = []
+    skipped: list[dict] = []
+    warnings: list[str] = []
+    for record in records:
+        call = record.get("call") or {}
+        args = call.get("arguments") or {}
+        name = args.get("name")
+        if call.get("tool") == "qgis_recipe" and isinstance(name, str) and name not in builtin:
+            warnings.append(
+                f"{_clean(record.get('figure'))}: user recipe {_clean(name)} left out "
+                "(pass trust_foreign=True to keep it)"
+            )
+            skipped.append({"figure": record.get("figure"), "reason": "user recipe needs trust_foreign"})
+            continue
+        kept.append(record)
+    return kept, skipped, warnings
+
+
 def keep_evals(records: list[dict], include_evals: bool, trust_foreign: bool) -> tuple[list[dict], list[str]]:
     """Drop recorded evals the caller did not ask for, or does not trust (spec §7 Trust)."""
     kept: list[dict] = []
@@ -650,7 +682,9 @@ def export_session(output_py: str, figures: list[str] | None = None, folder: str
             _fail(f"{_clean(folder)} is not a folder.", "pass an existing folder, or figures=[...]")
     records, skipped, warnings = collect(figures, folder)
     records, eval_warnings = keep_evals(records, include_evals, trust_foreign)
-    warnings = warnings + eval_warnings
+    records, recipe_skipped, recipe_warnings = drop_user_recipes(records, trust_foreign)
+    warnings = warnings + eval_warnings + recipe_warnings
+    skipped = skipped + recipe_skipped
     steps = plan_steps(records)
     if not steps:
         why = "; ".join(f"{_clean(s['figure'])}: {s['reason']}" for s in skipped[:5]) or "no sidecars found"

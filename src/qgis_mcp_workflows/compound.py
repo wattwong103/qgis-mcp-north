@@ -406,6 +406,12 @@ def qgis_export(
     legend: Annotated[bool, Field(description='kind="compose_layout": add a legend.')] = True,
     scale_bar: Annotated[bool, Field(description='kind="compose_layout": add a scale bar.')] = True,
     north_arrow: Annotated[bool, Field(description='kind="compose_layout": add a north arrow.')] = True,
+    width_mm: Annotated[float | None, Field(description='kind="compose_layout": page width in mm, with height_mm.')] = None,
+    height_mm: Annotated[float | None, Field(description='kind="compose_layout": page height in mm, with width_mm.')] = None,
+    font_family: Annotated[str | None, Field(description='kind="compose_layout": font for the title, legend and scale bar.')] = None,
+    title_size_pt: Annotated[float | None, Field(description='kind="compose_layout": title size in points. Needs title.')] = None,
+    legend_size_pt: Annotated[float | None, Field(description='kind="compose_layout": legend text size in points.')] = None,
+    legend_corner: Annotated[Literal["top_left", "top_right", "bottom_left", "bottom_right"] | None, Field(description='kind="compose_layout": legend corner. Omitted keeps the top-right inset.')] = None,
 ) -> ExportResult | BatchRenderResult | PptxResult | ComposeLayoutResult | AtlasExportResult:
     """Export / batch-render / compose / deliver-as-pptx."""
     if kind == "layout":
@@ -438,6 +444,8 @@ def qgis_export(
         return qgis_compose_layout(
             layer_paths=layer_paths, output_path=output_path, title=title, extent=extent,
             page=page, legend=legend, scale_bar=scale_bar, north_arrow=north_arrow, dpi=dpi,
+            width_mm=width_mm, height_mm=height_mm, font_family=font_family,
+            title_size_pt=title_size_pt, legend_size_pt=legend_size_pt, legend_corner=legend_corner,
         )
     if kind == "atlas":
         if not qgz_path or not layout_name or not output_dir:

@@ -3,6 +3,94 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.26.0 — 2026-11-18 — named recipes
+
+### Added
+
+- `qgis_recipe` writes a GeoPackage or GeoJSON from a named recipe:
+  `reproject`, `centroids`, `explode`, `points_from_xy`, and `extent`.
+  These are the PyQGIS operations `qgis_expression` and the geometry
+  writers do not cover. The caller passes a name, not Python. Full mode only.
+- A user recipe is `{recipe_dir}/{name}.json`. The directory stays off
+  unless `recipe_dir` is set in `~/.config/qgis-mcp-workflows/config.toml`.
+  `QGIS_MCP_WORKFLOWS_RECIPE_DIR` overrides the file. The JSON pins a
+  built-in. A `code` key is refused. `qgis_export_session` leaves a user
+  recipe out unless `trust_foreign=True`.
+- `qgis_eval` stays available while `allow_python_eval` is true. Turning
+  that flag off does not disable `qgis_recipe`. There is no Python sandbox.
+
+## v1.25.0 — 2026-11-18 — fishnet polygons
+
+### Added
+
+- `qgis_make_grid` writes square polygons of `cell_m` metres over
+  `[xmin, ymin, xmax, ymax]` in a projected CRS whose map units are metres.
+  Cells align to the CRS origin, so the same `crs` and `cell_m` share
+  `cell_id`. A partial edge cell is still a full square. More than 250,000
+  cells is refused before a file is written. Output is GeoPackage or GeoJSON.
+  Full mode only. No Processing.
+- `assets/zones_mesh_l3.gpkg` is unchanged. JIS L3 stays
+  `scripts/build_gufm_zones.py`. Passing that checkout path as `output_path`
+  is refused. There is no `code="jis_l3"` mode.
+
+## v1.24.0 — 2026-11-18 — layout type and panel frames
+
+### Added
+
+- `qgis_compose_layout` takes optional `width_mm` and `height_mm` (both, or
+  neither; the page preset stays when both are omitted), `font_family`,
+  `title_size_pt`, `legend_size_pt` and `legend_corner`
+  (`top_left`, `top_right`, `bottom_left`, `bottom_right`). The font covers
+  the title, the legend and the scale bar. A missing family is listed in
+  `fonts_missing` and the default font draws. Omitted, the title stays 18 pt
+  bold and the legend stays inset from the top-right. An older plugin that
+  ignores the new keys raises `PluginOutdatedError`. Compound
+  `qgis_export(kind="compose_layout")` forwards the same arguments.
+- `qgis_compose_panels` takes `difference_columns` (`name = left - right`,
+  quotes optional). The subtraction is joined into the CSV before the scale.
+  A blank operand leaves that zone out. Other expressions stay on
+  `qgis_expression`.
+- `qgis_compose_panels` takes `panel_extents`, one `[xmin, ymin, xmax, ymax]`
+  per panel. Omitted, every panel still shares one frame. Together with
+  `extent` it is refused. An older plugin that draws one frame anyway raises
+  `PluginOutdatedError`.
+
+## v1.23.0 — 2026-11-18 — geometry writers
+
+### Added
+
+- `qgis_buffer` writes a polygon around every point, line, or polygon.
+  `distance_m` is metres. A geographic layer is measured in a UTM zone
+  (EPSG:3995 or EPSG:3031 near the poles) and the file is written back in
+  the source CRS. `measure_crs` names the CRS the distance was applied in.
+  A projected layer in feet or another linear unit is buffered in that CRS
+  after converting metres. `BufferCrsError` names the layer CRS when no
+  projected CRS can be chosen.
+- `qgis_dissolve` writes one feature, or one feature per field value. The
+  geometry may be multipart. Attributes come from the first feature in the
+  group.
+- `qgis_clip` cuts points, lines, or polygons to a polygon study area. The
+  overlay is unioned into one mask and transformed into the input CRS.
+  `ClipEmptyError` names both layers' CRS and geometry types.
+- `qgis_voronoi` writes Voronoi polygons with `QgsGeometry.voronoiDiagram`,
+  the same call `qgis_render_catchment` uses. The catchment tool stays a PNG.
+  At least 3 points. Each cell keeps the attributes of the point that falls
+  in it. Output is GeoPackage or GeoJSON. Full mode only. No Processing.
+
+## v1.22.0 — 2026-11-18 — categorical zonal stats
+
+### Added
+
+- `qgis_zonal_stats` accepts `majority` and `histogram`. `majority` is the most
+  frequent cell value (`prefix + "majority"`), from `QgsZonalStatistics`.
+  `mean` stays the numeric mean of the cell values.
+- `histogram` writes one integer column per class id that occurs inside the
+  zones, named `prefix + class id` (`lulc_1`, `lulc_2`, …). A class that does
+  not occur has no column. A zone that lacks a class which occurs elsewhere
+  stores 0. Nodata is not a class. On the JAXA LULC raster, built-up is class
+  2, so `prefix="lulc_"` writes numeric `lulc_2`. A non-integer band is refused;
+  use `mean` for a continuous raster.
+
 ## v1.21.0 — 2026-11-18 — line and point figure controls
 
 ### Added

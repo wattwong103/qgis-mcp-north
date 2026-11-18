@@ -213,7 +213,7 @@ def reset_for_tests() -> None:
 INPUT_ARGS = frozenset({
     "path", "zones_path", "zones_layer_path", "value_csv", "input_path", "input_csv", "od_csv",
     "load_csv", "drm_network_path", "network_path", "rail_network_path", "db_path", "layer_path",
-    "points_path", "join_path", "target_path", "raster_path", "qgz_path", "template_qgz",
+    "points_path", "join_path", "target_path", "overlay_path", "raster_path", "qgz_path", "template_qgz",
     "template_pptx",
 })
 INPUT_LIST_ARGS = frozenset({"trajectory_csvs", "layer_paths", "figure_paths", "basemap_paths"})
@@ -237,8 +237,14 @@ WRITTEN_BY_MODEL: dict[str, Callable[[Any], list[str]]] = {
     "ComposeLayoutResult": lambda r: [r.output_path],
     "SpatialJoinResult": lambda r: [r.output_path],
     "AggregateToZonesResult": lambda r: [r.output_path],
+    "BufferResult": lambda r: [r.output_path],
+    "DissolveResult": lambda r: [r.output_path],
+    "ClipResult": lambda r: [r.output_path],
+    "VoronoiResult": lambda r: [r.output_path],
+    "GridResult": lambda r: [r.output_path],
     "ZonalStatsResult": lambda r: [r.output_path],
     "ExpressionResult": lambda r: [r.output_path],
+    "RecipeResult": lambda r: [r.output_path],
 }
 # Results that name a file which is not a figure: the replay script itself.
 NOT_RECORDED_MODELS = frozenset({"SessionExportResult"})

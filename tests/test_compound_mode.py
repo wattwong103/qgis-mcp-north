@@ -198,7 +198,42 @@ def test_compound_export_compose_layout(compound_module, fake_executor):
         layer_paths=["/tmp/zones.geojson"],
     )
     assert fake_executor.calls[0][0] == "compose_layout"
+    assert "width_mm" not in fake_executor.calls[0][1]
+    assert "font_family" not in fake_executor.calls[0][1]
     assert result.format == "png"
+
+
+def test_compound_compose_layout_forwards_page_and_type(compound_module, fake_executor):
+    _server, compound = compound_module
+    fake_executor.responses["compose_layout"] = {
+        "output_path": "/tmp/layout.png",
+        "format": "png", "n_layers": 1,
+        "items": ["map", "title", "legend"], "page_size_mm": [180.0, 120.0],
+        "layout_applied": {
+            "width_mm": 180.0, "height_mm": 120.0, "font_family": "Arial",
+            "title_size_pt": 14.0, "legend_size_pt": 8.0, "legend_corner": "bottom_left",
+        },
+        "fonts_missing": [],
+    }
+    result = compound.qgis_export(
+        kind="compose_layout",
+        output_path="/tmp/layout.png",
+        layer_paths=["/tmp/zones.geojson"],
+        title="Net flux",
+        width_mm=180,
+        height_mm=120,
+        font_family="Arial",
+        title_size_pt=14,
+        legend_size_pt=8,
+        legend_corner="bottom_left",
+    )
+    params = fake_executor.calls[0][1]
+    assert params["width_mm"] == 180 and params["height_mm"] == 120
+    assert params["font_family"] == "Arial"
+    assert params["title_size_pt"] == 14
+    assert params["legend_size_pt"] == 8
+    assert params["legend_corner"] == "bottom_left"
+    assert result.layout_applied["legend_corner"] == "bottom_left"
 
 
 def test_compound_render_map_requires_layer_ids(compound_module, fake_executor):

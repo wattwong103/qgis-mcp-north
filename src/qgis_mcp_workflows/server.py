@@ -112,7 +112,13 @@ pipelines (PFLOW, GUFM). First call qgis_ping / qgis_diagnose. Then:
 - qgis_layer_inspect before any join/render so field names are real.
 - qgis_spatial_join to copy attributes by location (first match);
   qgis_aggregate_to_zones to count or sum points or lines onto polygons;
-  qgis_zonal_stats for raster-per-polygon (JAXA LULC onto zones).
+  qgis_zonal_stats for raster-per-polygon (JAXA LULC onto zones; majority and a class histogram).
+- qgis_buffer (metres; a geographic layer is measured in a projected CRS),
+  qgis_dissolve, qgis_clip, and qgis_voronoi write a polygon or line file
+  another tool can join. qgis_render_catchment stays the Voronoi PNG.
+- qgis_make_grid(extent, output_path, cell_m, crs) writes a metre fishnet of
+  square polygons. crs is a projected metre CRS. This does not replace
+  assets/zones_mesh_l3.gpkg (JIS L3 from scripts/build_gufm_zones.py).
 - qgis_render_choropleth for zone polygons + value CSV (pass scale_bar=True
   and north_arrow=True for a publication PNG). GUFM 23-ward polygons:
   assets/zones_tokyo23.gpkg, join_field=zone_id (JIS N03_007).
@@ -219,12 +225,43 @@ def prompt_gufm_route() -> str:
     )
 
 
+@mcp.prompt(title="Geometry writers", description="Buffer, dissolve, clip, or Voronoi polygons to a file.")
+def prompt_geometry() -> str:
+    return (
+        "qgis_layer_inspect the layer first (crs, geometry_type, n_features). "
+        "qgis_buffer(path, output_path, distance_m) writes polygons. distance_m is metres. "
+        "A geographic layer is measured in a UTM zone and written back in the source CRS. "
+        "qgis_dissolve(path, output_path, field=...) writes one feature, or one per field value. "
+        "qgis_clip(path, overlay_path, output_path) cuts to a polygon study area. "
+        "qgis_voronoi(path, output_path) writes polygons from the same QgsGeometry.voronoiDiagram "
+        "as qgis_render_catchment. The PNG tool stays a PNG. At least 3 points. "
+        "Then qgis_spatial_join or qgis_render_choropleth on the written file."
+    )
+
+
+@mcp.prompt(title="Fishnet", description="Square metre cells over an extent, as polygons.")
+def prompt_make_grid() -> str:
+    return (
+        "qgis_make_grid(extent=[xmin, ymin, xmax, ymax], output_path=..., "
+        "cell_m=500, crs='EPSG:32654') writes square polygons. "
+        "extent is the box in that CRS, not a layer path. crs must be a projected "
+        "CRS whose map units are metres. Cells align to the CRS origin, and cell_id "
+        "is the join field. assets/zones_mesh_l3.gpkg stays the JIS L3 mesh from "
+        "scripts/build_gufm_zones.py. Then qgis_aggregate_to_zones or "
+        "qgis_render_choropleth on the written file."
+    )
+
+
 @mcp.prompt(title="Zonal stats", description="Raster statistics per polygon (JAXA LULC, DEM).")
 def prompt_zonal_stats() -> str:
     return (
         "qgis_zonal_stats(zones_path, raster_path, output_path, "
-        "stats=['count','mean','sum'], prefix=''). output_path may be .gpkg or .csv. "
-        "Then qgis_render_choropleth(zones_path=output_path, value_field=<prefix>mean)."
+        "stats=['count','mean','majority','histogram'], prefix='lulc_'). "
+        "mean stays the numeric mean (lulc_mean). majority is the most frequent "
+        "cell value (lulc_majority). histogram writes one integer column per class "
+        "id that occurs (lulc_1, lulc_2, …); a class that does not occur has no "
+        "column. JAXA built-up is lulc_2. output_path may be .gpkg or .csv. "
+        "Then qgis_render_choropleth on lulc_mean or on a class column such as lulc_2."
     )
 
 
@@ -636,6 +673,8 @@ class ComposeLayoutResult(DrawsMap):
     n_layers: int
     items: list[str]
     page_size_mm: list[float]
+    fonts_missing: list[str] = []
+    layout_applied: dict | None = None
 
 
 class PanelGroup(BaseModel):
@@ -658,6 +697,8 @@ class PanelsResult(ComposeLayoutResult):
     csv_keys_unmatched_sample: Annotated[list[str], Field(description="Up to 5 of those keys, sorted.")]
     panel_boxes_mm: Annotated[list[list[float]], Field(description="Each panel's [x, y, width, height] on the page, mm from the top left.")]
     colorbar_boxes_mm: Annotated[list[list[float]], Field(description="Each colour bar's [x, y, width, height], one per group.")]
+    difference_columns: Annotated[list[str], Field(description="Columns computed as name = left - right and joined into the CSV before scaling.")] = []
+    panel_extents: Annotated[list[list[float]] | None, Field(description="One [xmin, ymin, xmax, ymax] per panel when the caller set panel_extents; otherwise null and every panel shares one frame.")] = None
 
 
 class DiagramMapResult(RenderResult):
@@ -1163,6 +1204,428 @@ def qgis_aggregate_to_zones(
     )
 
 
+_GEOMETRY_OUTPUTS = (".gpkg", ".geojson", ".json")
+
+
+def _geometry_output(tool: str, output_path: str) -> str:
+    abs_out = user_abs(output_path)
+    if os.path.splitext(abs_out)[1].lower() not in _GEOMETRY_OUTPUTS:
+        raise InvalidArgumentError(
+            f"output_path {output_path!r} must end in .gpkg or .geojson.",
+            next_step=f"pass a .gpkg or .geojson output_path, then retry {tool}",
+        )
+    return abs_out
+
+
+def _positive_metres(distance_m: float) -> float:
+    if isinstance(distance_m, bool) or not isinstance(distance_m, (int, float)):
+        bad = True
+        value = 0.0
+    else:
+        bad = False
+        value = float(distance_m)
+    if bad or not math.isfinite(value) or value <= 0.0:
+        raise InvalidArgumentError(
+            f"distance_m {distance_m!r} must be metres greater than 0.",
+            next_step="pass distance_m as a positive number of metres, then retry qgis_buffer",
+        )
+    return value
+
+
+def _layer_named_in(message: str, *paths: str) -> str:
+    for path in paths:
+        if path and path in message:
+            return path
+    return paths[0]
+
+
+class BufferResult(BaseModel):
+    output_path: str
+    n_input: int
+    n_output: int
+    distance_m: float
+    measure_crs: str
+    source_crs: str
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_buffer(
+    path: Annotated[str, Field(description="Point, line, or polygon layer to buffer.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+    distance_m: Annotated[float, Field(description="Buffer distance in metres. Must be finite and greater than 0.")],
+) -> BufferResult:
+    """Write a buffer polygon around every feature.
+
+    When to use: a walk-shed around stops, or a corridor around a line, as a
+    file ``qgis_spatial_join`` or ``qgis_render_choropleth`` can use.
+    ``distance_m`` is metres. A geographic layer is measured in a UTM zone
+    (EPSG:3995 or EPSG:3031 near the poles) and the file is written in the
+    source CRS. ``measure_crs`` names the CRS the distance was applied in.
+    The open project is unchanged. Full mode only. No Processing.
+
+    Returns: ``BufferResult`` with ``n_output``, ``measure_crs`` and ``source_crs``.
+
+    Chains into: ``qgis_spatial_join``, ``qgis_aggregate_to_zones``,
+    ``qgis_render_choropleth``.
+    """
+    from qgis_mcp_workflows.errors import (
+        BufferCrsError,
+        BufferEmptyError,
+        ExecutorError,
+        LayerNotFoundError,
+    )
+    from qgis_mcp_workflows.executors import get_executor
+
+    metres = _positive_metres(distance_m)
+    abs_path = user_abs(path)
+    abs_out = _geometry_output("qgis_buffer", output_path)
+    params = {"path": abs_path, "output_path": abs_out, "distance_m": metres}
+    try:
+        result = get_executor().dispatch("buffer", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "BUFFER_CRS" in message:
+            raise BufferCrsError(message) from err
+        if "BUFFER_EMPTY" in message:
+            raise BufferEmptyError(message) from err
+        if "BUFFER_GEOMETRY" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="pass a point, line, or polygon path, then retry qgis_buffer",
+            ) from err
+        if "LAYER_NOT_FOUND" in message:
+            raise LayerNotFoundError(_layer_named_in(message, abs_path)) from err
+        raise
+    return BufferResult(
+        output_path=user_abs(result["output_path"]),
+        n_input=int(result.get("n_input") or 0),
+        n_output=int(result.get("n_output") or 0),
+        distance_m=float(result.get("distance_m") or metres),
+        measure_crs=str(result.get("measure_crs") or ""),
+        source_crs=str(result.get("source_crs") or ""),
+    )
+
+
+class DissolveResult(BaseModel):
+    output_path: str
+    n_input: int
+    n_output: int
+    field: str | None = None
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_dissolve(
+    path: Annotated[str, Field(description="Point, line, or polygon layer to dissolve.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+    field: Annotated[
+        str | None,
+        Field(description="One feature per value of this field. Omit to dissolve the layer into one feature."),
+    ] = None,
+) -> DissolveResult:
+    """Write one feature, or one feature per field value.
+
+    When to use: prefectures dissolved from municipalities, or one study-area
+    polygon from many parts. The geometry may be multipart. Attributes come
+    from the first feature in each group. The open project is unchanged.
+    Full mode only. No Processing.
+
+    Returns: ``DissolveResult`` with ``n_output`` and the ``field`` used, or
+    null when the whole layer became one feature.
+
+    Chains into: ``qgis_render_choropleth``, ``qgis_spatial_join``.
+    """
+    from qgis_mcp_workflows.errors import (
+        DissolveEmptyError,
+        ExecutorError,
+        FieldNotFoundError,
+        LayerNotFoundError,
+    )
+    from qgis_mcp_workflows.executors import get_executor
+
+    abs_path = user_abs(path)
+    abs_out = _geometry_output("qgis_dissolve", output_path)
+    column = (field or "").strip()
+    params: dict = {"path": abs_path, "output_path": abs_out}
+    if column:
+        params["field"] = column
+    try:
+        result = get_executor().dispatch("dissolve", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "DISSOLVE_EMPTY" in message:
+            raise DissolveEmptyError(message) from err
+        if "FIELD_NOT_FOUND" in message:
+            raise FieldNotFoundError(column or "?", []) from err
+        if "LAYER_NOT_FOUND" in message:
+            raise LayerNotFoundError(_layer_named_in(message, abs_path)) from err
+        raise
+    written = result.get("field")
+    return DissolveResult(
+        output_path=user_abs(result["output_path"]),
+        n_input=int(result.get("n_input") or 0),
+        n_output=int(result.get("n_output") or 0),
+        field=None if written in (None, "") else str(written),
+    )
+
+
+class ClipResult(BaseModel):
+    output_path: str
+    n_input: int
+    n_overlay: int
+    n_output: int
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_clip(
+    path: Annotated[str, Field(description="Points, lines, or polygons to cut.")],
+    overlay_path: Annotated[str, Field(description="Polygon study area. Features outside it are dropped.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+) -> ClipResult:
+    """Cut a layer to a polygon study area and write the result.
+
+    When to use: mesh cells or trajectories inside the 23 wards. Overlay
+    polygons are unioned into one mask and transformed into the input CRS.
+    Each input feature that meets the mask is written once, with its attributes.
+    The open project is unchanged. Full mode only. No Processing.
+
+    Returns: ``ClipResult`` with ``n_input``, ``n_overlay`` and ``n_output``.
+
+    Chains into: ``qgis_render_choropleth``, ``qgis_aggregate_to_zones``.
+    """
+    from qgis_mcp_workflows.errors import ClipEmptyError, ExecutorError, LayerNotFoundError
+    from qgis_mcp_workflows.executors import get_executor
+
+    abs_path = user_abs(path)
+    abs_overlay = user_abs(overlay_path)
+    abs_out = _geometry_output("qgis_clip", output_path)
+    params = {"path": abs_path, "overlay_path": abs_overlay, "output_path": abs_out}
+    try:
+        result = get_executor().dispatch("clip", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "CLIP_EMPTY" in message:
+            raise ClipEmptyError(message) from err
+        if "CLIP_GEOMETRY" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="pass a point, line, or polygon path and a polygon overlay_path, then retry qgis_clip",
+            ) from err
+        if "LAYER_NOT_FOUND" in message:
+            raise LayerNotFoundError(_layer_named_in(message, abs_path, abs_overlay)) from err
+        raise
+    return ClipResult(
+        output_path=user_abs(result["output_path"]),
+        n_input=int(result.get("n_input") or 0),
+        n_overlay=int(result.get("n_overlay") or 0),
+        n_output=int(result.get("n_output") or 0),
+    )
+
+
+class VoronoiResult(BaseModel):
+    output_path: str
+    n_input: int
+    n_output: int
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_voronoi(
+    path: Annotated[str, Field(description="Point layer. At least 3 points with geometry.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+) -> VoronoiResult:
+    """Write Voronoi polygons for a point layer.
+
+    When to use: catchment cells that ``qgis_spatial_join`` or a choropleth
+    can use. The diagram is ``QgsGeometry.voronoiDiagram`` with no extent, the
+    same call ``qgis_render_catchment`` uses. That tool stays a PNG. Each cell
+    keeps the attributes of the point that falls in it. The output CRS is the
+    source CRS. The open project is unchanged. Full mode only. No Processing.
+
+    Returns: ``VoronoiResult`` with ``n_input`` and ``n_output``. Coincident
+    points share one cell, so ``n_output`` can be lower.
+
+    Chains into: ``qgis_spatial_join``, ``qgis_aggregate_to_zones``,
+    ``qgis_render_choropleth``.
+    """
+    from qgis_mcp_workflows.errors import ExecutorError, LayerNotFoundError, VoronoiError
+    from qgis_mcp_workflows.executors import get_executor
+
+    abs_path = user_abs(path)
+    abs_out = _geometry_output("qgis_voronoi", output_path)
+    params = {"path": abs_path, "output_path": abs_out}
+    try:
+        result = get_executor().dispatch("voronoi", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "VORONOI_POINTS" in message or "VORONOI_EMPTY" in message:
+            raise VoronoiError(message) from err
+        if "VORONOI_GEOMETRY" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="pass a point path with at least 3 features, then retry qgis_voronoi",
+            ) from err
+        if "LAYER_NOT_FOUND" in message:
+            raise LayerNotFoundError(_layer_named_in(message, abs_path)) from err
+        raise
+    return VoronoiResult(
+        output_path=user_abs(result["output_path"]),
+        n_input=int(result.get("n_input") or 0),
+        n_output=int(result.get("n_output") or 0),
+    )
+
+
+class GridResult(BaseModel):
+    output_path: str
+    n_output: int
+    n_rows: int
+    n_cols: int
+    cell_m: float
+    crs: str
+    extent: list[float]
+    grid_extent: list[float]
+    id_field: str
+
+
+def _require_grid_plan(extent, cell_m):
+    """The cell plan, or an InvalidArgumentError / GridTooManyError before dispatch."""
+    from qgis_mcp_workflows.errors import GridTooManyError
+    from qgis_mcp_workflows.grid import (
+        MAX_CELLS,
+        check_cell_m,
+        check_extent,
+        grid_too_many_detail,
+        plan_grid,
+    )
+
+    if check_cell_m(cell_m) is None:
+        raise InvalidArgumentError(
+            f"cell_m {cell_m!r} must be metres greater than 0.",
+            next_step="pass cell_m as a positive number of metres, then retry qgis_make_grid",
+        )
+    if check_extent(extent) is None:
+        raise InvalidArgumentError(
+            "extent must be four finite numbers [xmin, ymin, xmax, ymax] "
+            "with xmin < xmax and ymin < ymax. It is the box in the grid CRS, not a layer path.",
+            next_step=(
+                "pass extent as [xmin, ymin, xmax, ymax] in the grid CRS, then retry qgis_make_grid"
+            ),
+        )
+    plan = plan_grid(extent, cell_m)
+    if plan is None:
+        raise InvalidArgumentError(
+            "extent is empty once it is aligned to cell_m.",
+            next_step="widen extent or lower cell_m, then retry qgis_make_grid",
+        )
+    if plan["n_cells"] > MAX_CELLS:
+        raise GridTooManyError(grid_too_many_detail(plan))
+    return plan
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_make_grid(
+    extent: Annotated[
+        list[float],
+        Field(description="[xmin, ymin, xmax, ymax] in crs. The box, not a layer path."),
+    ],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+    cell_m: Annotated[float, Field(description="Square cell size in metres. Must be finite and greater than 0.")],
+    crs: Annotated[
+        str,
+        Field(description="Projected CRS whose map units are metres, such as EPSG:32654. A bare integer is an EPSG code."),
+    ],
+) -> GridResult:
+    """Write a metre fishnet of square polygons.
+
+    When to use: cells that are not an existing zone layer, so
+    ``qgis_aggregate_to_zones`` or a choropleth has polygons to join.
+    ``extent`` is ``[xmin, ymin, xmax, ymax]`` in ``crs``. ``cell_m`` is metres.
+    ``crs`` must be a projected CRS whose map units are metres. Cells align to
+    multiples of ``cell_m`` from the CRS origin, so the same ``crs`` and
+    ``cell_m`` share ``cell_id``. A cell that only partly covers the extent is
+    still a full square. The open project is unchanged. Full mode only.
+    No Processing.
+
+    ``assets/zones_mesh_l3.gpkg`` stays the JIS L3 mesh from
+    ``scripts/build_gufm_zones.py``. This tool does not write that file.
+
+    Returns: ``GridResult`` with ``n_output``, ``grid_extent`` and ``id_field``
+    (``cell_id``).
+
+    Chains into: ``qgis_aggregate_to_zones``, ``qgis_spatial_join``,
+    ``qgis_clip``, ``qgis_render_choropleth``.
+    """
+    from qgis_mcp_workflows.errors import ExecutorError, GridCrsError, GridTooManyError
+    from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.grid import ID_FIELD, normalize_crs
+    from qgis_mcp_workflows.helpers import bundled_asset
+
+    plan = _require_grid_plan(extent, cell_m)
+    auth = normalize_crs(crs)
+    if auth is None:
+        raise InvalidArgumentError(
+            f"crs {crs!r} must name a projected CRS whose map units are metres, such as EPSG:32654.",
+            next_step="pass a metre CRS, then retry qgis_make_grid",
+        )
+    abs_out = _geometry_output("qgis_make_grid", output_path)
+    mesh = bundled_asset("assets", "zones_mesh_l3.gpkg")
+    if mesh and os.path.normcase(os.path.realpath(abs_out)) == os.path.normcase(os.path.realpath(mesh)):
+        raise InvalidArgumentError(
+            "output_path is assets/zones_mesh_l3.gpkg. That file is the JIS L3 mesh "
+            "from scripts/build_gufm_zones.py.",
+            next_step="pass a different output_path, then retry qgis_make_grid",
+        )
+    params = {
+        "extent": plan["extent"],
+        "output_path": abs_out,
+        "cell_m": plan["cell_m"],
+        "crs": auth,
+    }
+    try:
+        result = get_executor().dispatch("make_grid", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "GRID_CRS" in message:
+            raise GridCrsError(message) from err
+        if "GRID_TOO_MANY" in message:
+            raise GridTooManyError(message) from err
+        if "GRID_EXTENT" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="pass extent as [xmin, ymin, xmax, ymax] in the grid CRS, then retry qgis_make_grid",
+            ) from err
+        raise
+    return GridResult(
+        output_path=user_abs(result["output_path"]),
+        n_output=int(result["n_output"]) if "n_output" in result else plan["n_cells"],
+        n_rows=int(result["n_rows"]) if "n_rows" in result else plan["n_rows"],
+        n_cols=int(result["n_cols"]) if "n_cols" in result else plan["n_cols"],
+        cell_m=float(result["cell_m"]) if "cell_m" in result else plan["cell_m"],
+        crs=str(result["crs"]) if result.get("crs") else auth,
+        extent=list(result["extent"]) if "extent" in result else plan["extent"],
+        grid_extent=list(result["grid_extent"]) if "grid_extent" in result else plan["grid_extent"],
+        id_field=str(result["id_field"]) if result.get("id_field") else ID_FIELD,
+    )
+
+
 class ZonalStatsResult(BaseModel):
     output_path: str
     n_zones: int
@@ -1171,6 +1634,49 @@ class ZonalStatsResult(BaseModel):
     fields_added: list[str]
     raster_band: int
     prefix: str
+
+
+# Same order as qgis_mcp_workflows_plugin.zonal_histogram.STATS. This process
+# does not import the plugin package: QGIS Desktop loads that package, and the
+# server environment may not have it on sys.path.
+_ZONAL_STATS = (
+    "count",
+    "sum",
+    "mean",
+    "median",
+    "stdev",
+    "min",
+    "max",
+    "majority",
+    "histogram",
+)
+
+
+def _normalize_zonal_stats(stats: list[str] | None) -> list[str]:
+    """Lowercase, drop duplicates, keep order. Empty is count, sum, mean.
+
+    ``mean`` stays the numeric stat. ``histogram`` is a class count, not a
+    replacement for ``mean``.
+    """
+    if not stats:
+        return ["count", "sum", "mean"]
+    cleaned: list[str] = []
+    for name in stats:
+        key = str(name).strip().lower()
+        if key in cleaned:
+            continue
+        if key not in _ZONAL_STATS:
+            raise InvalidArgumentError(
+                f"stats {name!r} is not a zonal statistic. Available: {', '.join(_ZONAL_STATS)}.",
+                next_step=(
+                    "pass count, sum, mean, median, stdev, min, max, majority, or histogram, "
+                    "then retry qgis_zonal_stats"
+                ),
+            )
+        cleaned.append(key)
+    if not cleaned:
+        return ["count", "sum", "mean"]
+    return cleaned
 
 
 @_maybe_tool(
@@ -1183,17 +1689,39 @@ def qgis_zonal_stats(
     raster_path: Annotated[str, Field(description="Raster to summarize (JAXA LULC, DEM, density).")],
     output_path: Annotated[str, Field(description="Absolute output path. .gpkg keeps geometry; .csv is attributes only.")],
     stats: Annotated[
-        list[Literal["count", "sum", "mean", "median", "stdev", "min", "max"]] | None,
-        Field(description="Statistics to compute. Default count+sum+mean."),
+        list[
+            Literal[
+                "count",
+                "sum",
+                "mean",
+                "median",
+                "stdev",
+                "min",
+                "max",
+                "majority",
+                "histogram",
+            ]
+        ]
+        | None,
+        Field(
+            description=(
+                "Statistics. mean is the numeric mean. majority is the most frequent "
+                "cell value. histogram writes one integer column per class id that "
+                "occurs (prefix + id, e.g. lulc_2). Default count+sum+mean."
+            )
+        ),
     ] = None,
-    prefix: Annotated[str, Field(description="Prefix for new fields (e.g. 'lulc_' → lulc_mean).")] = "",
+    prefix: Annotated[str, Field(description="Prefix for new fields (e.g. 'lulc_' → lulc_mean, lulc_2).")] = "",
     raster_band: Annotated[int, Field(description="Raster band (1-based).", ge=1)] = 1,
 ) -> ZonalStatsResult:
     """Raster statistics per polygon, written to GeoPackage or CSV.
 
     When to use: JAXA 100m LULC (or any raster) summarized onto zone polygons
-    before a choropleth. Uses ``QgsZonalStatistics`` (qgis.analysis) — no
-    Processing toolbox, works headless.
+    before a choropleth. Numeric stats use ``QgsZonalStatistics``
+    (qgis.analysis) — no Processing toolbox, works headless. ``mean`` stays
+    the numeric mean. ``histogram`` adds one integer column per class id that
+    occurs inside the zones (``lulc_2`` is JAXA built-up). A class that does
+    not occur has no column.
 
     Returns: ``ZonalStatsResult`` with ``fields_added`` (the new stat columns)
     and ``n_with_value``.
@@ -1206,7 +1734,7 @@ def qgis_zonal_stats(
     abs_zones = user_abs(zones_path)
     abs_raster = user_abs(raster_path)
     abs_out = user_abs(output_path)
-    stat_list = list(stats) if stats else ["count", "sum", "mean"]
+    stat_list = _normalize_zonal_stats(list(stats) if stats else None)
     params = {
         "zones_path": abs_zones,
         "raster_path": abs_raster,
@@ -3218,6 +3746,12 @@ def qgis_compose_layout(
     scale_bar: Annotated[bool, Field(description="Add a scale bar linked to the map.")] = True,
     north_arrow: Annotated[bool, Field(description="Add a north arrow from QGIS's bundled SVGs.")] = True,
     dpi: Annotated[int, Field(description="Export DPI.", ge=72, le=600)] = 300,
+    width_mm: Annotated[float | None, Field(description="Page width in mm. Set together with height_mm; both omitted keeps the page preset. Greater than 20 and at most 1000.")] = None,
+    height_mm: Annotated[float | None, Field(description="Page height in mm. Set together with width_mm; both omitted keeps the page preset.")] = None,
+    font_family: Annotated[str | None, Field(description="Font for the title, legend and scale bar. A missing family is listed in fonts_missing and QGIS's default font draws.")] = None,
+    title_size_pt: Annotated[float | None, Field(description="Title size in points (just above 0 to 72). Needs title. Omitted, the title stays 18 pt bold.")] = None,
+    legend_size_pt: Annotated[float | None, Field(description="Legend text size in points (just above 0 to 72). Needs legend=True. Omitted, the legend font stays QGIS's default.")] = None,
+    legend_corner: Annotated[Literal["top_left", "top_right", "bottom_left", "bottom_right"] | None, Field(description="Legend corner. Omitted, the legend stays inset from the top-right of the map. Needs legend=True.")] = None,
 ) -> ComposeLayoutResult:
     """Compose a deck-ready print layout from layers and export it. v2 workflow tool.
 
@@ -3225,14 +3759,26 @@ def qgis_compose_layout(
     with a titled map panel plus a linked legend, scale bar and north arrow — the
     gap that ``qgis_export_layout`` (which only exports pre-authored .qgz layouts)
     leaves open. Single panel for now; multi-panel / inset is a future extension.
+    ``width_mm`` and ``height_mm`` replace the page preset when both are set.
+    ``font_family``, ``title_size_pt``, ``legend_size_pt`` and ``legend_corner``
+    match the panel tool's type. Omitted, the preset, the 18 pt title and the
+    top-right legend stay, and those keys are not sent.
 
     Returns: ``ComposeLayoutResult`` with output path, format, layer count, the
-    furniture items added, and page size in mm.
+    furniture items added, page size in mm, fonts that were not found, and
+    ``layout_applied`` when a v1.24 control was set.
 
     Chains into: ``qgis_figures_to_pptx``.
     """
+    from qgis_mcp_workflows.errors import PluginOutdatedError
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import layout_params
 
+    sent = layout_params(
+        width_mm=width_mm, height_mm=height_mm, font_family=font_family,
+        title_size_pt=title_size_pt, legend_size_pt=legend_size_pt, legend_corner=legend_corner,
+        title=title, legend=legend, scale_bar=scale_bar,
+    )
     abs_layers = [user_abs(p) for p in layer_paths]
     abs_output = user_abs(output_path)
     params = {
@@ -3246,13 +3792,18 @@ def qgis_compose_layout(
         "north_arrow": north_arrow,
         "dpi": dpi,
     }
+    params.update(sent)
     result = get_executor().dispatch("compose_layout", params, timeout=120)
+    if sent and "layout_applied" not in result:
+        raise PluginOutdatedError(_executor_transport_name())
     return ComposeLayoutResult(
         output_path=result["output_path"],
         format=result["format"],
         n_layers=result["n_layers"],
         items=result["items"],
         page_size_mm=result["page_size_mm"],
+        fonts_missing=list(result.get("fonts_missing") or []),
+        layout_applied=result.get("layout_applied"),
     )
 
 
@@ -3295,19 +3846,26 @@ def _refuse_bad_panel_arguments(*, value_fields: list[str], rows: int, cols: int
         raise InvalidArgumentError(f"output_path {output_path!r} must end in .png, .pdf or .svg.")
 
 
-def _read_panel_columns(csv_path: str, join_field: str,
-                        value_fields: list[str]) -> tuple[list[dict[str, float]], set[str]]:
-    """One ``{key: value}`` dict per field, and every key in the CSV.
+def _read_panel_columns(csv_path: str, join_field: str, value_fields: list[str],
+                        diffs: list) -> tuple[list[dict[str, float]], set[str]]:
+    """One ``{key: value}`` dict per panel, and every key in the CSV.
 
     Blank, non-numeric and non-finite cells are left out of the dicts; their rows'
     keys stay in the key set. A key on two rows is refused: keeping either row
-    would draw a map the CSV does not say.
+    would draw a map the CSV does not say. ``diffs`` are ``name = left - right``
+    columns joined in after the CSV is read; their operands are CSV columns.
     """
     import csv as _csv
 
     from qgis_mcp_workflows.errors import FieldNotFoundError
+    from qgis_mcp_workflows.panels import subtract_columns
 
-    columns: list[dict[str, float]] = [{} for _ in value_fields]
+    diff_names = [diff.name for diff in diffs]
+    csv_fields: list[str] = []
+    for field in [*value_fields, *(name for diff in diffs for name in (diff.left, diff.right))]:
+        if field not in diff_names and field not in csv_fields:
+            csv_fields.append(field)
+    columns: list[dict[str, float]] = [{} for _ in csv_fields]
     seen: set[str] = set()
     repeated: list[str] = []
     n_skipped = 0
@@ -3315,7 +3873,21 @@ def _read_panel_columns(csv_path: str, join_field: str,
         with open(csv_path, encoding="utf-8-sig", newline="") as f:
             reader = _csv.DictReader(f)
             csv_columns = reader.fieldnames or []
-            for field in (join_field, *value_fields):
+            for diff in diffs:
+                if diff.name in csv_columns:
+                    raise InvalidArgumentError(
+                        f"difference column {diff.name!r} is already a CSV column.",
+                        next_step="pick another name, or drop it from difference_columns",
+                    )
+                for operand in (diff.left, diff.right):
+                    if operand not in csv_columns:
+                        raise FieldNotFoundError(operand, csv_columns)
+                if diff.name not in value_fields:
+                    raise InvalidArgumentError(
+                        f"difference column {diff.name!r} is not a panel.",
+                        next_step="name it in value_fields, or drop it from difference_columns",
+                    )
+            for field in (join_field, *csv_fields):
                 if field not in csv_columns:
                     raise FieldNotFoundError(field, csv_columns)
             for row in reader:
@@ -3323,7 +3895,7 @@ def _read_panel_columns(csv_path: str, join_field: str,
                 if key in seen:
                     repeated.append(key)
                 seen.add(key)
-                for values, field in zip(columns, value_fields, strict=True):
+                for values, field in zip(columns, csv_fields, strict=True):
                     try:
                         value = float(row[field])
                     except (TypeError, ValueError):
@@ -3346,7 +3918,10 @@ def _read_panel_columns(csv_path: str, join_field: str,
     if n_skipped:
         logger.warning("compose_panels: left out %d blank, non-numeric or non-finite cells of %s",
                        n_skipped, csv_path)
-    return columns, seen
+    by_name = dict(zip(csv_fields, columns, strict=True))
+    for diff in diffs:
+        by_name[diff.name] = subtract_columns(by_name[diff.left], by_name[diff.right])
+    return [by_name[field] for field in value_fields], seen
 
 
 _UNMATCHED_SAMPLE = 5  # CSV keys named in an error or a result
@@ -3368,6 +3943,50 @@ def _layer_join_keys(zones_path: str, join_field: str) -> set[str]:
             "Next: restart QGIS so it loads the plugin from this checkout (python install.py links it), then retry",
         ) from err
     return set(result["values"])
+
+
+def _panel_extent_boxes(panel_extents: list | None, n_panels: int,
+                        extent: list[float] | None) -> list[list[float]] | None:
+    """One finite ``[xmin, ymin, xmax, ymax]`` per panel, or ``None`` for the shared frame."""
+    if panel_extents is None:
+        return None
+    if extent is not None:
+        raise InvalidArgumentError(
+            "extent and panel_extents both frame the panels.",
+            next_step="drop extent or drop panel_extents",
+        )
+    if isinstance(panel_extents, (str, bytes)) or not isinstance(panel_extents, (list, tuple)):
+        raise InvalidArgumentError(
+            f"panel_extents must be one [xmin, ymin, xmax, ymax] per panel, got {panel_extents!r}.",
+            next_step="pass one box per panel, row by row",
+        )
+    if len(panel_extents) != n_panels:
+        raise InvalidArgumentError(
+            f"panel_extents has {len(panel_extents)} box(es); the grid has {n_panels} panels.",
+            next_step="pass one [xmin, ymin, xmax, ymax] per panel, row by row",
+        )
+    boxes: list[list[float]] = []
+    for index, box in enumerate(panel_extents):
+        if isinstance(box, (str, bytes)) or not isinstance(box, (list, tuple)) or len(box) != 4:
+            raise InvalidArgumentError(
+                f"panel_extents[{index}] must be [xmin, ymin, xmax, ymax] with xmin < xmax and ymin < ymax.",
+                next_step="pass four finite numbers, xmin < xmax and ymin < ymax",
+            )
+        numbers: list[float] = []
+        for value in box:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise InvalidArgumentError(
+                    f"panel_extents[{index}] must be four finite numbers, got {value!r}.",
+                    next_step="pass four finite numbers, xmin < xmax and ymin < ymax",
+                )
+            numbers.append(float(value))
+        if not (numbers[0] < numbers[2] and numbers[1] < numbers[3]):
+            raise InvalidArgumentError(
+                f"panel_extents[{index}] must be [xmin, ymin, xmax, ymax] with xmin < xmax and ymin < ymax.",
+                next_step="pass four finite numbers, xmin < xmax and ymin < ymax",
+            )
+        boxes.append(numbers)
+    return boxes
 
 
 def _drop_keys_off_the_layer(columns: list[dict[str, float]], csv_keys: set[str], layer_keys: set[str],
@@ -3415,7 +4034,9 @@ def qgis_compose_panels(
     tick_format: Annotated[str, Field(description="Python format spec for tick labels, applied as format(value, spec): '.3g', '.1%', ',.0f'. Not a '{}' template.")] = ".3g",
     n_ticks: Annotated[int, Field(description="Evenly spaced ticks per colour bar, both ends included.", ge=2, le=11)] = 5,
     unmatched: Annotated[Literal["hide", "nodata"], Field(description='Zones without a value in a panel: "hide" (not drawn) or "nodata" (light grey, outside the scale).')] = "hide",
-    extent: Annotated[list[float] | None, Field(description="Map extent [xmin, ymin, xmax, ymax] in the zones' CRS, shared by every panel. Default: the zones drawn in any panel (hidden ones excluded) plus 2%.")] = None,
+    extent: Annotated[list[float] | None, Field(description="Map extent [xmin, ymin, xmax, ymax] in the zones' CRS, shared by every panel. Default: the zones drawn in any panel (hidden ones excluded) plus 2%. Not together with panel_extents.")] = None,
+    panel_extents: Annotated[list[list[float]] | None, Field(description="One [xmin, ymin, xmax, ymax] per panel, row by row, in the zones' CRS. Omitted, every panel shares extent. xmin < xmax and ymin < ymax.")] = None,
+    difference_columns: Annotated[list[str] | None, Field(description='Columns computed on the CSV and joined in before scaling: ["diff = sim - obs"]. Quotes around names are optional. Other expressions stay on qgis_expression.')] = None,
     width_mm: Annotated[float, Field(description="Page width in mm (160 suits a two-column journal figure).", gt=20.0, le=1000.0)] = 160.0,
     height_mm: Annotated[float, Field(description="Page height in mm.", gt=20.0, le=1000.0)] = 140.0,
     font_family: Annotated[str | None, Field(description="Font family for every label, e.g. 'Arial'. A family that is not installed is reported in fonts_missing and QGIS's default font is used.")] = None,
@@ -3430,23 +4051,38 @@ def qgis_compose_panels(
 
     When to use: a camera-ready comparison figure, e.g. simulated vs observed
     trip shares (columns) for origins and destinations (rows). Every panel draws
-    the same zones within one shared extent. Panels in a ``share_scale`` group use
-    one continuous colour scale and one colour bar. The scale runs from ``vmin``
-    to the ``cap_percentile`` percentile of the group's values. CSV rows whose key
-    no zone carries (a total row, another zone system) are not drawn and stay out
-    of every scale. Fonts, sizes and outline weight are set here, so the figure
-    needs no editing afterwards.
+    the same zones within one shared extent, unless ``panel_extents`` gives each
+    panel its own frame. Panels in a ``share_scale`` group use one continuous
+    colour scale and one colour bar. The scale runs from ``vmin`` to the
+    ``cap_percentile`` percentile of the group's values. ``difference_columns``
+    (``name = left - right``) are computed on the CSV and joined in before that
+    scale. CSV rows whose key no zone carries (a total row, another zone system)
+    are not drawn and stay out of every scale. Fonts, sizes and outline weight
+    are set here, so the figure needs no editing afterwards.
 
     Returns: ``PanelsResult`` with the output path, each group's scale (vmin,
     vmax, data max, capped), fonts that were not found, join counts (zones
-    without values, and CSV keys without zones with a sample), and the panel
-    and colour-bar boxes in mm.
+    without values, and CSV keys without zones with a sample), the panel
+    and colour-bar boxes in mm, the difference columns that were joined, and
+    the per-panel extents when those were set.
 
     Chains into: ``qgis_figures_to_pptx``.
     """
+    from qgis_mcp_workflows.errors import PluginOutdatedError
     from qgis_mcp_workflows.executors import get_executor
-    from qgis_mcp_workflows.panels import group_scales, panel_group, ticks
+    from qgis_mcp_workflows.panels import group_scales, panel_group, parse_difference_columns, ticks
 
+    try:
+        diffs = parse_difference_columns(difference_columns)
+    except ValueError as err:
+        raise InvalidArgumentError(
+            str(err),
+            next_step=(
+                "pass name = left - right (quotes optional), or compute another expression "
+                "with qgis_expression and write that column into the CSV"
+            ),
+        ) from None
+    boxes = _panel_extent_boxes(panel_extents, rows * cols, extent)
     n_groups = {"row": rows, "column": cols}.get(share_scale, 1)
     palettes = list(palettes) if palettes is not None else ["YlOrRd"]
     _refuse_bad_panel_arguments(
@@ -3457,7 +4093,7 @@ def qgis_compose_panels(
     abs_csv = user_abs(value_csv)
     _require_file("value_csv", abs_csv)
     abs_zones = user_abs(zones_path)
-    columns, csv_keys = _read_panel_columns(abs_csv, join_field, value_fields)
+    columns, csv_keys = _read_panel_columns(abs_csv, join_field, value_fields, diffs)
     columns, off_layer = _drop_keys_off_the_layer(columns, csv_keys, _layer_join_keys(abs_zones, join_field),
                                                   join_field)
     if not any(columns):
@@ -3497,7 +4133,11 @@ def qgis_compose_panels(
         "tick_size_pt": tick_size_pt, "outline_width_mm": outline_width_mm, "outline_color": outline_color,
         "dpi": dpi,
     }
+    if boxes is not None:
+        params["extents"] = boxes
     result = get_executor().dispatch("compose_panels", params, timeout=180)
+    if boxes is not None and "extents_applied" not in result:
+        raise PluginOutdatedError(_executor_transport_name())
     return PanelsResult(
         output_path=result["output_path"], format=result["format"], n_layers=result["n_layers"],
         items=result["items"], page_size_mm=result["page_size_mm"], n_panels=result["n_panels"],
@@ -3507,6 +4147,7 @@ def qgis_compose_panels(
         fonts_missing=result["fonts_missing"], n_matched=result["n_matched"], n_unmatched=result["n_unmatched"],
         n_csv_keys_unmatched=len(off_layer), csv_keys_unmatched_sample=off_layer[:_UNMATCHED_SAMPLE],
         panel_boxes_mm=result["panel_boxes_mm"], colorbar_boxes_mm=result["colorbar_boxes_mm"],
+        difference_columns=[diff.name for diff in diffs], panel_extents=boxes,
     )
 
 
@@ -3917,21 +4558,147 @@ def qgis_expression(
 
 
 # ---------------------------------------------------------------------------
+# Tools — Recipes (1)
+# ---------------------------------------------------------------------------
+
+
+class RecipeResult(BaseModel):
+    output_path: str
+    name: str
+    recipe: str
+    source: str
+    n_input: int
+    n_output: int
+    crs: str | None = None
+    source_crs: str | None = None
+    extent: list[float] | None = None
+
+
+_RECIPE_OUTPUTS = (".gpkg", ".geojson", ".json")
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_recipe(
+    name: Annotated[
+        str,
+        Field(description="Built-in recipe: reproject, centroids, explode, points_from_xy, or extent. Or a user recipe JSON stem when recipe_dir is set."),
+    ],
+    layer_path: Annotated[str, Field(description="Vector layer to read. The open project is left unchanged.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+    crs: Annotated[
+        str | None,
+        Field(description="Destination CRS for reproject. Optional CRS for points_from_xy (default EPSG:4326)."),
+    ] = None,
+    lon_field: Annotated[str | None, Field(description="Longitude field for points_from_xy.")] = None,
+    lat_field: Annotated[str | None, Field(description="Latitude field for points_from_xy.")] = None,
+) -> RecipeResult:
+    """Write a layer from a named recipe. Not Python, and not a sandbox.
+
+    When to use: reproject a layer, write centroids, explode parts, build
+    points from longitude and latitude, or write the layer extent as one
+    polygon. A calculated column or a filter is ``qgis_expression``. Anything
+    else stays on ``qgis_eval``, which remains available while
+    ``allow_python_eval`` is true.
+
+    Built-in names do not read ``recipe_dir``. A user recipe is
+    ``{recipe_dir}/{name}.json`` and stays off until that directory is set.
+    The file pins a built-in. It is not Python. A call that used a user
+    recipe is left out of ``qgis_export_session`` unless ``trust_foreign``
+    is true. Full mode only.
+
+    Returns: ``RecipeResult`` with ``name``, ``recipe``, ``source``,
+    ``n_input``, ``n_output``, and ``extent`` for the extent recipe.
+
+    Chains into: ``qgis_make_grid`` (pass ``extent``), ``qgis_spatial_join``,
+    ``qgis_render_choropleth``, ``qgis_expression``.
+    """
+    from qgis_mcp_workflows.errors import (
+        ExecutorError,
+        LayerNotFoundError,
+        RecipeCrsError,
+        RecipeEmptyError,
+    )
+    from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.recipes import RecipeRejected, resolve
+
+    abs_layer = user_abs(layer_path)
+    abs_out = user_abs(output_path)
+    if os.path.splitext(abs_out)[1].lower() not in _RECIPE_OUTPUTS:
+        raise InvalidArgumentError(
+            f"output_path {output_path!r} must end in .gpkg or .geojson.",
+            next_step="pass a .gpkg or .geojson output_path, then retry qgis_recipe",
+        )
+    try:
+        call = resolve(
+            name,
+            crs=crs,
+            lon_field=lon_field,
+            lat_field=lat_field,
+            directory=recipe_directory(),
+        )
+    except RecipeRejected as err:
+        raise InvalidArgumentError(str(err), next_step=err.next_step) from err
+    params: dict = {"recipe": call.recipe, "layer_path": abs_layer, "output_path": abs_out}
+    if call.crs is not None:
+        params["crs"] = call.crs
+    if call.lon_field is not None:
+        params["lon_field"] = call.lon_field
+    if call.lat_field is not None:
+        params["lat_field"] = call.lat_field
+    try:
+        result = get_executor().dispatch("run_recipe", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "RECIPE_CRS" in message:
+            raise RecipeCrsError(message) from err
+        if "RECIPE_EMPTY" in message:
+            raise RecipeEmptyError(message) from err
+        if "LAYER_NOT_FOUND" in message:
+            raise LayerNotFoundError(_layer_named_in(message, abs_layer)) from err
+        if "RECIPE_FIELDS" in message or "RECIPE_GEOMETRY" in message or "RECIPE_UNKNOWN" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="call qgis_layer_inspect on the layer, then retry qgis_recipe",
+            ) from err
+        raise
+    extent = result.get("extent")
+    if extent is not None:
+        extent = [float(value) for value in extent]
+    return RecipeResult(
+        output_path=user_abs(result["output_path"]),
+        name=call.name,
+        recipe=call.recipe,
+        source=call.source,
+        n_input=int(result.get("n_input") or 0),
+        n_output=int(result.get("n_output") or 0),
+        crs=(result.get("crs") or call.crs or None),
+        source_crs=result.get("source_crs") or None,
+        extent=extent,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tools — Escape hatch (1)
 # ---------------------------------------------------------------------------
 
 
 def qgis_eval(
-    code: Annotated[str, Field(description="PyQGIS source to execute. Try qgis_expression first for a calculated column or a filter.")],
+    code: Annotated[str, Field(description="PyQGIS source to execute. Try qgis_expression for a column or filter, and qgis_recipe for a named recipe.")],
     return_vars: Annotated[list[str] | None, Field(description="Local variable names to capture from the executed scope and return JSON-serialized.")] = None,
 ) -> EvalResult:
     """Execute arbitrary PyQGIS. Escape hatch — try qgis_expression first.
 
     When to use: a calculated column or a feature filter is qgis_expression,
-    not this tool. Use qgis_eval only when no workflow tool fits — an unusual
-    processing algorithm, a custom symbology that ``qgis_style_*`` can't
-    express, or interactive debugging. For routine work (load, style,
-    render, export, batch, deck) use the dedicated tools.
+    not this tool. A reproject, centroids, exploding parts, points from
+    longitude and latitude, or an extent polygon is qgis_recipe. Use
+    qgis_eval only when no workflow tool fits — an unusual processing
+    algorithm, a custom symbology that ``qgis_style_*`` can't express, or
+    interactive debugging. For routine work (load, style, render, export,
+    batch, deck) use the dedicated tools. There is no Python sandbox.
 
     ``allow_python_eval`` in ``~/.config/qgis-mcp-workflows/config.toml``
     defaults to true, so this tool stays available. Set the key false, or
@@ -4049,6 +4816,32 @@ def allow_python_eval() -> bool:
         return value
     logger.warning("ignoring allow_python_eval=%r in %s", value, config_path())
     return True
+
+
+def recipe_directory():
+    """User recipe directory, or None when it is off.
+
+    ``QGIS_MCP_WORKFLOWS_RECIPE_DIR`` wins over ``recipe_dir`` in config.toml.
+    An empty value, ``0``, ``off``, or ``false`` turns the directory off.
+    A missing key leaves it off. This does not follow ``allow_python_eval``.
+    """
+    from pathlib import Path
+
+    env = os.environ.get("QGIS_MCP_WORKFLOWS_RECIPE_DIR")
+    if env is not None:
+        text = env.strip()
+        if text.lower() in ("", "0", "off", "false"):
+            return None
+        return Path(text)
+    cfg = load_user_config()
+    if "recipe_dir" not in cfg:
+        return None
+    value = cfg["recipe_dir"]
+    if isinstance(value, str) and value.strip():
+        return Path(value.strip())
+    if value not in (None, False, ""):
+        logger.warning("ignoring recipe_dir=%r in %s", value, config_path())
+    return None
 
 
 def resolve_transport(cli: str | None) -> tuple[str, str]:

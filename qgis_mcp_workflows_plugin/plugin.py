@@ -122,6 +122,11 @@ from .compat import (
     LAYER_VECTOR,
     LAYOUT_MM,
     LAYOUT_SUCCESS,
+    LEGEND_TEXT_STYLES,
+    REF_LOWER_LEFT,
+    REF_LOWER_RIGHT,
+    REF_UPPER_LEFT,
+    REF_UPPER_RIGHT,
     PEN_NONE,
     PEN_SOLID,
     MSG_CRITICAL,
@@ -361,6 +366,12 @@ class QgisMCPServer(QObject):
                 "export_atlas": self.export_atlas,
                 "spatial_join": self.spatial_join,
                 "aggregate_to_zones": self.aggregate_to_zones,
+                "buffer": self.buffer,
+                "dissolve": self.dissolve,
+                "clip": self.clip,
+                "voronoi": self.voronoi,
+                "make_grid": self.make_grid,
+                "run_recipe": self.run_recipe,
                 "apply_expression": self.apply_expression,
                 "zonal_stats": self.zonal_stats,
                 "compose_layout": self.compose_layout,
@@ -4158,6 +4169,12 @@ class QgisMCPServer(QObject):
         scale_bar=True,
         north_arrow=True,
         dpi=300,
+        width_mm=None,
+        height_mm=None,
+        font_family=None,
+        title_size_pt=None,
+        legend_size_pt=None,
+        legend_corner=None,
         **kwargs,
     ):
         """Build a print layout programmatically and export it. v2 workflow tool.
@@ -4201,15 +4218,35 @@ class QgisMCPServer(QObject):
                 "a4_landscape": (297, 210), "a4_portrait": (210, 297),
                 "a3_landscape": (420, 297), "square": (250, 250),
             }
-            pw, ph = pages.get(page, (297, 210))
+            if width_mm is not None and height_mm is not None:
+                pw, ph = float(width_mm), float(height_mm)
+            elif width_mm is not None or height_mm is not None:
+                raise Exception(
+                    "compose_layout: width_mm and height_mm are set together. "
+                    "Next: pass both, or omit both to keep the page preset"
+                )
+            else:
+                pw, ph = pages.get(page, (297, 210))
             mm = LAYOUT_MM
+            missing = []
+            family_ok = False
+            if font_family:
+                if is_offscreen():
+                    register_system_fonts()
+                if font_family not in font_families():
+                    missing = [font_family]
+                else:
+                    family_ok = True
 
             layout = QgsPrintLayout(project)
             layout.initializeDefaults()
             layout.pageCollection().page(0).setPageSize(QgsLayoutSize(pw, ph, mm))
 
             margin = 8.0
-            title_h = 12.0 if title else 0.0
+            if title and title_size_pt is not None:
+                title_h = float(title_size_pt) * self._PT_MM * 1.8
+            else:
+                title_h = 12.0 if title else 0.0
             map_w = pw - 2 * margin
             map_h = ph - 2 * margin - title_h
 
@@ -4227,17 +4264,22 @@ class QgisMCPServer(QObject):
                 lbl.setText(str(title))
                 try:
                     from qgis.core import QgsTextFormat
+                    from qgis.PyQt.QtGui import QFont
 
                     tf = QgsTextFormat()
-                    fnt = tf.font()
+                    fnt = QFont()
                     fnt.setBold(True)
+                    if family_ok:
+                        fnt.setFamily(font_family)
                     tf.setFont(fnt)
-                    tf.setSize(18)
+                    tf.setSize(float(title_size_pt) if title_size_pt is not None else 18)
                     lbl.setTextFormat(tf)
                 except Exception:
                     font = lbl.font()
-                    font.setPointSize(18)
+                    font.setPointSize(int(title_size_pt) if title_size_pt is not None else 18)
                     font.setBold(True)
+                    if family_ok:
+                        font.setFamily(font_family)
                     lbl.setFont(font)
                 layout.addLayoutItem(lbl)
                 lbl.attemptMove(QgsLayoutPoint(margin, 3.0, mm))
@@ -4247,8 +4289,27 @@ class QgisMCPServer(QObject):
             if legend:
                 leg = QgsLayoutItemLegend(layout)
                 leg.setLinkedMap(m)
+                if font_family or legend_size_pt is not None:
+                    for component in LEGEND_TEXT_STYLES:
+                        legend_font = leg.styleFont(component)
+                        if family_ok:
+                            legend_font.setFamily(font_family)
+                        if legend_size_pt is not None:
+                            legend_font.setPointSizeF(float(legend_size_pt))
+                        leg.setStyleFont(component, legend_font)
                 layout.addLayoutItem(leg)
-                leg.attemptMove(QgsLayoutPoint(pw - margin - 46, margin + title_h + 4, mm))
+                if legend_corner:
+                    anchor, x, y = {
+                        "top_left": (REF_UPPER_LEFT, margin, margin + title_h + 4),
+                        "top_right": (REF_UPPER_RIGHT, pw - margin, margin + title_h + 4),
+                        "bottom_left": (REF_LOWER_LEFT, margin, ph - margin),
+                        "bottom_right": (REF_LOWER_RIGHT, pw - margin, ph - margin),
+                    }[legend_corner]
+                    leg.setReferencePoint(anchor)
+                    leg.attemptMove(QgsLayoutPoint(x, y, mm))
+                else:
+                    # v1.23 placement: inset from the top-right, not anchored on the corner.
+                    leg.attemptMove(QgsLayoutPoint(pw - margin - 46, margin + title_h + 4, mm))
                 items.append("legend")
 
             if scale_bar:
@@ -4258,6 +4319,10 @@ class QgisMCPServer(QObject):
                     sb.applyDefaultSize()
                 except Exception:
                     pass
+                if family_ok:
+                    bar_font = sb.font()
+                    bar_font.setFamily(font_family)
+                    sb.setFont(bar_font)
                 layout.addLayoutItem(sb)
                 sb.attemptMove(QgsLayoutPoint(margin + 2, ph - margin - 14, mm))
                 items.append("scalebar")
@@ -4294,13 +4359,29 @@ class QgisMCPServer(QObject):
             if res != LAYOUT_SUCCESS:
                 raise Exception(f"compose_layout export failed with code {res}")
 
-            return {
+            body = {
                 "output_path": output_path,
                 "format": fmt,
                 "n_layers": len(layers),
                 "items": items,
                 "page_size_mm": [float(pw), float(ph)],
             }
+            applied = {}
+            if width_mm is not None and height_mm is not None:
+                applied["width_mm"] = float(width_mm)
+                applied["height_mm"] = float(height_mm)
+            if font_family:
+                applied["font_family"] = font_family
+            if title_size_pt is not None:
+                applied["title_size_pt"] = float(title_size_pt)
+            if legend_size_pt is not None:
+                applied["legend_size_pt"] = float(legend_size_pt)
+            if legend_corner:
+                applied["legend_corner"] = legend_corner
+            if applied:
+                body["layout_applied"] = applied
+                body["fonts_missing"] = missing
+            return body
         finally:
             for tid in transient_ids:
                 try:
@@ -4446,6 +4527,7 @@ class QgisMCPServer(QObject):
         colorbar=True,
         colorbar_position="right",
         extent=None,
+        extents=None,
         width_mm=160.0,
         height_mm=140.0,
         font_family=None,
@@ -4495,7 +4577,19 @@ class QgisMCPServer(QObject):
                 transient_ids.append(layer.id())
                 layers.append(layer)
 
-            if extent is not None:
+            panel_rects = None
+            if extents is not None:
+                if len(extents) != len(layers):
+                    raise Exception(
+                        f"compose_panels: extents has {len(extents)} boxes for {len(layers)} panels. "
+                        "Next: pass one [xmin, ymin, xmax, ymax] per panel"
+                    )
+                panel_rects = [
+                    QgsRectangle(float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+                    for box in extents
+                ]
+                rect = panel_rects[0]
+            elif extent is not None:
                 rect = QgsRectangle(extent[0], extent[1], extent[2], extent[3])
             else:
                 # The zones drawn in any panel (hidden ones leave the frame), plus 2%.
@@ -4550,7 +4644,7 @@ class QgisMCPServer(QObject):
                 m.setLayers([layer])
                 m.setKeepLayerSet(True)
                 m.setCrs(zones.crs())
-                m.zoomToExtent(rect)
+                m.zoomToExtent(panel_rects[i] if panel_rects is not None else rect)
                 items.append(f"panel:{i}")
                 boxes.append([round(v, 3) for v in box])
 
@@ -4621,7 +4715,7 @@ class QgisMCPServer(QObject):
             if result != LAYOUT_SUCCESS:
                 raise Exception(f"compose_panels export failed with code {result}. "
                                 "Next: check the folder is writable and the file is not open elsewhere")
-            return {
+            body = {
                 "output_path": out,
                 "format": fmt,
                 "n_panels": len(layers),
@@ -4634,6 +4728,9 @@ class QgisMCPServer(QObject):
                 "panel_boxes_mm": boxes,
                 "colorbar_boxes_mm": bar_boxes,
             }
+            if extents is not None:
+                body["extents_applied"] = True
+            return body
         finally:
             for tid in transient_ids:
                 try:
@@ -5239,6 +5336,889 @@ class QgisMCPServer(QObject):
             "statistic": stat,
         }
 
+    def _load_vector(self, path, name):
+        layer = QgsVectorLayer(path, name, "ogr")
+        if not layer.isValid():
+            raise Exception("LAYER_NOT_FOUND: %s" % path)
+        return layer
+
+    def _unit_sources(self):
+        sources = []
+        try:
+            distance = getattr(Qgis, "DistanceUnit", None)
+            if distance is not None:
+                sources.append(distance)
+        except Exception:
+            pass
+        try:
+            from qgis.core import QgsUnitTypes
+
+            sources.append(QgsUnitTypes)
+        except Exception:
+            pass
+        return sources
+
+    def _distance_unit_key(self, crs):
+        """Map-unit key for plan_buffer: m, ft, deg, unknown, and the rest."""
+        try:
+            unit = crs.mapUnits()
+        except Exception:
+            return "unknown"
+        table = (
+            (("Meters", "DistanceMeters"), "m"),
+            (("Kilometers", "DistanceKilometers"), "km"),
+            (("Centimeters", "DistanceCentimeters"), "cm"),
+            (("Millimeters", "DistanceMillimeters"), "mm"),
+            (("Feet", "DistanceFeet"), "ft"),
+            (("Yards", "DistanceYards"), "yd"),
+            (("Miles", "DistanceMiles"), "mi"),
+            (("NauticalMiles", "DistanceNauticalMiles"), "nmi"),
+            (("Degrees", "DistanceDegrees"), "deg"),
+            (("FeetUs", "DistanceUSSurveyFeet", "DistanceFeetUs"), "us_ft"),
+        )
+        sources = self._unit_sources()
+        for names, key in table:
+            consts = []
+            for source in sources:
+                for name in names:
+                    const = getattr(source, name, None)
+                    if const is not None:
+                        consts.append(const)
+            if unit in consts:
+                return key
+        return "unknown"
+
+    def _centroid_lonlat(self, layer, crs):
+        """Layer-extent centroid in EPSG:4326, or (None, None) when it cannot be transformed."""
+        try:
+            ext = layer.extent()
+            if ext is None or ext.isEmpty():
+                return None, None
+            cx = (ext.xMinimum() + ext.xMaximum()) / 2.0
+            cy = (ext.yMinimum() + ext.yMaximum()) / 2.0
+        except Exception:
+            return None, None
+        dest = QgsCoordinateReferenceSystem("EPSG:4326")
+        if not dest.isValid():
+            return None, None
+        try:
+            if crs.authid() == "EPSG:4326":
+                return cx, cy
+            point = QgsCoordinateTransform(crs, dest, QgsProject.instance()).transform(
+                QgsPointXY(cx, cy)
+            )
+            return point.x(), point.y()
+        except Exception:
+            try:
+                if crs.isGeographic() and abs(cx) <= 180.0 and abs(cy) <= 90.0:
+                    return cx, cy
+            except Exception:
+                pass
+            return None, None
+
+    def _union_geometries(self, geoms):
+        cleaned = []
+        for geom in geoms:
+            if geom is None or geom.isEmpty():
+                continue
+            cleaned.append(QgsGeometry(geom))
+        if not cleaned:
+            return None
+        unary = getattr(QgsGeometry, "unaryUnion", None)
+        if unary is not None:
+            try:
+                merged = unary(cleaned)
+                if merged is not None and not merged.isEmpty():
+                    return merged
+            except Exception:
+                pass
+        merged = QgsGeometry(cleaned[0])
+        for geom in cleaned[1:]:
+            try:
+                merged = merged.combine(geom)
+            except Exception:
+                return None
+            if merged is None or merged.isEmpty():
+                return None
+        return merged
+
+    def _multi_wkb(self, layer, fallback):
+        try:
+            text = QgsWkbTypes.displayString(QgsWkbTypes.multiType(layer.wkbType()))
+            if text:
+                return text
+        except Exception:
+            pass
+        return fallback
+
+    def _force_multi(self, geom):
+        if geom is None or geom.isEmpty():
+            return None
+        geom = QgsGeometry(geom)
+        try:
+            if not QgsWkbTypes.isMultiType(geom.wkbType()):
+                geom.convertToMultiType()
+        except Exception:
+            pass
+        if geom.isEmpty():
+            return None
+        return geom
+
+    def _same_type_parts(self, geom, geom_type):
+        """Drop collection pieces that are not the input geometry type."""
+        if geom is None or geom.isEmpty():
+            return None
+        try:
+            flat = QgsWkbTypes.flatType(geom.wkbType())
+        except Exception:
+            return geom
+        collection = getattr(QgsWkbTypes, "GeometryCollection", None)
+        if collection is None or flat != collection:
+            return geom
+        try:
+            pieces = geom.asGeometryCollection()
+        except Exception:
+            return None
+        parts = []
+        for part in pieces:
+            if part is None or part.isEmpty():
+                continue
+            try:
+                if part.type() != geom_type:
+                    continue
+            except Exception:
+                continue
+            parts.append(part)
+        if not parts:
+            return None
+        if len(parts) == 1:
+            return parts[0]
+        collected = getattr(QgsGeometry, "collectGeometry", None)
+        if collected is not None:
+            try:
+                return collected(parts)
+            except Exception:
+                pass
+        merged = QgsGeometry(parts[0])
+        for part in parts[1:]:
+            merged = merged.combine(part)
+        return merged
+
+    def _geometry_memory(self, layer, name, wkb):
+        crs = layer.crs()
+        auth = ""
+        try:
+            auth = crs.authid() or ""
+        except Exception:
+            auth = ""
+        mem = QgsVectorLayer("%s?crs=%s" % (wkb, auth or "EPSG:4326"), name, "memory")
+        if not mem.isValid():
+            raise Exception("WRITE_FAILED: could not create memory layer %s" % name)
+        if crs is not None and crs.isValid():
+            try:
+                mem.setCrs(crs)
+            except Exception:
+                pass
+        provider = mem.dataProvider()
+        provider.addAttributes(layer.fields().toList())
+        mem.updateFields()
+        return mem
+
+    def _write_features(self, layer, features, output_path):
+        if features:
+            layer.dataProvider().addFeatures(features)
+        layer.updateExtents()
+        return self._write_vector_layer(layer, output_path)
+
+    def _feature_point(self, geom):
+        try:
+            if geom.isMultipart():
+                points = geom.asMultiPoint()
+                if not points:
+                    return None
+                return points[0]
+            return geom.asPoint()
+        except Exception:
+            return None
+
+    def buffer(self, path, output_path, distance_m):
+        """Buffer every feature. Geographic layers are measured in a projected CRS.
+
+        The written file is in the source CRS. This handler does not touch iface
+        and does not add the layer to the project.
+        """
+        from .geometry import (
+            BUFFER_SEGMENTS,
+            buffer_crs_detail,
+            buffer_empty_detail,
+            buffer_geometry_detail,
+            plan_buffer,
+        )
+
+        layer = self._load_vector(path, "_buffer_in")
+        geom_label = self._geom_label(layer)
+        crs_label = self._crs_label(layer)
+        if geom_label not in ("point", "line", "polygon"):
+            raise Exception(buffer_geometry_detail(geom_label, crs_label))
+        crs = layer.crs()
+        geographic = False
+        unit = "unknown"
+        lon, lat = None, None
+        if crs is not None and crs.isValid():
+            try:
+                geographic = bool(crs.isGeographic())
+            except Exception:
+                geographic = False
+            unit = self._distance_unit_key(crs)
+            lon, lat = self._centroid_lonlat(layer, crs)
+        plan = plan_buffer(crs_label, geographic, unit, lon, lat)
+        if plan is None:
+            raise Exception(buffer_crs_detail(crs_label))
+        measure_crs, metres_per_unit, reproject = plan
+        distance_map = float(distance_m) / float(metres_per_unit)
+        work = layer
+        back = None
+        if reproject:
+            measure = QgsCoordinateReferenceSystem(measure_crs)
+            if not measure.isValid():
+                raise Exception(buffer_crs_detail(crs_label))
+            work = self._memory_copy(layer, "_buffer_measure", dest_crs=measure)
+            back = QgsCoordinateTransform(measure, crs, QgsProject.instance())
+        out = self._geometry_memory(layer, "buffered", "MultiPolygon")
+        written = []
+        for feat in work.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            buffered = geom.buffer(distance_map, int(BUFFER_SEGMENTS))
+            if buffered is None or buffered.isEmpty():
+                continue
+            if back is not None:
+                try:
+                    buffered.transform(back)
+                except Exception as err:
+                    raise Exception(buffer_crs_detail(crs_label)) from err
+            buffered = self._force_multi(buffered)
+            if buffered is None:
+                continue
+            feature = QgsFeature(out.fields())
+            feature.setAttributes(list(feat.attributes()))
+            feature.setGeometry(buffered)
+            written.append(feature)
+        n_input = int(layer.featureCount())
+        if not written:
+            raise Exception(buffer_empty_detail(n_input, geom_label, crs_label))
+        path_written = self._write_features(out, written, output_path)
+        return {
+            "output_path": os.path.abspath(path_written),
+            "n_input": n_input,
+            "n_output": len(written),
+            "distance_m": float(distance_m),
+            "measure_crs": measure_crs,
+            "source_crs": crs_label,
+        }
+
+    def dissolve(self, path, output_path, field=None):
+        """One feature, or one feature per field value. Does not touch iface."""
+        from .geometry import dissolve_empty_detail, dissolve_groups, group_key
+
+        layer = self._load_vector(path, "_dissolve_in")
+        geom_label = self._geom_label(layer)
+        crs_label = self._crs_label(layer)
+        column = (field or "").strip()
+        if column:
+            names = [item.name() for item in layer.fields()]
+            if column not in names:
+                raise Exception("FIELD_NOT_FOUND: %s. Available: %s" % (column, names))
+        kept = []
+        for feat in layer.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            value = None
+            if column:
+                value = group_key(self._plain_value(feat[column]))
+            kept.append((list(feat.attributes()), QgsGeometry(geom), value))
+        n_input = int(layer.featureCount())
+        if not kept:
+            raise Exception(dissolve_empty_detail(n_input, geom_label, crs_label))
+        keys = None if not column else [item[2] for item in kept]
+        groups = dissolve_groups(len(kept), keys)
+        if geom_label == "line":
+            fallback = "MultiLineString"
+        elif geom_label == "point":
+            fallback = "MultiPoint"
+        else:
+            fallback = "MultiPolygon"
+        out = self._geometry_memory(layer, "dissolved", self._multi_wkb(layer, fallback))
+        written = []
+        for group in groups:
+            merged = self._union_geometries([kept[index][1] for index in group])
+            merged = self._force_multi(merged)
+            if merged is None:
+                continue
+            feature = QgsFeature(out.fields())
+            feature.setAttributes(list(kept[group[0]][0]))
+            feature.setGeometry(merged)
+            written.append(feature)
+        if not written:
+            raise Exception(dissolve_empty_detail(n_input, geom_label, crs_label))
+        path_written = self._write_features(out, written, output_path)
+        return {
+            "output_path": os.path.abspath(path_written),
+            "n_input": n_input,
+            "n_output": len(written),
+            "field": column or None,
+        }
+
+    def clip(self, path, overlay_path, output_path):
+        """Cut features to a polygon study area. Does not touch iface."""
+        from .geometry import clip_empty_detail, clip_geometry_detail, clip_roles_ok
+
+        src = self._load_vector(path, "_clip_in")
+        overlay = self._load_vector(overlay_path, "_clip_overlay")
+        src_geom = self._geom_label(src)
+        over_geom = self._geom_label(overlay)
+        src_crs = self._crs_label(src)
+        over_crs = self._crs_label(overlay)
+        if not clip_roles_ok(src_geom, over_geom):
+            raise Exception(clip_geometry_detail(src_geom, src_crs, over_geom, over_crs))
+        same_crs = False
+        try:
+            same_crs = overlay.crs() == src.crs()
+        except Exception:
+            same_crs = False
+        overlay_work = overlay
+        if not same_crs:
+            overlay_work = self._memory_copy(overlay, "_clip_overlay_reproj", dest_crs=src.crs())
+        parts = []
+        for feat in overlay_work.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            parts.append(QgsGeometry(geom))
+        n_input = int(src.featureCount())
+        n_overlay = int(overlay.featureCount())
+        mask = self._union_geometries(parts)
+        if mask is None:
+            raise Exception(
+                clip_empty_detail(n_input, src_geom, src_crs, n_overlay, over_geom, over_crs)
+            )
+        if src_geom == "line":
+            fallback = "MultiLineString"
+        elif src_geom == "point":
+            fallback = "MultiPoint"
+        else:
+            fallback = "MultiPolygon"
+        out = self._geometry_memory(src, "clipped", self._multi_wkb(src, fallback))
+        written = []
+        geom_type = src.geometryType()
+        for feat in src.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            try:
+                hits = geom.intersects(mask)
+            except Exception:
+                hits = False
+            if not hits:
+                continue
+            try:
+                cut = geom.intersection(mask)
+            except Exception:
+                continue
+            cut = self._same_type_parts(cut, geom_type)
+            cut = self._force_multi(cut)
+            if cut is None:
+                continue
+            feature = QgsFeature(out.fields())
+            feature.setAttributes(list(feat.attributes()))
+            feature.setGeometry(cut)
+            written.append(feature)
+        if not written:
+            raise Exception(
+                clip_empty_detail(n_input, src_geom, src_crs, n_overlay, over_geom, over_crs)
+            )
+        path_written = self._write_features(out, written, output_path)
+        return {
+            "output_path": os.path.abspath(path_written),
+            "n_input": n_input,
+            "n_overlay": n_overlay,
+            "n_output": len(written),
+        }
+
+    def voronoi(self, path, output_path):
+        """Write Voronoi polygons. Same QgsGeometry.voronoiDiagram as the catchment PNG.
+
+        Does not touch iface. The output CRS is the source CRS.
+        """
+        from .geometry import (
+            claim_cells,
+            voronoi_empty_detail,
+            voronoi_geometry_detail,
+            voronoi_points_detail,
+            voronoi_ready,
+        )
+
+        layer = self._load_vector(path, "_voronoi_in")
+        geom_label = self._geom_label(layer)
+        crs_label = self._crs_label(layer)
+        if geom_label != "point":
+            raise Exception(voronoi_geometry_detail(geom_label, crs_label))
+        sites = []
+        for feat in layer.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            point = self._feature_point(geom)
+            if point is None:
+                continue
+            sites.append((point, list(feat.attributes())))
+        n_input = len(sites)
+        if not voronoi_ready(n_input):
+            raise Exception(voronoi_points_detail(n_input, geom_label, crs_label))
+        diagram = QgsGeometry.fromMultiPointXY([site[0] for site in sites]).voronoiDiagram()
+        if diagram is None or diagram.isEmpty():
+            raise Exception(voronoi_empty_detail(crs_label))
+        cells = []
+        for part in diagram.asGeometryCollection():
+            if part is not None and not part.isEmpty():
+                cells.append(part)
+        if not cells:
+            raise Exception(voronoi_empty_detail(crs_label))
+        pairs = []
+        for point_i, (point, _attrs) in enumerate(sites):
+            located = QgsGeometry.fromPointXY(point)
+            for cell_i, cell in enumerate(cells):
+                try:
+                    hit = cell.intersects(located)
+                except Exception:
+                    hit = False
+                if hit:
+                    pairs.append((point_i, cell_i))
+                    break
+        claimed = claim_cells(n_input, pairs)
+        matched = set()
+        used = set()
+        for point_i, cell_i in claimed:
+            matched.add(point_i)
+            used.add(cell_i)
+        # A point that met a cell already claimed by an earlier point shares
+        # that cell. Only a point that met no cell at all falls back to the
+        # nearest unclaimed cell.
+        seen = set()
+        for point_i, _cell_i in pairs:
+            seen.add(point_i)
+        extra = []
+        for point_i, (point, _attrs) in enumerate(sites):
+            if point_i in matched or point_i in seen:
+                continue
+            best = None
+            best_d = None
+            for cell_i, cell in enumerate(cells):
+                if cell_i in used:
+                    continue
+                try:
+                    centre = cell.centroid().asPoint()
+                    dx = centre.x() - point.x()
+                    dy = centre.y() - point.y()
+                    dist = dx * dx + dy * dy
+                except Exception:
+                    continue
+                if best_d is None or dist < best_d:
+                    best_d = dist
+                    best = cell_i
+            if best is None:
+                continue
+            extra.append((point_i, best))
+            used.add(best)
+        if extra:
+            claimed = claim_cells(n_input, pairs + extra)
+        out = self._geometry_memory(layer, "voronoi", "MultiPolygon")
+        written = []
+        for point_i, cell_i in claimed:
+            geom = self._force_multi(cells[cell_i])
+            if geom is None:
+                continue
+            feature = QgsFeature(out.fields())
+            feature.setAttributes(list(sites[point_i][1]))
+            feature.setGeometry(geom)
+            written.append(feature)
+        if not written:
+            raise Exception(voronoi_empty_detail(crs_label))
+        path_written = self._write_features(out, written, output_path)
+        return {
+            "output_path": os.path.abspath(path_written),
+            "n_input": n_input,
+            "n_output": len(written),
+        }
+
+    def make_grid(self, extent, output_path, cell_m, crs):
+        """Write a metre fishnet. Does not touch iface or the open project.
+
+        Cells are square polygons aligned to the CRS origin. This is not the
+        JIS L3 mesh. The caller chooses output_path.
+        """
+        from .grid import (
+            ID_FIELD,
+            MAX_CELLS,
+            cell_box,
+            cell_id,
+            grid_crs_detail,
+            grid_too_many_detail,
+            plan_grid,
+        )
+
+        text = crs if isinstance(crs, str) else ""
+        text = text.strip()
+        crs_obj = QgsCoordinateReferenceSystem(text)
+        if not crs_obj.isValid():
+            factory = getattr(QgsCoordinateReferenceSystem, "fromUserInput", None)
+            if callable(factory):
+                try:
+                    made = factory(text)
+                except Exception:
+                    made = None
+                if made is not None and made.isValid():
+                    crs_obj = made
+        if not crs_obj.isValid():
+            raise Exception(grid_crs_detail(text or "unknown", "invalid"))
+        unit = self._distance_unit_key(crs_obj)
+        if unit != "m":
+            label = ""
+            try:
+                label = crs_obj.authid() or ""
+            except Exception:
+                label = ""
+            raise Exception(grid_crs_detail(label or text or "unknown", unit))
+        plan = plan_grid(extent, cell_m)
+        if plan is None:
+            raise Exception(
+                "GRID_EXTENT: extent must be four finite numbers "
+                "[xmin, ymin, xmax, ymax] with xmin < xmax and ymin < ymax, "
+                "and cell_m must be metres greater than 0."
+            )
+        if plan["n_cells"] > MAX_CELLS:
+            raise Exception(grid_too_many_detail(plan))
+        auth = ""
+        try:
+            auth = crs_obj.authid() or ""
+        except Exception:
+            auth = ""
+        label = auth or text
+        uri = f"Polygon?crs={auth}" if auth else "Polygon"
+        mem = QgsVectorLayer(uri, "grid", "memory")
+        if not mem.isValid():
+            raise Exception("WRITE_FAILED: could not create the fishnet layer")
+        with contextlib.suppress(Exception):
+            mem.setCrs(crs_obj)
+        long_type = getattr(QVariant, "LongLong", QVariant.Int)
+        provider = mem.dataProvider()
+        if not provider.addAttributes(
+            [
+                QgsField(ID_FIELD, QVariant.String),
+                QgsField("row", long_type),
+                QgsField("col", long_type),
+            ]
+        ):
+            raise Exception("WRITE_FAILED: could not add fishnet fields")
+        mem.updateFields()
+        fields = mem.fields()
+        step = plan["cell_m"]
+        features = []
+        for row in range(plan["row0"], plan["row1"]):
+            for col in range(plan["col0"], plan["col1"]):
+                x0, y0, x1, y1 = cell_box(col, row, step)
+                ring = [
+                    QgsPointXY(x0, y0),
+                    QgsPointXY(x1, y0),
+                    QgsPointXY(x1, y1),
+                    QgsPointXY(x0, y1),
+                    QgsPointXY(x0, y0),
+                ]
+                geom = QgsGeometry.fromPolygonXY([ring])
+                if geom is None or geom.isEmpty():
+                    raise Exception(f"WRITE_FAILED: could not build fishnet cell {cell_id(col, row)}")
+                feature = QgsFeature(fields)
+                feature.setAttributes([cell_id(col, row), row, col])
+                feature.setGeometry(geom)
+                features.append(feature)
+        if len(features) != plan["n_cells"]:
+            raise Exception(grid_too_many_detail(plan))
+        path_written = self._write_features(mem, features, output_path)
+        return {
+            "output_path": os.path.abspath(path_written),
+            "n_output": len(features),
+            "n_rows": plan["n_rows"],
+            "n_cols": plan["n_cols"],
+            "cell_m": step,
+            "crs": label,
+            "extent": [float(value) for value in plan["extent"]],
+            "grid_extent": [float(value) for value in plan["grid_extent"]],
+            "id_field": ID_FIELD,
+        }
+
+    def run_recipe(self, recipe, layer_path, output_path, crs=None, lon_field=None, lat_field=None):
+        """Write one named recipe. Does not touch the canvas or the open project.
+
+        The caller passes a recipe name. This method does not execute user Python.
+        """
+        name = recipe if isinstance(recipe, str) else ""
+        if name == "reproject":
+            return self._recipe_reproject(layer_path, output_path, crs)
+        if name == "centroids":
+            return self._recipe_centroids(layer_path, output_path)
+        if name == "explode":
+            return self._recipe_explode(layer_path, output_path)
+        if name == "points_from_xy":
+            return self._recipe_points(layer_path, output_path, crs, lon_field, lat_field)
+        if name == "extent":
+            return self._recipe_extent(layer_path, output_path)
+        raise Exception("RECIPE_UNKNOWN: %s" % name)
+
+    def _recipe_result(self, path, recipe, n_input, n_output, crs, source_crs, extent):
+        return {
+            "output_path": os.path.abspath(path),
+            "n_input": int(n_input),
+            "n_output": int(n_output),
+            "recipe": recipe,
+            "crs": crs,
+            "source_crs": source_crs,
+            "extent": extent,
+        }
+
+    def _recipe_count(self, layer):
+        try:
+            count = int(layer.featureCount())
+        except Exception:
+            count = -1
+        if count >= 0:
+            return count
+        return sum(1 for _feat in layer.getFeatures())
+
+    def _recipe_crs(self, text):
+        from .recipes import crs_detail
+
+        crs = QgsCoordinateReferenceSystem(text)
+        if not crs.isValid():
+            factory = getattr(QgsCoordinateReferenceSystem, "fromUserInput", None)
+            made = None
+            if callable(factory):
+                try:
+                    made = factory(text)
+                except Exception:
+                    made = None
+            if made is not None and made.isValid():
+                crs = made
+        if not crs.isValid():
+            raise Exception(crs_detail(text or "unknown"))
+        return crs
+
+    def _recipe_auth(self, crs_obj, fallback):
+        try:
+            return crs_obj.authid() or fallback
+        except Exception:
+            return fallback
+
+    def _recipe_parts(self, geometry):
+        if geometry is None or geometry.isEmpty():
+            return []
+        try:
+            multi = bool(geometry.isMultipart())
+        except Exception:
+            multi = False
+        if not multi:
+            return [QgsGeometry(geometry)]
+        try:
+            parts = geometry.asGeometryCollection()
+        except Exception:
+            parts = None
+        if not parts:
+            return [QgsGeometry(geometry)]
+        kept = []
+        for part in parts:
+            if part is None or part.isEmpty():
+                continue
+            kept.append(QgsGeometry(part))
+        return kept or [QgsGeometry(geometry)]
+
+    def _recipe_layer(self, wkb, crs_obj, name, fields):
+        auth = self._recipe_auth(crs_obj, "EPSG:4326")
+        mem = QgsVectorLayer("%s?crs=%s" % (wkb, auth), name, "memory")
+        if not mem.isValid():
+            raise Exception("WRITE_FAILED: could not create memory layer %s" % name)
+        try:
+            mem.setCrs(crs_obj)
+        except Exception:
+            pass
+        if fields is not None:
+            provider = mem.dataProvider()
+            provider.addAttributes(fields.toList())
+            mem.updateFields()
+        return mem
+
+    def _recipe_box(self, rect):
+        if rect is None:
+            return None
+        try:
+            empty = rect.isEmpty()
+        except Exception:
+            return None
+        if empty:
+            return None
+        box = [rect.xMinimum(), rect.yMinimum(), rect.xMaximum(), rect.yMaximum()]
+        if any(not isinstance(value, (int, float)) or value != value for value in box):
+            return None
+        if box[0] >= box[2] or box[1] >= box[3]:
+            return None
+        return [float(value) for value in box]
+
+    def _recipe_polygon(self, rect, box):
+        factory = getattr(QgsGeometry, "fromRect", None)
+        poly = factory(rect) if callable(factory) else None
+        if poly is None or poly.isEmpty():
+            ring = [
+                QgsPointXY(box[0], box[1]),
+                QgsPointXY(box[2], box[1]),
+                QgsPointXY(box[2], box[3]),
+                QgsPointXY(box[0], box[3]),
+                QgsPointXY(box[0], box[1]),
+            ]
+            poly = QgsGeometry.fromPolygonXY([ring])
+        return poly
+
+    def _recipe_reproject(self, layer_path, output_path, crs):
+        from .recipes import empty_detail, geometry_detail
+
+        layer = self._load_vector(layer_path, "_recipe_in")
+        geom = self._geom_label(layer)
+        source = self._crs_label(layer)
+        if geom not in ("point", "line", "polygon"):
+            raise Exception(geometry_detail(geom, source))
+        text = (crs or "").strip()
+        dest = self._recipe_crs(text)
+        n_input = self._recipe_count(layer)
+        if n_input == 0:
+            raise Exception(empty_detail("reproject", n_input, source))
+        try:
+            work = self._memory_copy(layer, "_recipe_reproject", dest_crs=dest)
+        except Exception as err:
+            from .recipes import crs_detail
+
+            raise Exception(crs_detail(text)) from err
+        written = self._write_vector_layer(work, output_path)
+        return self._recipe_result(
+            written, "reproject", n_input, self._recipe_count(work), self._recipe_auth(dest, text), source, None
+        )
+
+    def _recipe_centroids(self, layer_path, output_path):
+        from .recipes import empty_detail, geometry_detail
+
+        layer = self._load_vector(layer_path, "_recipe_in")
+        geom = self._geom_label(layer)
+        source = self._crs_label(layer)
+        if geom not in ("point", "line", "polygon"):
+            raise Exception(geometry_detail(geom, source))
+        out = self._geometry_memory(layer, "centroids", "Point")
+        written = []
+        n_input = 0
+        for feat in layer.getFeatures():
+            n_input += 1
+            geometry = feat.geometry()
+            if geometry is None or geometry.isEmpty():
+                continue
+            try:
+                point = geometry.centroid()
+            except Exception:
+                point = None
+            if point is None or point.isEmpty():
+                continue
+            feature = QgsFeature(out.fields())
+            feature.setAttributes(list(feat.attributes()))
+            feature.setGeometry(point)
+            written.append(feature)
+        if not written:
+            raise Exception(empty_detail("centroids", n_input, source))
+        path = self._write_features(out, written, output_path)
+        return self._recipe_result(path, "centroids", n_input, len(written), source, source, None)
+
+    def _recipe_explode(self, layer_path, output_path):
+        from .recipes import empty_detail, geometry_detail
+
+        layer = self._load_vector(layer_path, "_recipe_in")
+        geom = self._geom_label(layer)
+        source = self._crs_label(layer)
+        wkb = {"point": "Point", "line": "LineString", "polygon": "Polygon"}.get(geom)
+        if wkb is None:
+            raise Exception(geometry_detail(geom, source))
+        out = self._geometry_memory(layer, "explode", wkb)
+        written = []
+        n_input = 0
+        for feat in layer.getFeatures():
+            n_input += 1
+            for part in self._recipe_parts(feat.geometry()):
+                feature = QgsFeature(out.fields())
+                feature.setAttributes(list(feat.attributes()))
+                feature.setGeometry(part)
+                written.append(feature)
+        if not written:
+            raise Exception(empty_detail("explode", n_input, source))
+        path = self._write_features(out, written, output_path)
+        return self._recipe_result(path, "explode", n_input, len(written), source, source, None)
+
+    def _recipe_points(self, layer_path, output_path, crs, lon_field, lat_field):
+        from .recipes import empty_detail, fields_detail, finite_number
+
+        layer = self._load_vector(layer_path, "_recipe_in")
+        names = [field.name() for field in layer.fields()]
+        missing = [name for name in (lon_field, lat_field) if name not in names]
+        if missing:
+            raise Exception(fields_detail(missing[0], names))
+        text = (crs or "EPSG:4326").strip()
+        dest = self._recipe_crs(text)
+        dest_label = self._recipe_auth(dest, text)
+        mem = self._recipe_layer("Point", dest, "points_from_xy", layer.fields())
+        written = []
+        n_input = 0
+        for feat in layer.getFeatures():
+            n_input += 1
+            lon = finite_number(self._plain_value(feat[lon_field]))
+            lat = finite_number(self._plain_value(feat[lat_field]))
+            if lon is None or lat is None:
+                continue
+            feature = QgsFeature(mem.fields())
+            feature.setAttributes(list(feat.attributes()))
+            feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(lon, lat)))
+            written.append(feature)
+        if not written:
+            raise Exception(empty_detail("points_from_xy", n_input, dest_label))
+        path = self._write_features(mem, written, output_path)
+        return self._recipe_result(
+            path, "points_from_xy", n_input, len(written), dest_label, self._crs_label(layer), None
+        )
+
+    def _recipe_extent(self, layer_path, output_path):
+        from .recipes import empty_detail, geometry_detail
+
+        layer = self._load_vector(layer_path, "_recipe_in")
+        geom = self._geom_label(layer)
+        source = self._crs_label(layer)
+        if geom not in ("point", "line", "polygon"):
+            raise Exception(geometry_detail(geom, source))
+        n_input = self._recipe_count(layer)
+        rect = layer.extent()
+        box = self._recipe_box(rect)
+        if box is None:
+            raise Exception(empty_detail("extent", n_input, source))
+        poly = self._recipe_polygon(rect, box)
+        if poly is None or poly.isEmpty():
+            raise Exception(empty_detail("extent", n_input, source))
+        out = self._recipe_layer("Polygon", layer.crs(), "extent", None)
+        feature = QgsFeature(out.fields())
+        feature.setGeometry(poly)
+        path = self._write_features(out, [feature], output_path)
+        return self._recipe_result(path, "extent", n_input, 1, source, source, box)
+
     def _expression_context(self, layer):
         """Fields, geometry, and this layer. Does not load python/expressions.
 
@@ -5488,6 +6468,7 @@ class QgisMCPServer(QObject):
             "stdev": inner.StDev,
             "min": inner.Min,
             "max": inner.Max,
+            "majority": inner.Majority,
         }
         flags = 0
         for name in stat_names:
@@ -5499,6 +6480,178 @@ class QgisMCPServer(QObject):
                 )
             flags |= mapping[key]
         return flags
+
+    def _histogram_center_inside(self, geom, engine, x, y):
+        point = QgsGeometry.fromPointXY(QgsPointXY(x, y))
+        if engine is not None:
+            try:
+                return bool(engine.contains(point.constGet()))
+            except Exception:
+                pass
+        return bool(geom.contains(point))
+
+    def _histogram_window(self, bbox, extent, xres, yres, ncols, nrows):
+        """Native cell window covering ``bbox``, padded by one cell and clamped."""
+        import math
+
+        c0 = int(math.floor((bbox.xMinimum() - extent.xMinimum()) / xres)) - 1
+        c1 = int(math.floor((bbox.xMaximum() - extent.xMinimum()) / xres)) + 1
+        r0 = int(math.floor((extent.yMaximum() - bbox.yMaximum()) / yres)) - 1
+        r1 = int(math.floor((extent.yMaximum() - bbox.yMinimum()) / yres)) + 1
+        if c0 < 0:
+            c0 = 0
+        if r0 < 0:
+            r0 = 0
+        if c1 >= ncols:
+            c1 = ncols - 1
+        if r1 >= nrows:
+            r1 = nrows - 1
+        if c1 < c0 or r1 < r0:
+            return None
+        return c0, r0, c1, r1
+
+    def _histogram_cell_counts(
+        self, block, width, height, block_xmin, block_ymax, xres, yres, geom, engine, has_nodata, nodata, precise
+    ):
+        """Count non-nodata cell values inside ``geom``.
+
+        ``precise`` is False for a cell-center test. It is True when no center
+        fell in the polygon: a cell then counts if its rectangle intersects.
+        """
+        counts = {}
+        saw_data = False
+        for row in range(height):
+            for col in range(width):
+                if block.isNoData(row, col):
+                    continue
+                value = block.value(row, col)
+                if has_nodata and nodata is not None and value == float(nodata):
+                    continue
+                saw_data = True
+                if precise:
+                    cell = QgsRectangle(
+                        block_xmin + col * xres,
+                        block_ymax - (row + 1) * yres,
+                        block_xmin + (col + 1) * xres,
+                        block_ymax - row * yres,
+                    )
+                    if not geom.intersects(QgsGeometry.fromRect(cell)):
+                        continue
+                else:
+                    cx = block_xmin + (col + 0.5) * xres
+                    cy = block_ymax - (row + 0.5) * yres
+                    if not self._histogram_center_inside(geom, engine, cx, cy):
+                        continue
+                counts[value] = counts.get(value, 0) + 1
+        return counts, saw_data
+
+    def _zone_class_counts(self, zones_layer, raster_layer, band):
+        """Per-zone ``{cell value: count}`` for cells inside each polygon.
+
+        Zones are already in the raster CRS. A class that occurs only outside
+        these polygons is absent from every dict, so it gets no column.
+        """
+        provider = raster_layer.dataProvider()
+        if provider is None:
+            raise Exception("ZONAL_FAILED: raster has no data provider")
+        band_count = int(raster_layer.bandCount() or 0)
+        if band < 1 or band > band_count:
+            raise Exception("ZONAL_FAILED: raster_band %s is outside 1..%s" % (band, band_count))
+        has_nodata = False
+        nodata = None
+        try:
+            has_nodata = bool(provider.sourceHasNoDataValue(band))
+        except Exception:
+            has_nodata = False
+        if has_nodata:
+            nodata = provider.sourceNoDataValue(band)
+        extent = raster_layer.extent()
+        ncols = int(provider.xSize() or 0)
+        nrows = int(provider.ySize() or 0)
+        if ncols <= 0 or nrows <= 0 or extent.isEmpty():
+            raise Exception("ZONAL_FAILED: raster has no cells to summarize")
+        xres = extent.width() / float(ncols)
+        yres = extent.height() / float(nrows)
+        if xres <= 0 or yres <= 0:
+            raise Exception("ZONAL_FAILED: raster has a zero cell size")
+
+        fids = []
+        zone_counts = []
+        for feat in zones_layer.getFeatures():
+            fids.append(feat.id())
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                zone_counts.append({})
+                continue
+            bbox = geom.boundingBox().intersect(extent)
+            if bbox.isEmpty():
+                zone_counts.append({})
+                continue
+            window = self._histogram_window(bbox, extent, xres, yres, ncols, nrows)
+            if window is None:
+                zone_counts.append({})
+                continue
+            c0, r0, c1, r1 = window
+            width = c1 - c0 + 1
+            height = r1 - r0 + 1
+            block_xmin = extent.xMinimum() + c0 * xres
+            block_ymax = extent.yMaximum() - r0 * yres
+            block_extent = QgsRectangle(
+                block_xmin,
+                extent.yMaximum() - (r1 + 1) * yres,
+                extent.xMinimum() + (c1 + 1) * xres,
+                block_ymax,
+            )
+            block = provider.block(band, block_extent, width, height)
+            if block is None or not block.isValid():
+                raise Exception("ZONAL_FAILED: could not read raster band %s" % band)
+            engine = None
+            try:
+                engine = QgsGeometry.createGeometryEngine(geom.constGet())
+                engine.prepareGeometry()
+            except Exception:
+                engine = None
+            counts, saw_data = self._histogram_cell_counts(
+                block, width, height, block_xmin, block_ymax, xres, yres, geom, engine, has_nodata, nodata, False
+            )
+            # A polygon smaller than a cell contains no center. Count the cell
+            # when its rectangle intersects the polygon. Skip huge windows: a
+            # ward that contains centers never reaches this, and an all-nodata
+            # window has saw_data False.
+            if not counts and saw_data and width * height <= 100000:
+                counts, _ = self._histogram_cell_counts(
+                    block, width, height, block_xmin, block_ymax, xres, yres, geom, engine, has_nodata, nodata, True
+                )
+            zone_counts.append(counts)
+        return fids, zone_counts, nodata, has_nodata
+
+    def _write_histogram_fields(self, layer, fids, names, rows):
+        if not names:
+            return
+        existing = [field.name().lower() for field in layer.fields()]
+        for name in names:
+            if name.lower() in existing:
+                raise Exception(
+                    "ZONAL_FAILED: histogram field %r already exists. Pass a different prefix." % (name,)
+                )
+        qtype = getattr(QVariant, "LongLong", QVariant.Int)
+        provider = layer.dataProvider()
+        if not provider.addAttributes([QgsField(name, qtype) for name in names]):
+            raise Exception("ZONAL_FAILED: could not add histogram fields %s" % ", ".join(names))
+        layer.updateFields()
+        indexes = []
+        for name in names:
+            index = layer.fields().indexFromName(name)
+            if index < 0:
+                raise Exception("ZONAL_FAILED: histogram field %r was not added" % (name,))
+            indexes.append(index)
+        changes = {}
+        for fid, row in zip(fids, rows):
+            changes[fid] = {}
+            for index, value in zip(indexes, row):
+                changes[fid][index] = int(value)
+        if changes and not provider.changeAttributeValues(changes):
+            raise Exception("ZONAL_FAILED: could not write histogram counts")
 
     def zonal_stats(
         self,
@@ -5513,15 +6666,23 @@ class QgisMCPServer(QObject):
         """Raster statistics per polygon. Atomic load + stats + write; no Processing.
 
         GitHub analogue: nkarasiak ``zonal_statistics``. Uses ``QgsZonalStatistics``
-        from qgis.analysis (core), so it works headless. Typical PFLOW use: JAXA
-        LULC raster summarized onto MFS / prefecture polygons.
+        from qgis.analysis (core), so it works headless. ``mean`` stays the numeric
+        mean. ``majority`` is the most frequent cell value. ``histogram`` adds one
+        integer column per class id that occurs inside the zones. Typical PFLOW
+        use: JAXA LULC raster summarized onto MFS / prefecture polygons.
         """
         from qgis.analysis import QgsZonalStatistics
 
-        if not stats:
-            stats = ["count", "sum", "mean"]
+        from .zonal_histogram import histogram_columns, normalize_stats
+
+        try:
+            stats = normalize_stats(stats)
+        except ValueError as err:
+            raise Exception("ZONAL_FAILED: %s" % err)
         prefix = prefix or ""
         band = int(raster_band or 1)
+        numeric_stats = [name for name in stats if name != "histogram"]
+        want_histogram = "histogram" in stats
 
         zones = QgsVectorLayer(zones_path, "_zs_zones", "ogr")
         if not zones.isValid():
@@ -5546,12 +6707,22 @@ class QgisMCPServer(QObject):
             transient_ids.append(zones_mem.id())
             project.addMapLayer(raster, False)
             transient_ids.append(raster.id())
-            flags = self._zonal_stat_flags(stats)
-            zs = QgsZonalStatistics(zones_mem, raster, prefix, band, flags)
-            result = zs.calculateStatistics(None)
-            success = getattr(QgsZonalStatistics, "Success", 0)
-            if result not in (success, 0, None):
-                raise Exception("ZONAL_FAILED: QgsZonalStatistics returned %s" % result)
+            if numeric_stats:
+                flags = self._zonal_stat_flags(numeric_stats)
+                zs = QgsZonalStatistics(zones_mem, raster, prefix, band, flags)
+                result = zs.calculateStatistics(None)
+                success = getattr(QgsZonalStatistics, "Success", 0)
+                if result not in (success, 0, None):
+                    raise Exception("ZONAL_FAILED: QgsZonalStatistics returned %s" % result)
+            if want_histogram:
+                fids, zone_counts, nodata, has_nodata = self._zone_class_counts(zones_mem, raster, band)
+                try:
+                    names, rows = histogram_columns(
+                        zone_counts, prefix, nodata=nodata, has_nodata=has_nodata
+                    )
+                except ValueError as err:
+                    raise Exception("ZONAL_FAILED: %s" % err)
+                self._write_histogram_fields(zones_mem, fids, names, rows)
         finally:
             for tid in transient_ids:
                 try:

@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`qgis-mcp-workflows` (v1.21.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
+`qgis-mcp-workflows` (v1.26.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
 
 Key differences from upstream:
-- 29 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
+- 35 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
 - Two transports: `plugin` (TCP socket → running QGIS) and `headless` (PyQGIS subprocess), selected via `--transport=auto|plugin|headless`.
 - Plugin folder: `qgis_mcp_workflows_plugin/`. Python package: `qgis-mcp-workflows` (importable as `qgis_mcp_workflows`). Default socket port: **9877** (vs upstream 9876). Both servers can run side-by-side.
 
@@ -81,9 +81,10 @@ uv tool run ruff check src/ tests/
 | `QGIS_MCP_WORKFLOWS_PROVENANCE` | `1` | `0` disables `<file>.provenance.json` sidecars (read per call) |
 | `QGIS_MCP_WORKFLOWS_PROVENANCE_HASH_MAX_MB` | `256` | Inputs above this get size + mtime instead of sha256 |
 | `DROPBOX_ROOT` | (per machine) | Provenance stores paths under it as `${DROPBOX_ROOT}/…`; `install.py` passes it into GUI client configs |
-| `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` | `1` | `0` refuses `qgis_eval`. Overrides `allow_python_eval` in `config.toml` (default true). No CLI flag |
+| `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` | `1` | `0` refuses `qgis_eval`. Overrides `allow_python_eval` in `config.toml` (default true). No CLI flag. Does not disable `qgis_recipe` |
+| `QGIS_MCP_WORKFLOWS_RECIPE_DIR` | (off) | User recipe JSON directory. Overrides `recipe_dir` in `config.toml`. Empty, `0`, `off`, or `false` leaves user recipes off |
 
-## MCP Tools (30 total as of v1.20; 5 grouped tools in compound mode. See `docs/DESIGN.md` §4 for full signatures.)
+## MCP Tools (36 total as of v1.26; 5 grouped tools in compound mode. See `docs/DESIGN.md` §4 for full signatures.)
 
 | Tool | Status | Notes |
 |---|---|---|
@@ -102,8 +103,8 @@ uv tool run ruff check src/ tests/
 | `qgis_render_diagram_map` | ✅ v1.4 | Chart-in-map: pie/bar `QgsDiagramRenderer` glyphs per feature, one slice/bar per `value_field`; optional tile basemap. |
 | `qgis_render_catchment` | ✅ v1.4 | Voronoi (Thiessen) service-area catchments around point features via `QgsGeometry.voronoiDiagram` (no Processing dep). |
 | `qgis_export_layout` | ✅ v0.5 | PNG/PDF/SVG via `QgsLayoutExporter`; loads `qgz_path` internally if not already loaded; `LayoutNotFoundError` when layout missing |
-| `qgis_compose_layout` | ✅ v1.4 | Programmatic `QgsPrintLayout`: titled map panel + linked legend / scale bar / north arrow, export PNG/PDF/SVG. Complements `export_layout` (which only exports pre-authored `.qgz`). |
-| `qgis_compose_panels` | ✅ v1.16 | Rows × cols grid of one polygon layer, a panel per CSV column, on linked colour scales (`share_scale` row/column/all, `cap_percentile` with a `≥` top tick) with one colour bar per group. Fonts, sizes, outline weight and page mm are arguments; PDF/SVG stay vector. Scales computed server-side (`panels.py`); plugin handler `compose_panels`. v1.16.2: the layer's keys come first (`get_field_values`), so CSV keys no zone carries stay out of every scale and are reported (`n_csv_keys_unmatched`). Full mode only. |
+| `qgis_compose_layout` | ✅ v1.4 / v1.24 | Programmatic `QgsPrintLayout`: titled map panel + linked legend / scale bar / north arrow, export PNG/PDF/SVG. v1.24: optional page millimetres, font, title size, legend size and legend corner. Omitted, the preset and the 18 pt title stay. |
+| `qgis_compose_panels` | ✅ v1.16 / v1.24 | Rows × cols grid of one polygon layer, a panel per CSV column, on linked colour scales (`share_scale` row/column/all, `cap_percentile` with a `≥` top tick) with one colour bar per group. Fonts, sizes, outline weight and page mm are arguments; PDF/SVG stay vector. Scales computed server-side (`panels.py`); plugin handler `compose_panels`. v1.16.2: the layer's keys come first (`get_field_values`), so CSV keys no zone carries stay out of every scale and are reported (`n_csv_keys_unmatched`). v1.24: `difference_columns` (`name = left - right`) and `panel_extents` (one box per panel). Full mode only. |
 | `qgis_batch_render` | ✅ v0.5 | Fan-out per attribute value; filters `layer=` or the top-most visible vector layer (named in `target_layer`); draws only visible layers; refused filters reported per value; template filter restored in `finally` |
 | `qgis_figures_to_pptx` | ✅ v0.3 / v1.8 | Pure python-pptx. `two_column` pairs figures; `title_image_caption` splits a newline in the caption into title vs body. |
 | `qgis_export_session` | ✅ v1.15 | Replay script from provenance sidecars (AST-built; input check; `--out-dir`/`--in-place`); follows `made_by` chains; state-reading figures replay their recorded loads/styles/evals (`--allow-eval` for evals); full mode only |
@@ -112,11 +113,17 @@ uv tool run ruff check src/ tests/
 | `qgis_export_atlas` | ✅ v1.11 | Export every page of a print-layout atlas (PNG per feature or one PDF). |
 | `qgis_spatial_join` | ✅ v1.12 | Join attributes by location (`QgsSpatialIndex`); writes GeoPackage/GeoJSON. Copies the first match. |
 | `qgis_aggregate_to_zones` | ✅ v1.20 | Count, sum, or mean points or lines onto polygons (`QgsSpatialIndex`). One new field for `qgis_render_choropleth`. Full mode only. |
+| `qgis_buffer` | ✅ v1.23 | Buffer in metres. A geographic layer is measured in a projected CRS and written back in the source CRS. Full mode only. |
+| `qgis_dissolve` | ✅ v1.23 | One feature, or one feature per field value. Full mode only. |
+| `qgis_clip` | ✅ v1.23 | Cut points, lines, or polygons to a polygon study area. Full mode only. |
+| `qgis_voronoi` | ✅ v1.23 | Voronoi polygons via `QgsGeometry.voronoiDiagram`, the same call as the catchment PNG. The PNG tool stays. Full mode only. |
+| `qgis_make_grid` | ✅ v1.25 | Metre fishnet of square polygons over an extent. Cells align to the CRS origin; `cell_id` is the join field. Does not replace `assets/zones_mesh_l3.gpkg`. Full mode only. |
 | `qgis_expression` | ✅ v1.19 | Calculated column and/or filter from a QGIS expression; writes GeoPackage/GeoJSON. Built-ins only (`env` refused). Full mode only. |
-| `qgis_zonal_stats` | ✅ v1.12 | Raster stats per polygon (`QgsZonalStatistics`); JAXA LULC onto zones. |
+| `qgis_recipe` | ✅ v1.26 | Named recipes: reproject, centroids, explode, points from lon/lat, extent polygon. User JSON recipes stay off unless `recipe_dir` is set, and those calls need `trust_foreign` to replay. Not a Python sandbox. Full mode only. |
+| `qgis_zonal_stats` | ✅ v1.12 | Raster stats per polygon (`QgsZonalStatistics`); JAXA LULC onto zones. v1.22: `majority`, and a histogram column per class id that occurs (`lulc_2` is built-up). `mean` stays numeric. |
 | `qgis_assign_section_load` | ✅ v1.9 | All-or-nothing OD assignment onto a line network (networkx). Writes `link_id,volume` for `qgis_render_link_density(load_csv=...)`. `[network]` extra. |
 | `qgis_route_on_network` | ✅ v1.14 | Snap consecutive stops onto GUFM DRM/rail TSV (or a line GeoJSON/GPKG). Writes routed `trip_id,seq,lon,lat,mode,datetime,link_id` for `qgis_render_trajectory`. `[network]` extra. |
-| `qgis_eval` | ✅ v1.0 | Arbitrary PyQGIS escape hatch with `return_vars` capture. Plugin's `execute_code` augmented with `_json_safe()` fallback (non-serializable values → `repr()`). v1.19: try `qgis_expression` first; `allow_python_eval` (default true) can refuse it. |
+| `qgis_eval` | ✅ v1.0 | Arbitrary PyQGIS escape hatch with `return_vars` capture. Plugin's `execute_code` augmented with `_json_safe()` fallback (non-serializable values → `repr()`). v1.19: try `qgis_expression` first; `allow_python_eval` (default true) can refuse it. v1.26: try `qgis_recipe` for a reproject, centroids, explode, points, or an extent. |
 
 ## Key Details
 
