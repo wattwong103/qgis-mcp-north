@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`qgis-mcp-workflows` (v1.19.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
+`qgis-mcp-workflows` (v1.20.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
 
 Key differences from upstream:
-- 28 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
+- 29 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
 - Two transports: `plugin` (TCP socket → running QGIS) and `headless` (PyQGIS subprocess), selected via `--transport=auto|plugin|headless`.
 - Plugin folder: `qgis_mcp_workflows_plugin/`. Python package: `qgis-mcp-workflows` (importable as `qgis_mcp_workflows`). Default socket port: **9877** (vs upstream 9876). Both servers can run side-by-side.
 
@@ -83,7 +83,7 @@ uv tool run ruff check src/ tests/
 | `DROPBOX_ROOT` | (per machine) | Provenance stores paths under it as `${DROPBOX_ROOT}/…`; `install.py` passes it into GUI client configs |
 | `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` | `1` | `0` refuses `qgis_eval`. Overrides `allow_python_eval` in `config.toml` (default true). No CLI flag |
 
-## MCP Tools (29 total as of v1.19; 5 grouped tools in compound mode. See `docs/DESIGN.md` §4 for full signatures.)
+## MCP Tools (30 total as of v1.20; 5 grouped tools in compound mode. See `docs/DESIGN.md` §4 for full signatures.)
 
 | Tool | Status | Notes |
 |---|---|---|
@@ -110,7 +110,8 @@ uv tool run ruff check src/ tests/
 | `qgis_list_basemaps` | ✅ v1.5 | Discovery for `basemap=`: built-in presets + every usable QuickMapServices source in the QGIS profile, plus `qms_rejected` explaining what was filtered (non-3857 CRS, licence-restricted providers) and why. |
 | `qgis_render_from_duckdb` | ✅ v1.6 | Query a DuckDB file and render the result — no CSV intermediate. Geometry via `geometry_column` (WKT text) or `lon_column`/`lat_column`. Connection is READ-ONLY and the query is LIMIT-wrapped, so a mistaken `SELECT *` against a multi-GB store (e.g. `output/viz/kichijoji.duckdb`, ~10M waypoints) can neither mutate nor OOM. v1.15: one SELECT over stored tables; DuckDB file readers, COPY, ATTACH, extension downloads and network are off and locked (local spatial preloaded); PROJ `+init=` file probing is a known gap. Plugin handler: `render_wkt_features`. |
 | `qgis_export_atlas` | ✅ v1.11 | Export every page of a print-layout atlas (PNG per feature or one PDF). |
-| `qgis_spatial_join` | ✅ v1.12 | Join attributes by location (`QgsSpatialIndex`); writes GeoPackage/GeoJSON. |
+| `qgis_spatial_join` | ✅ v1.12 | Join attributes by location (`QgsSpatialIndex`); writes GeoPackage/GeoJSON. Copies the first match. |
+| `qgis_aggregate_to_zones` | ✅ v1.20 | Count, sum, or mean points or lines onto polygons (`QgsSpatialIndex`). One new field for `qgis_render_choropleth`. Full mode only. |
 | `qgis_expression` | ✅ v1.19 | Calculated column and/or filter from a QGIS expression; writes GeoPackage/GeoJSON. Built-ins only (`env` refused). Full mode only. |
 | `qgis_zonal_stats` | ✅ v1.12 | Raster stats per polygon (`QgsZonalStatistics`); JAXA LULC onto zones. |
 | `qgis_assign_section_load` | ✅ v1.9 | All-or-nothing OD assignment onto a line network (networkx). Writes `link_id,volume` for `qgis_render_link_density(load_csv=...)`. `[network]` extra. |

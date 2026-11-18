@@ -3,6 +3,19 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.20.0 — 2026-11-18 — aggregate points and lines onto polygons
+
+### Added
+
+- `qgis_aggregate_to_zones` counts, sums, or averages every point or line that
+  intersects a polygon and writes the polygon layer plus one field. `count`
+  needs no value field. `sum` and `mean` require `value_field` on the join
+  layer. The predicate is intersects. A line that crosses several polygons
+  counts once in each. `qgis_spatial_join` still copies the first match.
+  Zero intersecting join features raise `AggregateEmptyError` and the message
+  names both layers' CRS and geometry types. Full mode only. The new field is
+  a `value_field` for `qgis_render_choropleth`.
+
 ## v1.19.0 — 2026-11-18 — QGIS expressions, eval still on
 
 ### Added

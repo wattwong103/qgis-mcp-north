@@ -295,6 +295,18 @@ class NetworkExtraMissingError(QgisMcpWorkflowsError):
         self.extra_hint = extra_hint
 
 
+class AggregateEmptyError(QgisMcpWorkflowsError):
+    """No join feature intersects a target polygon."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"Likely the layers do not overlap. "
+            f"Next: call qgis_layer_inspect on both paths and compare crs, extent, and geometry_type."
+        )
+        self.detail = detail
+
+
 class SpatialJoinEmptyError(QgisMcpWorkflowsError):
     """A spatial join matched zero target features."""
 

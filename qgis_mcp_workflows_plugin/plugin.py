@@ -358,6 +358,7 @@ class QgisMCPServer(QObject):
                 "export_layout": self.export_layout,
                 "export_atlas": self.export_atlas,
                 "spatial_join": self.spatial_join,
+                "aggregate_to_zones": self.aggregate_to_zones,
                 "apply_expression": self.apply_expression,
                 "zonal_stats": self.zonal_stats,
                 "compose_layout": self.compose_layout,
@@ -4755,6 +4756,186 @@ class QgisMCPServer(QObject):
             "predicate": pred,
             "method": meth,
             "joined_fields": joined_names,
+        }
+
+    def _crs_label(self, layer):
+        crs = layer.crs()
+        auth = ""
+        if crs is not None:
+            try:
+                auth = crs.authid() or ""
+            except Exception:
+                auth = ""
+        return auth or "unknown"
+
+    def _geom_label(self, layer):
+        try:
+            geom_type = layer.geometryType()
+        except Exception:
+            return "no_geom"
+        if geom_type == GEOM_POINT:
+            return "point"
+        if geom_type == GEOM_LINE:
+            return "line"
+        if geom_type == GEOM_POLYGON:
+            return "polygon"
+        return "no_geom"
+
+    def _plain_value(self, value):
+        if value is None:
+            return None
+        # qgis.core.NULL is a singleton. Match it by type, same as expressions.
+        if type(value).__name__ == "NULL":
+            return None
+        if isinstance(value, QVariant):
+            if value.isNull():
+                return None
+            return value.value()
+        return value
+
+    def aggregate_to_zones(
+        self,
+        target_path,
+        join_path,
+        output_path,
+        statistic="count",
+        value_field=None,
+        field_name=None,
+    ):
+        """Count, sum, or mean points or lines onto polygons.
+
+        Every intersecting feature contributes. This is not a first-match copy.
+        The layer is not added to the project, and this handler does not touch iface.
+        """
+        from .aggregate import (
+            collect_groups,
+            count_with_value,
+            default_field_name,
+            empty_detail,
+            geometries_ok,
+            geometry_detail,
+            matched_any,
+            normalize_statistic,
+            reduce_matches,
+            unique_field_name,
+        )
+
+        stat = normalize_statistic(statistic)
+        if stat is None:
+            raise Exception(
+                "AGGREGATE_STAT: unknown statistic %r. Use count, sum, or mean." % statistic
+            )
+        if stat in ("sum", "mean") and not (value_field or "").strip():
+            raise Exception("AGGREGATE_STAT: statistic %r requires value_field." % stat)
+
+        target = QgsVectorLayer(target_path, "_agg_target", "ogr")
+        if not target.isValid():
+            raise Exception("LAYER_NOT_FOUND: %s" % target_path)
+        join_lyr = QgsVectorLayer(join_path, "_agg_join", "ogr")
+        if not join_lyr.isValid():
+            raise Exception("LAYER_NOT_FOUND: %s" % join_path)
+
+        target_geom = self._geom_label(target)
+        join_geom = self._geom_label(join_lyr)
+        target_crs = self._crs_label(target)
+        join_crs = self._crs_label(join_lyr)
+        if not geometries_ok(target_geom, join_geom):
+            raise Exception(geometry_detail(target_geom, target_crs, join_geom, join_crs))
+
+        join_src = join_lyr
+        if join_lyr.crs() != target.crs():
+            join_src = self._memory_copy(join_lyr, "_agg_join_reproj", dest_crs=target.crs())
+
+        column = (value_field or "").strip()
+        if stat in ("sum", "mean"):
+            available = [f.name() for f in join_src.fields()]
+            if column not in available:
+                raise Exception("FIELD_NOT_FOUND: %s. Available: %s" % (column, available))
+
+        index = QgsSpatialIndex(join_src.getFeatures())
+        join_feats = []
+        id_to_index = {}
+        for feat in join_src.getFeatures():
+            id_to_index[feat.id()] = len(join_feats)
+            join_feats.append(feat)
+
+        join_values = []
+        for feat in join_feats:
+            if stat == "count":
+                join_values.append(None)
+            else:
+                join_values.append(self._plain_value(feat[column]))
+
+        target_feats = list(target.getFeatures())
+        pairs = []
+        for target_i, tfeat in enumerate(target_feats):
+            tgeom = tfeat.geometry()
+            if tgeom is None or tgeom.isEmpty():
+                continue
+            for fid in index.intersects(tgeom.boundingBox()):
+                join_i = id_to_index.get(fid)
+                if join_i is None:
+                    continue
+                if self._geom_matches("intersects", tgeom, join_feats[join_i].geometry()):
+                    pairs.append((target_i, join_i))
+
+        groups = collect_groups(len(target_feats), join_values, pairs)
+        if not matched_any(groups):
+            raise Exception(
+                empty_detail(
+                    len(join_feats),
+                    join_geom,
+                    join_crs,
+                    len(target_feats),
+                    target_geom,
+                    target_crs,
+                )
+            )
+
+        reduced = []
+        for group in groups:
+            reduced.append(reduce_matches(group, stat))
+
+        requested = (field_name or "").strip() or default_field_name(stat)
+        existing = [f.name() for f in target.fields()]
+        out_name = unique_field_name(requested, existing)
+        out_fields = QgsFields()
+        for field in target.fields():
+            out_fields.append(QgsField(field))
+        if stat == "count":
+            out_fields.append(QgsField(out_name, getattr(QVariant, "LongLong", QVariant.Int)))
+        else:
+            out_fields.append(QgsField(out_name, QVariant.Double))
+
+        wkb = QgsWkbTypes.displayString(target.wkbType()) or "Polygon"
+        out = QgsVectorLayer(
+            "%s?crs=%s" % (wkb, target.crs().authid() or "EPSG:4326"),
+            "aggregated",
+            "memory",
+        )
+        provider = out.dataProvider()
+        provider.addAttributes(out_fields.toList())
+        out.updateFields()
+        out_feats = []
+        for tfeat, value in zip(target_feats, reduced):
+            feature = QgsFeature(out.fields())
+            attrs = list(tfeat.attributes())
+            attrs.append(value)
+            feature.setAttributes(attrs)
+            feature.setGeometry(tfeat.geometry())
+            out_feats.append(feature)
+        if out_feats:
+            provider.addFeatures(out_feats)
+        out.updateExtents()
+
+        written = self._write_vector_layer(out, output_path)
+        return {
+            "output_path": os.path.abspath(written),
+            "n_target": len(target_feats),
+            "n_join": len(join_feats),
+            "n_with_value": count_with_value(reduced),
+            "field_name": out_name,
+            "statistic": stat,
         }
 
     def _expression_context(self, layer):

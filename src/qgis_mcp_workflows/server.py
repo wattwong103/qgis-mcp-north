@@ -110,7 +110,8 @@ qgis-mcp-workflows — opinionated QGIS MCP for transportation research figure
 pipelines (PFLOW, GUFM). First call qgis_ping / qgis_diagnose. Then:
 
 - qgis_layer_inspect before any join/render so field names are real.
-- qgis_spatial_join to copy attributes by location (points in zones);
+- qgis_spatial_join to copy attributes by location (first match);
+  qgis_aggregate_to_zones to count or sum points or lines onto polygons;
   qgis_zonal_stats for raster-per-polygon (JAXA LULC onto zones).
 - qgis_render_choropleth for zone polygons + value CSV (pass scale_bar=True
   and north_arrow=True for a publication PNG). GUFM 23-ward polygons:
@@ -179,8 +180,20 @@ def prompt_spatial_join() -> str:
         "qgis_layer_inspect both layers first (crs + extent must overlap). Then "
         "qgis_spatial_join(target_path, join_path, output_path, predicate='intersects', "
         "method='one_to_one'). Use method='one_to_many' when one target should keep "
-        "every matching join feature. Then qgis_render_choropleth or qgis_style_categorized "
-        "on the written GeoPackage."
+        "every matching join feature. To count or sum every point or line onto polygons, "
+        "use qgis_aggregate_to_zones instead. Then qgis_render_choropleth or "
+        "qgis_style_categorized on the written GeoPackage."
+    )
+
+
+@mcp.prompt(title="Aggregate to zones", description="Count or sum points or lines onto polygons.")
+def prompt_aggregate_to_zones() -> str:
+    return (
+        "qgis_layer_inspect both layers first. target_path is polygons; join_path is "
+        "points or lines; crs and extent must overlap. Then "
+        "qgis_aggregate_to_zones(target_path, join_path, output_path, statistic='count'), "
+        "or statistic='sum' or 'mean' with value_field set. "
+        "Then qgis_render_choropleth(zones_path=output_path, value_field=<field_name>)."
     )
 
 
@@ -970,9 +983,11 @@ def qgis_spatial_join(
 ) -> SpatialJoinResult:
     """Join attributes by location and write a new layer.
 
-    When to use: PFLOW pickups → zone polygons, stations → catchments, or any
-    two overlapping layers. Atomic (no leftover project layers). Does **not**
-    use the Processing toolbox — ``QgsSpatialIndex`` + geometry predicates.
+    When to use: copy a zone id onto points, or copy attributes between
+    overlapping layers. ``one_to_one`` keeps the first match. To count or sum
+    every point or line onto polygons, use ``qgis_aggregate_to_zones``. Atomic
+    (no leftover project layers). Does **not** use the Processing toolbox —
+    ``QgsSpatialIndex`` + geometry predicates.
 
     Returns: ``SpatialJoinResult`` with match counts and the written path.
 
@@ -1022,6 +1037,119 @@ def qgis_spatial_join(
         predicate=result.get("predicate", predicate),
         method=result.get("method", method),
         joined_fields=list(result.get("joined_fields") or []),
+    )
+
+
+class AggregateToZonesResult(BaseModel):
+    output_path: str
+    n_target: int
+    n_join: int
+    n_with_value: int
+    field_name: str
+    statistic: str
+
+
+_AGGREGATE_OUTPUTS = (".gpkg", ".geojson", ".json")
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_aggregate_to_zones(
+    target_path: Annotated[str, Field(description="Polygon layer that keeps its geometry (wards, mesh cells).")],
+    join_path: Annotated[str, Field(description="Points or lines to count or sum onto each polygon.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+    statistic: Annotated[
+        Literal["count", "sum", "mean"],
+        Field(description="count needs no value_field. sum and mean require value_field on the join layer."),
+    ] = "count",
+    value_field: Annotated[
+        str | None,
+        Field(description="Numeric field on the join layer. Required for sum and mean. Ignored for count."),
+    ] = None,
+    field_name: Annotated[
+        str | None,
+        Field(description="Name of the new field. Default count, sum, or mean. A name already on the polygons gets _2, _3, …"),
+    ] = None,
+) -> AggregateToZonesResult:
+    """Count, sum, or mean points or lines onto polygons.
+
+    When to use: pickups per ward, trip totals per mesh cell. ``qgis_spatial_join``
+    copies the first match; this counts every feature that intersects a polygon.
+    A line that crosses several polygons counts once in each. One feature is one
+    count; a line is not measured by length. The predicate is intersects.
+    The open project is unchanged. Full mode only.
+
+    Returns: ``AggregateToZonesResult`` with ``n_target``, ``n_join``,
+    ``n_with_value``, and the ``field_name`` written.
+
+    Chains into: ``qgis_render_choropleth(zones_path=output_path, value_field=<field_name>)``.
+    """
+    from qgis_mcp_workflows.errors import (
+        AggregateEmptyError,
+        ExecutorError,
+        FieldNotFoundError,
+        LayerNotFoundError,
+    )
+    from qgis_mcp_workflows.executors import get_executor
+
+    stat = (statistic or "").strip().lower()
+    if stat not in ("count", "sum", "mean"):
+        raise InvalidArgumentError(
+            f"statistic {statistic!r} must be count, sum, or mean.",
+            next_step="pass statistic='count', 'sum', or 'mean', then retry qgis_aggregate_to_zones",
+        )
+    column = (value_field or "").strip()
+    if stat in ("sum", "mean") and not column:
+        raise InvalidArgumentError(
+            f"statistic {stat!r} requires value_field on the join layer.",
+            next_step="pass value_field, the numeric field to aggregate, then retry qgis_aggregate_to_zones",
+        )
+    abs_target = user_abs(target_path)
+    abs_join = user_abs(join_path)
+    abs_out = user_abs(output_path)
+    if os.path.splitext(abs_out)[1].lower() not in _AGGREGATE_OUTPUTS:
+        raise InvalidArgumentError(
+            f"output_path {output_path!r} must end in .gpkg or .geojson.",
+            next_step="pass a .gpkg or .geojson output_path, then retry qgis_aggregate_to_zones",
+        )
+    params: dict = {
+        "target_path": abs_target,
+        "join_path": abs_join,
+        "output_path": abs_out,
+        "statistic": stat,
+    }
+    if stat != "count" and column:
+        params["value_field"] = column
+    written_name = (field_name or "").strip()
+    if written_name:
+        params["field_name"] = written_name
+    try:
+        result = get_executor().dispatch("aggregate_to_zones", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "AGGREGATE_EMPTY" in message:
+            raise AggregateEmptyError(message) from err
+        if "AGGREGATE_GEOMETRY" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="pass a polygon target_path and a point or line join_path, then retry qgis_aggregate_to_zones",
+            ) from err
+        if "LAYER_NOT_FOUND" in message:
+            path = abs_target if abs_target in message else abs_join
+            raise LayerNotFoundError(path) from err
+        if "FIELD_NOT_FOUND" in message:
+            raise FieldNotFoundError(column or "?", []) from err
+        raise
+    return AggregateToZonesResult(
+        output_path=user_abs(result["output_path"]),
+        n_target=int(result.get("n_target") or 0),
+        n_join=int(result.get("n_join") or 0),
+        n_with_value=int(result.get("n_with_value") or 0),
+        field_name=str(result.get("field_name") or ""),
+        statistic=str(result.get("statistic") or stat),
     )
 
 

@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.19.0**, 2026-11-18
+Status: **v1.20.0**, 2026-11-18
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -12,7 +12,7 @@ This document is the spec. Implementation follows. If a tool's signature, respon
 
 Three problems with upstream that the fork solves:
 
-**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **28 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
+**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **29 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
 
 **No headless mode.** Upstream requires QGIS Desktop running with the plugin enabled. That's incompatible with scheduled overnight runs, CI, or any automation. We add a **PyQGIS-subprocess transport** alongside the existing plugin transport. Same tools, two backends, selected by config or CLI flag.
 
@@ -98,7 +98,7 @@ Upstream's plugin and server stay untouched. If the user installs both, Claude D
 
 ---
 
-## 4. Tool surface (28 workflow + 1 escape hatch)
+## 4. Tool surface (29 workflow + 1 escape hatch)
 
 For each tool: signature, what it does, response shape, and the typical chain.
 
@@ -160,13 +160,13 @@ ProjectInfo = {
 
 Chains into: `qgis_export_layout`, `qgis_render_map`, `qgis_batch_render`.
 
-### Analysis (2)
+### Analysis (3)
 
 GitHub analogue: nkarasiak `spatial_join` / `zonal_statistics` / `get_unique_values`. Wrapped as atomic workflows (load + compute + write + cleanup). No Processing toolbox.
 
 #### `qgis_spatial_join(target_path: str, join_path: str, output_path: str, predicate: str = "intersects", method: str = "one_to_one", join_fields: list[str] | None = None, prefix: str = "", keep_unmatched: bool = True) → SpatialJoinResult`
 
-Join attributes by location. Target keeps geometry; join-layer attributes are copied onto matching features. `predicate ∈ {intersects, contains, within, touches, overlaps, crosses, equals}`. `method="one_to_one"` keeps the first match; `one_to_many` duplicates the target once per match. Collision names get a `_j` suffix. Raises `SpatialJoinEmptyError` when nothing overlaps.
+Join attributes by location. Target keeps geometry; join-layer attributes are copied onto matching features. `predicate ∈ {intersects, contains, within, touches, overlaps, crosses, equals}`. `method="one_to_one"` keeps the first match; `one_to_many` duplicates the target once per match. Collision names get a `_j` suffix. Raises `SpatialJoinEmptyError` when nothing overlaps. This copies attributes. Counting or summing every point or line onto the polygons is `qgis_aggregate_to_zones`.
 
 ```python
 SpatialJoinResult = {
@@ -180,6 +180,29 @@ SpatialJoinResult = {
 ```
 
 Chains into: `qgis_render_choropleth`, `qgis_style_categorized`, `qgis_layer_inspect`.
+
+#### `qgis_aggregate_to_zones(target_path: str, join_path: str, output_path: str, statistic: str = "count", value_field: str | None = None, field_name: str | None = None) → AggregateToZonesResult`
+
+Count, sum, or mean every join feature that intersects a target polygon. `qgis_spatial_join` with `method="one_to_one"` copies the first match; this tool uses every match. `target_path` is polygons. `join_path` is points or lines. The predicate is `intersects`: a point on the boundary counts, and a line that crosses several polygons counts once in each. One feature is one count. A line is not measured by its length.
+
+`statistic ∈ {count, sum, mean}`. `count` does not read `value_field` (a passed `value_field` is ignored). `sum` and `mean` require `value_field` on the join layer. Nulls, booleans, and values that are not numbers are skipped for `sum` and `mean`; they still count for `count`. A numeric string is read as a number. `sum` of no numbers is 0. `mean` of no numbers is null. A polygon with no match keeps `count` 0 and `sum` 0.
+
+The join layer is transformed into the target CRS before the test, the same way `qgis_spatial_join` does. An empty result still names the CRS each file was opened with.
+
+Zero join features that meet the predicate raise `AggregateEmptyError`. The message names both layers' CRS and geometry types. A target that is not polygon, or a join layer that is not point or line, raises `InvalidArgumentError` before any file is written, and that message names both geometry types and both CRS. The open project is unchanged. The handler does not touch `iface`, so plugin and headless both run it. Output is GeoPackage (`.gpkg`) or GeoJSON (`.geojson` or `.json`), keeps the polygon geometry, and adds one field. The field is `field_name`, or `count` / `sum` / `mean` when `field_name` is omitted. A name already on the target (compared case-insensitively) becomes `name_2`, `name_3`, and so on. The result's `field_name` is the name written. `n_with_value` is the number of polygons whose new field is not null: every polygon for `count` and `sum`, and only polygons with at least one numeric join value for `mean`. Full mode only. Compound mode does not grow a kind for it.
+
+```python
+AggregateToZonesResult = {
+    "output_path": str,
+    "n_target": int,
+    "n_join": int,
+    "n_with_value": int,
+    "field_name": str,
+    "statistic": str,
+}
+```
+
+Chains into: `qgis_render_choropleth(zones_path=output_path, value_field=<field_name>)`.
 
 #### `qgis_zonal_stats(zones_path: str, raster_path: str, output_path: str, stats: list[str] | None = None, prefix: str = "", raster_band: int = 1) → ZonalStatsResult`
 
@@ -736,6 +759,8 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 **v1.18 — polygon figure controls.** ✅ Optional `outline_color`, `outline_width_mm` and `fill_opacity` on `qgis_render_choropleth`, `qgis_style_graduated` and `qgis_style_categorized` (and the compound forwarders). Explicit `breaks` on the two graduated tools. `colors` on categorized, one hex per `classes` entry. Choropleth label size, font, colour and halo. Omitted arguments are not dispatched, so a v1.17.0 call draws the same figure.
 
 **v1.19 — expressions, eval still on.** ✅ `qgis_expression` writes a GeoPackage or GeoJSON from a QGIS expression (calculated column, filter, or both). `allow_python_eval` in `config.toml` defaults to true; `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` overrides it. `qgis_eval` keeps running until the flag is set false. Full mode only.
+
+**v1.20 — aggregate points and lines onto polygons.** ✅ `qgis_aggregate_to_zones` counts, sums, or averages every point or line that intersects a polygon. `qgis_spatial_join` still copies the first match. The new field is a `value_field` for `qgis_render_choropleth`. Full mode only.
 
 ---
 
