@@ -590,6 +590,8 @@ class TrajectoryResult(RenderResult):
     time_range: list[str] | None = None
     modes: list[str] | None = None
     used_movingpandas: bool
+    style_applied: dict | None = None
+    fonts_missing: list[str] = []
 
 
 class ODFlowResult(RenderResult):
@@ -600,6 +602,8 @@ class ODFlowResult(RenderResult):
     min_flow_rendered: float
     n_unmatched_origins: int
     n_unmatched_destinations: int
+    style_applied: dict | None = None
+    fonts_missing: list[str] = []
 
 
 class LinkDensityResult(RenderResult):
@@ -614,6 +618,8 @@ class LinkDensityResult(RenderResult):
     min_density: float
     max_density: float
     aggregation: str
+    style_applied: dict | None = None
+    fonts_missing: list[str] = []
 
 
 class ExportResult(DrawsMap):
@@ -658,12 +664,16 @@ class DiagramMapResult(RenderResult):
     diagram_type: str
     value_fields: list[str]
     n_features: int
+    style_applied: dict | None = None
+    fonts_missing: list[str] = []
 
 
 class CatchmentResult(RenderResult):
     method: str
     n_points: int
     n_catchments: int
+    style_applied: dict | None = None
+    fonts_missing: list[str] = []
 
 
 class BatchManifestEntry(BaseModel):
@@ -1541,6 +1551,8 @@ class DuckDbRenderResult(RenderResult):
     field: str | None = None
     breaks: list[float] | None = None
     row_limit_hit: bool = False
+    style_applied: dict | None = None
+    fonts_missing: list[str] = []
 
 
 def _wire_value(value: Any) -> Any:
@@ -1643,6 +1655,15 @@ def qgis_render_from_duckdb(
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
+    outline_color: Annotated[str | None, Field(description="Stroke colour, #RGB or #RRGGBB. On a line this is the line colour. On a point it is the marker outline. Omit to leave it unchanged.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Stroke width in mm, 0 to 5. 0 is a one-pixel hairline. Omit to leave the width unchanged.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    label_field: Annotated[str | None, Field(description="Query column to label. Omit to draw no labels.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 9 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> DuckDbRenderResult:
     """Render the result of a DuckDB query directly, with no CSV in between.
 
@@ -1663,8 +1684,17 @@ def qgis_render_from_duckdb(
     """
     import os
 
-    from qgis_mcp_workflows.errors import QgisMcpWorkflowsError
+    from qgis_mcp_workflows.errors import FieldNotFoundError, QgisMcpWorkflowsError
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import control_params, echoed_style
+
+    sent = control_params(
+        outline_color=outline_color, outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity, label_field=label_field,
+        label_size_pt=label_size_pt, label_font=label_font, label_color=label_color,
+        label_halo_mm=label_halo_mm, label_halo_color=label_halo_color,
+        track_label_field=True,
+    )
 
     try:
         import duckdb
@@ -1769,8 +1799,10 @@ def qgis_render_from_duckdb(
                f"Columns {lon_column!r}/{lat_column!r} should hold numeric coordinates. ")
             + "Next: adjust the query and retry."
         )
+    if label_field is not None and label_field not in attr_cols:
+        raise FieldNotFoundError(label_field, attr_cols)
 
-    result = get_executor().dispatch("render_wkt_features", {
+    wkt_params = {
         "features": features,
         "output_png": user_abs(output_png),
         "crs": crs,
@@ -1784,7 +1816,10 @@ def qgis_render_from_duckdb(
         "width": width,
         "height": height,
         "dpi": dpi,
-    })
+    }
+    wkt_params.update(sent)
+    result = get_executor().dispatch("render_wkt_features", wkt_params)
+    style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
 
     return DuckDbRenderResult(
         output_path=result["output_path"],
@@ -1799,6 +1834,8 @@ def qgis_render_from_duckdb(
         field=result.get("field"),
         breaks=result.get("breaks"),
         row_limit_hit=row_limit_hit,
+        style_applied=style_applied,
+        fonts_missing=fonts_missing,
     )
 
 
@@ -1980,6 +2017,32 @@ def qgis_render_choropleth(
     )
 
 
+def _trajectory_label_column(
+    label_field: str | None,
+    columns: list[str],
+    id_col: str,
+    mode_col: str | None,
+) -> tuple[str | None, bool]:
+    """Layer field to label, and whether each feature must copy that CSV column.
+
+    ``trip_id`` is always on the layer. ``mode`` is the layer name of ``mode_col``.
+    ``speed_kmh`` is the movingpandas field. Any other name is copied as itself.
+    """
+    from qgis_mcp_workflows.errors import FieldNotFoundError
+
+    if not label_field:
+        return None, False
+    if label_field in ("trip_id", id_col):
+        return "trip_id", False
+    if mode_col and label_field == mode_col:
+        return "mode", False
+    if label_field == "speed_kmh":
+        return "speed_kmh", False
+    if label_field not in columns:
+        raise FieldNotFoundError(label_field, list(columns))
+    return label_field, True
+
+
 @_maybe_tool(
     annotations=ToolAnnotations(
         readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
@@ -2005,6 +2068,15 @@ def qgis_render_trajectory(
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
     scale_bar: Annotated[bool, Field(description="Draw a metric scale bar in the lower-left of the PNG.")] = False,
     north_arrow: Annotated[bool, Field(description="Draw a north arrow in the upper-right of the PNG.")] = False,
+    outline_color: Annotated[str | None, Field(description="Stroke colour, #RGB or #RRGGBB. On a line with no mode_col this is the line colour. On a point it is the marker outline. Omit to leave it unchanged.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Stroke width in mm, 0 to 5. 0 is a one-pixel hairline. Refused on a line that is coloured by mode_col. Omit to leave the width unchanged.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged. Refused for heatmap.")] = None,
+    label_field: Annotated[str | None, Field(description="Label trip_id, mode (when mode_col is set), speed_kmh (when movingpandas ran), another CSV column, or a GPX field. Omit to draw no labels.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 9 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> TrajectoryResult:
     """Render trajectory data from CSV/GPX. PFLOW/GUFM workflow tool.
 
@@ -2025,8 +2097,38 @@ def qgis_render_trajectory(
     """
     import csv as _csv
 
-    from qgis_mcp_workflows.errors import EmptyAfterFilterError, FieldNotFoundError
+    from qgis_mcp_workflows.errors import (
+        EmptyAfterFilterError,
+        FieldNotFoundError,
+        InvalidArgumentError,
+    )
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import control_params, echoed_style
+
+    sent = control_params(
+        outline_color=outline_color, outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity, label_field=label_field,
+        label_size_pt=label_size_pt, label_font=label_font, label_color=label_color,
+        label_halo_mm=label_halo_mm, label_halo_color=label_halo_color,
+        track_label_field=True,
+    )
+    symbol_set = (
+        outline_color is not None or outline_width_mm is not None or fill_opacity is not None
+    )
+    if render_mode == "heatmap" and symbol_set:
+        raise InvalidArgumentError(
+            "heatmap has no stroke or opacity to set.",
+            next_step='use render_mode="lines" or render_mode="points"',
+        )
+    if (
+        render_mode == "lines"
+        and mode_col
+        and (outline_color is not None or outline_width_mm is not None)
+    ):
+        raise InvalidArgumentError(
+            "outline_color and outline_width_mm replace the mode colours on a line trajectory.",
+            next_step='omit mode_col, or use render_mode="points" where the outline is the marker stroke',
+        )
 
     abs_input = user_abs(input_path)
     _require_file("input_path", abs_input)
@@ -2052,7 +2154,9 @@ def qgis_render_trajectory(
             "scale_bar": scale_bar,
             "north_arrow": north_arrow,
         }
+        params.update(sent)
         result = get_executor().dispatch("render_trajectory", params, timeout=120)
+        style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
         return TrajectoryResult(
             output_path=result["output_path"],
             width=result["width"], height=result["height"], dpi=result["dpi"],
@@ -2066,6 +2170,8 @@ def qgis_render_trajectory(
             used_movingpandas=result.get("used_movingpandas", False),
             basemap_attribution=result.get("basemap_attribution"),
             basemap_source=result.get("basemap_source"),
+            style_applied=style_applied,
+            fonts_missing=fonts_missing,
         )
 
     # CSV path: parse + validate columns MCP-side.
@@ -2077,6 +2183,7 @@ def qgis_render_trajectory(
                 raise FieldNotFoundError(required, columns)
         if mode_col is not None and mode_col not in columns:
             raise FieldNotFoundError(mode_col, columns)
+        layer_label, copy_label = _trajectory_label_column(label_field, columns, id_col, mode_col)
         rows = list(reader)
 
     n_points_total = len(rows)
@@ -2140,6 +2247,8 @@ def qgis_render_trajectory(
             feat["mode"] = mode_val
             if mode_val:
                 modes_seen.add(mode_val)
+        if copy_label and layer_label is not None:
+            feat[layer_label] = row.get(label_field, "")
         features.append(feat)
 
     if not features:
@@ -2181,7 +2290,11 @@ def qgis_render_trajectory(
         "scale_bar": scale_bar,
         "north_arrow": north_arrow,
     }
+    if layer_label is not None:
+        sent["label_field"] = layer_label
+    params.update(sent)
     result = get_executor().dispatch("render_trajectory", params, timeout=120)
+    style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
     return TrajectoryResult(
         output_path=result["output_path"],
         width=result["width"], height=result["height"], dpi=result["dpi"],
@@ -2195,6 +2308,8 @@ def qgis_render_trajectory(
         used_movingpandas=result.get("used_movingpandas", used_mp),
         basemap_attribution=result.get("basemap_attribution"),
         basemap_source=result.get("basemap_source"),
+        style_applied=style_applied,
+        fonts_missing=fonts_missing,
     )
 
 
@@ -2349,6 +2464,14 @@ def qgis_render_od_flows(
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
     scale_bar: Annotated[bool, Field(description="Draw a metric scale bar in the lower-left of the PNG.")] = False,
     north_arrow: Annotated[bool, Field(description="Draw a north arrow in the upper-right of the PNG.")] = False,
+    outline_color: Annotated[str | None, Field(description="Line or arrow colour, #RGB or #RRGGBB. Omit to leave #1f78b4.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Constant stroke width in mm, 0 to 5. Omit to keep the width scaled by flow.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 8 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> ODFlowResult:
     """Render origin-destination arcs over a zones layer. PFLOW workflow tool.
 
@@ -2371,6 +2494,14 @@ def qgis_render_od_flows(
 
     from qgis_mcp_workflows.errors import FieldNotFoundError
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import control_params, echoed_style
+
+    sent = control_params(
+        outline_color=outline_color, outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity, label_field=label_field,
+        label_size_pt=label_size_pt, label_font=label_font, label_color=label_color,
+        label_halo_mm=label_halo_mm, label_halo_color=label_halo_color,
+    )
 
     abs_od = user_abs(od_csv)
     _require_file("od_csv", abs_od)
@@ -2419,7 +2550,9 @@ def qgis_render_od_flows(
         "scale_bar": scale_bar,
         "north_arrow": north_arrow,
     }
+    params.update(sent)
     result = get_executor().dispatch("render_od_flows", params, timeout=60)
+    style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
     return ODFlowResult(
         output_path=result["output_path"],
         width=result["width"], height=result["height"], dpi=result["dpi"],
@@ -2433,6 +2566,8 @@ def qgis_render_od_flows(
         n_unmatched_destinations=result["n_unmatched_destinations"],
         basemap_attribution=result.get("basemap_attribution"),
         basemap_source=result.get("basemap_source"),
+        style_applied=style_applied,
+        fonts_missing=fonts_missing,
     )
 
 
@@ -2464,6 +2599,14 @@ def qgis_render_link_density(
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
     scale_bar: Annotated[bool, Field(description="Draw a metric scale bar in the lower-left of the PNG.")] = False,
     north_arrow: Annotated[bool, Field(description="Draw a north arrow in the upper-right of the PNG.")] = False,
+    outline_color: Annotated[str | None, Field(description="Line colour, #RGB or #RRGGBB. When set, replaces the density ramp. Omit to keep the palette.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Line width in mm, 0 to 5. 0 is a one-pixel hairline. Omit to leave 0.6 mm.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 7 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> LinkDensityResult:
     """Render a DRM-link traffic-density choropleth from PFLOW trajectories. v2 workflow tool.
 
@@ -2490,6 +2633,14 @@ def qgis_render_link_density(
         EmptyAfterFilterError,
     )
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import control_params, echoed_style
+
+    sent = control_params(
+        outline_color=outline_color, outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity, label_field=label_field,
+        label_size_pt=label_size_pt, label_font=label_font, label_color=label_color,
+        label_halo_mm=label_halo_mm, label_halo_color=label_halo_color,
+    )
 
     abs_drm = user_abs(drm_network_path)
     abs_output = user_abs(output_png)
@@ -2555,7 +2706,9 @@ def qgis_render_link_density(
         "scale_bar": scale_bar,
         "north_arrow": north_arrow,
     }
+    params.update(sent)
     result = get_executor().dispatch("render_link_density", params, timeout=120)
+    style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
 
     return LinkDensityResult(
         output_path=result["output_path"],
@@ -2574,6 +2727,8 @@ def qgis_render_link_density(
         aggregation=aggregation,
         basemap_attribution=result.get("basemap_attribution"),
         basemap_source=result.get("basemap_source"),
+        style_applied=style_applied,
+        fonts_missing=fonts_missing,
     )
 
 
@@ -2780,6 +2935,15 @@ def qgis_render_diagram_map(
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
+    outline_color: Annotated[str | None, Field(description="Base-symbol and diagram-pen colour, #RGB or #RRGGBB. Omit to leave the base symbol and the white pen.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Base-symbol and diagram-pen width in mm, 0 to 5. Omit to leave them unchanged.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Base-symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    label_field: Annotated[str | None, Field(description="Field on the layer to label. Omit to draw no labels.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 9 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> DiagramMapResult:
     """Render pie/bar charts on each map feature — "chart in map". v2 workflow tool.
 
@@ -2793,6 +2957,15 @@ def qgis_render_diagram_map(
     Chains into: ``qgis_compose_layout``, ``qgis_figures_to_pptx``.
     """
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import control_params, echoed_style
+
+    sent = control_params(
+        outline_color=outline_color, outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity, label_field=label_field,
+        label_size_pt=label_size_pt, label_font=label_font, label_color=label_color,
+        label_halo_mm=label_halo_mm, label_halo_color=label_halo_color,
+        track_label_field=True,
+    )
 
     abs_layer = user_abs(layer_path)
     abs_output = user_abs(output_png)
@@ -2809,7 +2982,9 @@ def qgis_render_diagram_map(
         "height": height,
         "dpi": dpi,
     }
+    params.update(sent)
     result = get_executor().dispatch("render_diagram_map", params, timeout=120)
+    style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
     return DiagramMapResult(
         output_path=result["output_path"],
         width=result["width"], height=result["height"], dpi=result["dpi"],
@@ -2819,6 +2994,8 @@ def qgis_render_diagram_map(
         n_features=result["n_features"],
         basemap_attribution=result.get("basemap_attribution"),
         basemap_source=result.get("basemap_source"),
+        style_applied=style_applied,
+        fonts_missing=fonts_missing,
     )
 
 
@@ -2837,6 +3014,15 @@ def qgis_render_catchment(
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
+    outline_color: Annotated[str | None, Field(description="Cell stroke colour, #RGB or #RRGGBB. Also the point-marker outline. Omit to leave both unchanged.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Cell stroke width in mm, 0 to 5. Also the point-marker outline. Omit to leave 0.3 mm on the cells.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Cell fill opacity, 0 to 1, replacing the default alpha of 90/255. Also the point opacity. Omit to leave both unchanged.")] = None,
+    label_field: Annotated[str | None, Field(description="Field on the point layer to label. Omit to draw no labels.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 9 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> CatchmentResult:
     """Render Voronoi service-area catchments around points. v2 workflow tool.
 
@@ -2849,6 +3035,15 @@ def qgis_render_catchment(
     Chains into: ``qgis_compose_layout``, ``qgis_figures_to_pptx``.
     """
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import control_params, echoed_style
+
+    sent = control_params(
+        outline_color=outline_color, outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity, label_field=label_field,
+        label_size_pt=label_size_pt, label_font=label_font, label_color=label_color,
+        label_halo_mm=label_halo_mm, label_halo_color=label_halo_color,
+        track_label_field=True,
+    )
 
     abs_points = user_abs(points_path)
     abs_output = user_abs(output_png)
@@ -2862,7 +3057,9 @@ def qgis_render_catchment(
         "height": height,
         "dpi": dpi,
     }
+    params.update(sent)
     result = get_executor().dispatch("render_catchment", params, timeout=180)
+    style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
     return CatchmentResult(
         output_path=result["output_path"],
         width=result["width"], height=result["height"], dpi=result["dpi"],
@@ -2872,6 +3069,8 @@ def qgis_render_catchment(
         n_catchments=result["n_catchments"],
         basemap_attribution=result.get("basemap_attribution"),
         basemap_source=result.get("basemap_source"),
+        style_applied=style_applied,
+        fonts_missing=fonts_missing,
     )
 
 

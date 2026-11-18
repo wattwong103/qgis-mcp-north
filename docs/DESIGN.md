@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.20.0**, 2026-11-18
+Status: **v1.21.0**, 2026-11-18
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -294,7 +294,7 @@ ChoroplethResult = RenderResult | {
 
 Chains into: `qgis_figures_to_pptx`, `qgis_batch_render`.
 
-#### `qgis_render_trajectory(input_path: str, output_png: str, lon_col: str = "lon", lat_col: str = "lat", time_col: str = "datetime", id_col: str = "trip_id", mode_col: str | None = None, render_mode: str = "lines", sample_rate: float = 1.0, max_points: int = 500_000, basemap_paths: list[str] | None = None, extent: list[float] | None = None, width: int = 1600, height: int = 1200, dpi: int = 150) → TrajectoryResult`
+#### `qgis_render_trajectory(input_path: str, output_png: str, lon_col: str = "lon", lat_col: str = "lat", time_col: str = "datetime", id_col: str = "trip_id", mode_col: str | None = None, render_mode: str = "lines", sample_rate: float = 1.0, max_points: int = 500_000, basemap_paths: list[str] | None = None, extent: list[float] | None = None, width: int = 1600, height: int = 1200, dpi: int = 150, outline_color: str | None = None, outline_width_mm: float | None = None, fill_opacity: float | None = None, label_field: str | None = None, label_size_pt: float | None = None, label_font: str | None = None, label_color: str | None = None, label_halo_mm: float | None = None, label_halo_color: str | None = None) → TrajectoryResult`
 
 **Workflow tool.** Render trajectory data from CSV (with `lon, lat, datetime, trip_id` columns by default — matches PFLOW trajectory CSV schema) or GPX. `render_mode ∈ {"lines", "points", "heatmap"}`.
 
@@ -304,6 +304,8 @@ Big-data discipline. PFLOW trajectory CSVs are 3M+ rows each (74 GB total). Defa
 - `extent=[lon_min, lat_min, lon_max, lat_max]` (EPSG:4326) clips before rendering.
 
 If `movingpandas` and Trajectools plugin are installed, automatically uses them for richer rendering (speed bins, stop detection); otherwise plain line/point rendering.
+
+Stroke, opacity and labels are the choropleth controls (v1.21). Omitted, they are not sent, and the figure stays `#1f78b4` at 0.6 mm (lines) or a 1.5 mm marker with no outline (points). On a line with no `mode_col`, `outline_color` and `outline_width_mm` are the line, including a movingpandas speed ramp (the colour replaces the ramp). On a line with `mode_col` those two are refused, because they would replace the mode colours; `fill_opacity` still applies. On points the outline is the marker stroke and the fill stays the mode or default colour; a marker drawn with no outline gains a solid stroke when either outline argument is set. `render_mode="heatmap"` refuses all three symbol arguments. `label_field` labels `trip_id`, `mode` (when `mode_col` is set), `speed_kmh` (when movingpandas ran), another CSV column copied onto the layer, or a field on a GPX. Any label argument without `label_field` is refused. With `label_field` and the label arguments omitted, the halo is 9 pt, 1 mm, white. Lines are labeled along the line. `style_applied` and `PluginOutdatedError` match the choropleth.
 
 ```python
 TrajectoryResult = RenderResult | {
@@ -317,11 +319,13 @@ TrajectoryResult = RenderResult | {
 }
 ```
 
-#### `qgis_render_od_flows(od_csv: str, zones_layer_path: str, output_png: str, origin_col: str = "origin", dest_col: str = "destination", value_col: str = "trip_count", zone_id_field: str = "zone_id", top_n: int | None = None, basemap_paths: list[str] | None = None, width: int = 1600, height: int = 1200, dpi: int = 150) → ODFlowResult`
+#### `qgis_render_od_flows(od_csv: str, zones_layer_path: str, output_png: str, origin_col: str = "origin", dest_col: str = "destination", value_col: str = "trip_count", zone_id_field: str = "zone_id", top_n: int | None = None, basemap_paths: list[str] | None = None, width: int = 1600, height: int = 1200, dpi: int = 150, outline_color: str | None = None, outline_width_mm: float | None = None, fill_opacity: float | None = None, label_size_pt: float | None = None, label_font: str | None = None, label_color: str | None = None, label_halo_mm: float | None = None, label_halo_color: str | None = None) → ODFlowResult`
 
 **Workflow tool.** Render origin-destination arcs over a zones layer. Defaults match PFLOW's `od_flows.csv` schema (`origin, destination, trip_count, avg_distance_km`). `top_n` limits to the strongest N flows. Arc width scales with `value_col`.
 
 Note: PFLOW uses **multiple zone-id systems in different files** (`MFS##`, `PRF##`, `Z##`). The caller must ensure `od_csv[origin_col/dest_col]` and `zones_layer[zone_id_field]` use the same system. Mismatches surface as `n_unmatched_origins` / `n_unmatched_destinations` in the response, not as a silent zero-flow render.
+
+`outline_color` recolors the straight line or the arrow fill. `outline_width_mm`, when set, replaces the data-defined flow width with that constant (mm); omitted, the width still scales with `value_col`. `fill_opacity` is the symbol opacity. The label arguments extend the existing `label_field` (`origin`, `destination`, `trip_count`) and require it. With `label_field` and those omitted, the halo stays 8 pt, 1 mm, white. `style_applied` and `PluginOutdatedError` match the choropleth. `label_field` alone is not a new control: an older plugin already labels.
 
 ```python
 ODFlowResult = RenderResult | {
@@ -367,6 +371,8 @@ Prerequisite: `assets/drm_network.gpkg` built once via `scripts/build_drm_networ
 Big-data discipline. PFLOW trajectory CSVs are 3M+ rows; aggregation streams row-by-row MCP-side, sending only the per-link totals (typically <100k entries) to the plugin. `min_density` denoises rare-traffic links; `top_n` clips to the N densest links.
 
 `aggregation ∈ {"count", "sum"}`. `count` totals trajectory points per link (default). `sum` totals a numeric column (set `value_col`).
+
+`outline_color`, `outline_width_mm` and `fill_opacity` are the choropleth controls on the graduated lines (v1.21). Omitted, the lines stay the palette at 0.6 mm. `outline_color`, when set, replaces the ramp. The label arguments extend `label_field` and require it. With `label_field` and those omitted, the halo stays 7 pt, 1 mm, white. `style_applied` and `PluginOutdatedError` match the choropleth.
 
 ```python
 LinkDensityResult = RenderResult | {
@@ -492,8 +498,8 @@ transit-figure pipeline. Each a separate commit, unit-tested + live-verified.
 
 **New tools (3):**
 - `qgis_compose_layout(layer_paths, output_path, title=None, extent=None, page="a4_landscape", legend=True, scale_bar=True, north_arrow=True, dpi=300) → ComposeLayoutResult` — programmatic `QgsPrintLayout`: a titled map panel with linked legend, scale bar and north arrow, exported PNG/PDF/SVG. Complements `qgis_export_layout` (which only exports pre-authored `.qgz`). Single panel; multi-panel/inset is future.
-- `qgis_render_diagram_map(layer_path, value_fields, output_png, diagram_type="pie", size=10.0, palette="Set2", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150) → DiagramMapResult` — chart-in-map: a pie/bar `QgsDiagramRenderer` glyph per feature, one slice/bar per `value_field`.
-- `qgis_render_catchment(points_path, output_png, method="voronoi", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150) → CatchmentResult` — Voronoi (Thiessen) service-area catchments around points via `QgsGeometry.voronoiDiagram` (no Processing dependency).
+- `qgis_render_diagram_map(layer_path, value_fields, output_png, diagram_type="pie", size=10.0, palette="Set2", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150, outline_color=None, outline_width_mm=None, fill_opacity=None, label_field=None, label_size_pt=None, label_font=None, label_color=None, label_halo_mm=None, label_halo_color=None) → DiagramMapResult` — chart-in-map: a pie/bar `QgsDiagramRenderer` glyph per feature, one slice/bar per `value_field`. v1.21: stroke and opacity on the base symbol, and the same stroke on the diagram pen (omitted pen stays white, 0.2). `size` is unchanged. `label_field` is a field on the layer; omitted label type is 9 pt, 1 mm, white.
+- `qgis_render_catchment(points_path, output_png, method="voronoi", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150, outline_color=None, outline_width_mm=None, fill_opacity=None, label_field=None, label_size_pt=None, label_font=None, label_color=None, label_halo_mm=None, label_halo_color=None) → CatchmentResult` — Voronoi (Thiessen) service-area catchments around points via `QgsGeometry.voronoiDiagram` (no Processing dependency). v1.21: stroke and opacity on the cells. Omitted cells stay `200,220,240` at alpha 90 with outline `70,90,120` at 0.3 mm; `fill_opacity` replaces that alpha. Point markers take the same stroke and opacity; omitted markers stay `#b2182b` with no outline. `label_field` is a field on the point layer (9 pt when the label type is omitted).
 
 **New parameters on existing tools:**
 - `qgis_render_choropleth` / `qgis_style_graduated`: `diverging: bool = False` + `center: float = 0.0` — diverging colormap with symmetric class breaks pinned at `center`, for signed / net-flux data. `palette` now also resolves scientific colormaps (viridis, cividis, magma, batlow, vik, roma, balance, RdBu, BrBG) vendored in `qgis_mcp_workflows_plugin/colormaps.py` via the shared `_resolve_color_ramp` / `_build_graduated_renderer` helpers. Response echoes `diverging`, `center`, `diverging_one_sided`.
@@ -595,6 +601,8 @@ Rendering is a separate plugin primitive, `render_wkt_features`, which takes
 `[{"wkt": ..., **attrs}]` and builds a memory layer. It is transport-agnostic on
 purpose: any future caller holding geometry from somewhere other than a file — a
 database cursor, an API — renders through the same path.
+
+`outline_color`, `outline_width_mm`, `fill_opacity` and the label arguments (v1.21) are the choropleth controls. On a graduated `value_field` they paint that renderer. On the unstyled path, a line stays `#1f78b4` at 0.6 mm and a point stays `#1f78b4` at 2.5 mm with no outline until a control is set; the point outline is the marker stroke and the fill stays. `label_field` must be a column in the query result. Omitted label type is 9 pt, 1 mm, white. `style_applied` and `PluginOutdatedError` match the choropleth. Compound `qgis_render` forwards these controls for `trajectory`, `od_flows`, `link_density`, `diagram_map`, `catchment` and `duckdb`. `breaks` stays choropleth-only. `mode="map"` refuses them.
 
 ---
 
@@ -761,6 +769,8 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 **v1.19 — expressions, eval still on.** ✅ `qgis_expression` writes a GeoPackage or GeoJSON from a QGIS expression (calculated column, filter, or both). `allow_python_eval` in `config.toml` defaults to true; `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` overrides it. `qgis_eval` keeps running until the flag is set false. Full mode only.
 
 **v1.20 — aggregate points and lines onto polygons.** ✅ `qgis_aggregate_to_zones` counts, sums, or averages every point or line that intersects a polygon. `qgis_spatial_join` still copies the first match. The new field is a `value_field` for `qgis_render_choropleth`. Full mode only.
+
+**v1.21 — line and point figure controls.** ✅ The choropleth stroke, opacity and label arguments on `qgis_render_trajectory`, `qgis_render_od_flows`, `qgis_render_link_density`, `qgis_render_diagram_map`, `qgis_render_catchment` and `qgis_render_from_duckdb`, and on compound `qgis_render` for those modes. Omitted arguments are not dispatched. A line's outline is the line; a point's outline is the marker stroke and the fill stays. OD flow width and the link-density ramp stay as they are until the caller sets the control. OD labels stay 8 pt and link-density labels stay 7 pt when the new label arguments are omitted. `breaks` stays on the choropleth.
 
 ---
 

@@ -122,6 +122,8 @@ from .compat import (
     LAYER_VECTOR,
     LAYOUT_MM,
     LAYOUT_SUCCESS,
+    PEN_NONE,
+    PEN_SOLID,
     MSG_CRITICAL,
     MSG_INFO,
     MSG_WARNING,
@@ -1325,6 +1327,15 @@ class QgisMCPServer(QObject):
         height=1200,
         dpi=150,
         background="white",
+        outline_color=None,
+        outline_width_mm=None,
+        fill_opacity=None,
+        label_field=None,
+        label_size_pt=None,
+        label_font=None,
+        label_color=None,
+        label_halo_mm=None,
+        label_halo_color=None,
         **kwargs,
     ):
         """Render a list of WKT features. Transport-agnostic rendering primitive.
@@ -1418,13 +1429,30 @@ class QgisMCPServer(QObject):
                     mem, value_field, n_classes=n_classes, mode=mode,
                     palette=palette, diverging=diverging, center=center,
                 )
+                self._paint_renderer(renderer, outline_color, outline_width_mm, fill_opacity)
                 mem.setRenderer(renderer)
             elif type_name == "LineString":
-                mem.setRenderer(QgsSingleSymbolRenderer(QgsLineSymbol.createSimple(
-                    {"line_color": "#1f78b4", "line_width": str(line_width)})))
+                symbol = QgsLineSymbol.createSimple(
+                    {"line_color": "#1f78b4", "line_width": str(line_width)})
+                self._apply_figure_symbol(symbol, outline_color, outline_width_mm, fill_opacity)
+                mem.setRenderer(QgsSingleSymbolRenderer(symbol))
             elif type_name == "Point":
-                mem.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple(
-                    {"color": "#1f78b4", "size": str(point_size), "outline_style": "no"})))
+                symbol = QgsMarkerSymbol.createSimple(
+                    {"color": "#1f78b4", "size": str(point_size), "outline_style": "no"})
+                self._apply_figure_symbol(symbol, outline_color, outline_width_mm, fill_opacity)
+                mem.setRenderer(QgsSingleSymbolRenderer(symbol))
+            elif outline_color is not None or outline_width_mm is not None or fill_opacity is not None:
+                symbol = QgsSymbol.defaultSymbol(mem.geometryType())
+                self._apply_figure_symbol(symbol, outline_color, outline_width_mm, fill_opacity)
+                mem.setRenderer(QgsSingleSymbolRenderer(symbol))
+
+            fonts_missing = self._label_layer(
+                mem, label_field,
+                size=9.0 if label_size_pt is None else float(label_size_pt),
+                buffer_mm=1.0 if label_halo_mm is None else float(label_halo_mm),
+                along_line=(type_name == "LineString"),
+                font_family=label_font, text_color=label_color, halo_color=label_halo_color,
+            )
 
             tile_bm, basemap_source, basemap_spec = self._load_basemap_layer(
                 basemap_spec, project, transient_ids
@@ -1463,7 +1491,7 @@ class QgisMCPServer(QObject):
             attr = basemap_spec.get("attribution") if basemap_spec else None
             self._save_map_image(img, output_png, ms, kwargs, attr)
 
-            return {
+            response = {
                 "output_path": output_png,
                 "width": int(width), "height": int(height), "dpi": int(dpi),
                 "extent": [
@@ -1481,6 +1509,14 @@ class QgisMCPServer(QObject):
                 "basemap_attribution": basemap_spec.get("attribution") if basemap_spec else None,
                 "basemap_source": basemap_source,
             }
+            return self._attach_style(
+                response, fonts_missing,
+                outline_color=outline_color, outline_width_mm=outline_width_mm,
+                fill_opacity=fill_opacity, label_field=label_field,
+                label_size_pt=label_size_pt, label_font=label_font,
+                label_color=label_color, label_halo_mm=label_halo_mm,
+                label_halo_color=label_halo_color,
+            )
         finally:
             for layer_id in transient_ids:
                 with contextlib.suppress(Exception):
@@ -1777,6 +1813,17 @@ class QgisMCPServer(QObject):
                     layer.setStrokeWidth(width)
                     if hasattr(layer, "setStrokeWidthUnit"):
                         layer.setStrokeWidthUnit(RENDER_MM)
+                if (
+                    kind == SYMBOL_MARKER
+                    and (color is not None or width is not None)
+                    and hasattr(layer, "strokeStyle")
+                    and hasattr(layer, "setStrokeStyle")
+                ):
+                    try:
+                        if layer.strokeStyle() == PEN_NONE:
+                            layer.setStrokeStyle(PEN_SOLID)
+                    except Exception:
+                        pass
 
     def _paint_renderer(self, renderer, outline_color=None, outline_width_mm=None, fill_opacity=None):
         """Apply figure controls to every symbol of a categorized or graduated renderer."""
@@ -1826,8 +1873,15 @@ class QgisMCPServer(QObject):
         self, outline_color=None, outline_width_mm=None, fill_opacity=None,
         breaks=None, colors=None, label_size_pt=None, label_font=None,
         label_color=None, label_halo_mm=None, label_halo_color=None,
+        label_field=None, label_size_default=9.0,
     ):
-        """The controls the caller set. Empty when every control was omitted."""
+        """The controls the caller set. Empty when every control was omitted.
+
+        ``label_size_default`` is the size drawn when a label control is set
+        and ``label_size_pt`` is not. Choropleth stays 9. OD is 8, link
+        density is 7. ``label_field`` is recorded only for tools that did
+        not label before this argument existed.
+        """
         applied = {}
         if outline_color is not None:
             applied["outline_color"] = outline_color
@@ -1839,12 +1893,14 @@ class QgisMCPServer(QObject):
             applied["breaks"] = [float(edge) for edge in breaks]
         if colors is not None:
             applied["colors"] = list(colors)
+        if label_field is not None:
+            applied["label_field"] = label_field
         label_set = (
             label_size_pt is not None or label_font is not None or label_color is not None
             or label_halo_mm is not None or label_halo_color is not None
         )
         if label_set:
-            applied["label_size_pt"] = float(9.0 if label_size_pt is None else label_size_pt)
+            applied["label_size_pt"] = float(label_size_default if label_size_pt is None else label_size_pt)
             applied["label_halo_mm"] = float(1.0 if label_halo_mm is None else label_halo_mm)
             applied["label_halo_color"] = "#ffffff" if label_halo_color is None else label_halo_color
             if label_font is not None:
@@ -1852,6 +1908,55 @@ class QgisMCPServer(QObject):
             if label_color is not None:
                 applied["label_color"] = label_color
         return applied
+
+    def _attach_style(self, result, fonts_missing=None, **controls):
+        applied = self._figure_style_applied(**controls)
+        if applied:
+            result["style_applied"] = applied
+        if fonts_missing:
+            result["fonts_missing"] = list(fonts_missing)
+        return result
+
+    def _paint_drawn_symbol(self, layer, outline_color=None, outline_width_mm=None, fill_opacity=None):
+        """Stroke and opacity on the renderer already attached to ``layer``."""
+        if outline_color is None and outline_width_mm is None and fill_opacity is None:
+            return
+        renderer = layer.renderer()
+        if renderer is None:
+            return
+        if isinstance(renderer, (QgsGraduatedSymbolRenderer, QgsCategorizedSymbolRenderer)):
+            self._paint_renderer(renderer, outline_color, outline_width_mm, fill_opacity)
+            return
+        symbol = None
+        try:
+            symbol = renderer.symbol()
+        except Exception:
+            symbol = None
+        if symbol is None:
+            return
+        cloned = symbol.clone()
+        self._apply_figure_symbol(cloned, outline_color, outline_width_mm, fill_opacity)
+        try:
+            renderer.setSymbol(cloned)
+        except Exception:
+            pass
+
+    def _label_layer(
+        self, layer, field, size, buffer_mm, along_line=False,
+        font_family=None, text_color=None, halo_color=None,
+    ):
+        if not field:
+            return []
+        names = [f.name() for f in layer.fields()]
+        if field not in names:
+            raise Exception(
+                "label_field %r not on the layer; available: %s. "
+                "Next: pass a field the layer has" % (field, names)
+            )
+        return self._apply_label_halo(
+            layer, field, size=size, buffer_mm=buffer_mm, along_line=along_line,
+            font_family=font_family, text_color=text_color, halo_color=halo_color,
+        ) or []
 
     def _build_graduated_renderer(
         self, layer, field, *, n_classes, mode, palette, diverging=False, center=0.0,
@@ -2467,6 +2572,15 @@ class QgisMCPServer(QObject):
         used_movingpandas=False,
         speed_field=None,
         background="white",
+        outline_color=None,
+        outline_width_mm=None,
+        fill_opacity=None,
+        label_field=None,
+        label_size_pt=None,
+        label_font=None,
+        label_color=None,
+        label_halo_mm=None,
+        label_halo_color=None,
         **kwargs,
     ):
         """Render trajectories from a parsed feature list (CSV path) or a GPX file.
@@ -2483,7 +2597,7 @@ class QgisMCPServer(QObject):
         try:
             if features is not None:
                 traj_layer, n_trajectories = self._build_trajectory_layer(
-                    features, render_mode, mode_col, speed_field
+                    features, render_mode, mode_col, speed_field, label_field
                 )
             else:
                 if not input_path:
@@ -2498,6 +2612,17 @@ class QgisMCPServer(QObject):
 
             self._apply_trajectory_renderer(
                 traj_layer, render_mode, mode_col, speed_field
+            )
+            if render_mode != "heatmap":
+                self._paint_drawn_symbol(
+                    traj_layer, outline_color, outline_width_mm, fill_opacity
+                )
+            fonts_missing = self._label_layer(
+                traj_layer, label_field,
+                size=9.0 if label_size_pt is None else float(label_size_pt),
+                buffer_mm=1.0 if label_halo_mm is None else float(label_halo_mm),
+                along_line=(render_mode == "lines"),
+                font_family=label_font, text_color=label_color, halo_color=label_halo_color,
             )
 
             basemap_layers = self._load_underlay_layers(
@@ -2555,7 +2680,7 @@ class QgisMCPServer(QObject):
             )
             modes = sorted({f.get("mode") for f in (features or []) if f.get("mode")}) or None
 
-            return {
+            response = {
                 "output_path": output_png,
                 "width": int(width),
                 "height": int(height),
@@ -2576,6 +2701,14 @@ class QgisMCPServer(QObject):
                 "basemap_attribution": basemap_spec.get("attribution") if basemap_spec else None,
                 "basemap_source": basemap_source,
             }
+            return self._attach_style(
+                response, fonts_missing,
+                outline_color=outline_color, outline_width_mm=outline_width_mm,
+                fill_opacity=fill_opacity, label_field=label_field,
+                label_size_pt=label_size_pt, label_font=label_font,
+                label_color=label_color, label_halo_mm=label_halo_mm,
+                label_halo_color=label_halo_color,
+            )
         finally:
             for tid in transient_ids:
                 try:
@@ -2583,7 +2716,7 @@ class QgisMCPServer(QObject):
                 except Exception:
                     pass
 
-    def _build_trajectory_layer(self, features, render_mode, mode_col, speed_field):
+    def _build_trajectory_layer(self, features, render_mode, mode_col, speed_field, label_field=None):
         """Build a transient point or line memory layer from the features list.
 
         For lines mode, groups by trip_id and emits one polyline per trajectory.
@@ -2591,12 +2724,15 @@ class QgisMCPServer(QObject):
 
         Returns (layer, n_trajectories).
         """
+        extra_label = label_field if label_field not in (None, "trip_id", "mode", "speed_kmh") else None
         if render_mode == "lines":
             fields = "field=trip_id:string"
             if speed_field:
                 fields += "&field=speed_kmh:double"
             if mode_col:
                 fields += "&field=mode:string"
+            if extra_label:
+                fields += "&field=%s:string" % extra_label
             uri = f"LineString?crs=EPSG:4326&{fields}"
             mem = QgsVectorLayer(uri, "_trajectory", "memory")
             if not mem.isValid():
@@ -2644,6 +2780,8 @@ class QgisMCPServer(QObject):
                     if mode_col:
                         modes = [c[1].get("mode", "") for c in chunk]
                         attrs.append(max(set(modes), key=modes.count) if modes else "")
+                    if extra_label:
+                        attrs.append(str(chunk[0][1].get(extra_label, "")))
                     feat.setAttributes(attrs)
                     new_features.append(feat)
             provider.addFeatures(new_features)
@@ -2654,6 +2792,8 @@ class QgisMCPServer(QObject):
         fields = "field=trip_id:string"
         if mode_col:
             fields += "&field=mode:string"
+        if extra_label:
+            fields += "&field=%s:string" % extra_label
         uri = f"Point?crs=EPSG:4326&{fields}"
         mem = QgsVectorLayer(uri, "_trajectory", "memory")
         if not mem.isValid():
@@ -2670,6 +2810,8 @@ class QgisMCPServer(QObject):
             attrs = [str(p["trip_id"])]
             if mode_col:
                 attrs.append(p.get("mode", ""))
+            if extra_label:
+                attrs.append(str(p.get(extra_label, "")))
             feat.setAttributes(attrs)
             new_features.append(feat)
         provider.addFeatures(new_features)
@@ -2800,6 +2942,14 @@ class QgisMCPServer(QObject):
         dpi=150,
         background="white",
         label_field=None,
+        outline_color=None,
+        outline_width_mm=None,
+        fill_opacity=None,
+        label_size_pt=None,
+        label_font=None,
+        label_color=None,
+        label_halo_mm=None,
+        label_halo_color=None,
         **kwargs,
     ):
         """Render origin-destination arcs over a polygon zones layer.
@@ -2888,14 +3038,22 @@ class QgisMCPServer(QObject):
                         "data-defined stroke width unavailable; using uniform width",
                         self.LOG_TAG, MSG_WARNING,
                     )
+            self._apply_od_figure(symbol, outline_color, outline_width_mm, fill_opacity)
             mem.setRenderer(QgsSingleSymbolRenderer(symbol))
+            fonts_missing = []
             if label_field:
                 names = [f.name() for f in mem.fields()]
                 if label_field not in names:
                     raise Exception(
                         f"label_field {label_field!r} not on OD layer; available: {names}"
                     )
-                self._apply_label_halo(mem, label_field, size=8.0, along_line=True)
+                fonts_missing = self._apply_label_halo(
+                    mem, label_field,
+                    size=8.0 if label_size_pt is None else float(label_size_pt),
+                    buffer_mm=1.0 if label_halo_mm is None else float(label_halo_mm),
+                    along_line=True,
+                    font_family=label_font, text_color=label_color, halo_color=label_halo_color,
+                ) or []
 
             basemap_layers = self._load_underlay_layers(
                 basemap_paths, project, transient_ids
@@ -2940,7 +3098,7 @@ class QgisMCPServer(QObject):
             attr = basemap_spec.get("attribution") if basemap_spec else None
             self._save_map_image(img, output_png, ms, kwargs, attr)
 
-            return {
+            response = {
                 "output_path": output_png,
                 "width": int(width),
                 "height": int(height),
@@ -2961,10 +3119,73 @@ class QgisMCPServer(QObject):
                 "n_unmatched_origins": unmatched_o,
                 "n_unmatched_destinations": unmatched_d,
             }
+            return self._attach_style(
+                response, fonts_missing, label_size_default=8.0,
+                outline_color=outline_color, outline_width_mm=outline_width_mm,
+                fill_opacity=fill_opacity,
+                label_size_pt=label_size_pt, label_font=label_font,
+                label_color=label_color, label_halo_mm=label_halo_mm,
+                label_halo_color=label_halo_color,
+            )
         finally:
             for tid in transient_ids:
                 try:
                     project.removeMapLayer(tid)
+                except Exception:
+                    pass
+
+    def _apply_od_figure(self, symbol, outline_color=None, outline_width_mm=None, fill_opacity=None):
+        """Colour, constant width, and opacity on an OD line or arrow.
+
+        A set width clears the data-defined flow width. An omitted width leaves
+        that scaling in place. Arrow colour lives on the fill subsymbol.
+        """
+        if outline_color is None and outline_width_mm is None and fill_opacity is None:
+            return
+        self._apply_figure_symbol(symbol, outline_color, outline_width_mm, fill_opacity)
+        for index in range(symbol.symbolLayerCount()):
+            layer = symbol.symbolLayer(index)
+            sub = None
+            try:
+                sub = layer.subSymbol()
+            except Exception:
+                sub = None
+            if sub is not None and (outline_color is not None or fill_opacity is not None):
+                cloned = sub.clone()
+                if outline_color is not None:
+                    try:
+                        cloned.setColor(QColor(outline_color))
+                    except Exception:
+                        pass
+                if fill_opacity is not None:
+                    try:
+                        cloned.setOpacity(1.0)
+                    except Exception:
+                        pass
+                try:
+                    layer.setSubSymbol(cloned)
+                except Exception:
+                    pass
+            if outline_width_mm is None:
+                continue
+            width = float(outline_width_mm)
+            for prop_name in ("PropertyStrokeWidth", "PropertyArrowWidth"):
+                prop = getattr(QgsSymbolLayer, prop_name, None)
+                if prop is None:
+                    continue
+                try:
+                    layer.setDataDefinedProperty(prop, QgsProperty())
+                except Exception:
+                    pass
+            for setter in ("setArrowWidth", "setWidth"):
+                if hasattr(layer, setter):
+                    try:
+                        getattr(layer, setter)(width)
+                    except Exception:
+                        pass
+            if hasattr(layer, "setWidthUnit"):
+                try:
+                    layer.setWidthUnit(RENDER_MM)
                 except Exception:
                     pass
 
@@ -2979,6 +3200,15 @@ class QgisMCPServer(QObject):
         height=1200,
         dpi=150,
         background="white",
+        outline_color=None,
+        outline_width_mm=None,
+        fill_opacity=None,
+        label_field=None,
+        label_size_pt=None,
+        label_font=None,
+        label_color=None,
+        label_halo_mm=None,
+        label_halo_color=None,
         **kwargs,
     ):
         """Render Voronoi service-area catchments around point features. v2 tool.
@@ -3019,16 +3249,25 @@ class QgisMCPServer(QObject):
             project.addMapLayer(voro)
             transient_ids.append(voro.id())
 
+            alpha = 90 if fill_opacity is None else int(round(float(fill_opacity) * 255))
             fill = QgsFillSymbol.createSimple({
-                "color": "200,220,240,90",
+                "color": "200,220,240,%d" % alpha,
                 "outline_color": "70,90,120",
                 "outline_width": "0.3",
             })
+            self._apply_figure_symbol(fill, outline_color, outline_width_mm, None)
             voro.setRenderer(QgsSingleSymbolRenderer(fill))
             psym = QgsMarkerSymbol.createSimple({
                 "name": "circle", "color": "#b2182b", "size": "1.4", "outline_style": "no",
             })
+            self._apply_figure_symbol(psym, outline_color, outline_width_mm, fill_opacity)
             pts.setRenderer(QgsSingleSymbolRenderer(psym))
+            fonts_missing = self._label_layer(
+                pts, label_field,
+                size=9.0 if label_size_pt is None else float(label_size_pt),
+                buffer_mm=1.0 if label_halo_mm is None else float(label_halo_mm),
+                font_family=label_font, text_color=label_color, halo_color=label_halo_color,
+            )
 
             tile_bm, basemap_source, basemap_spec = self._load_basemap_layer(
                 basemap_spec, project, transient_ids
@@ -3071,7 +3310,7 @@ class QgisMCPServer(QObject):
             attr = basemap_spec.get("attribution") if basemap_spec else None
             self._save_map_image(img, output_png, ms, kwargs, attr)
 
-            return {
+            response = {
                 "output_path": output_png,
                 "width": int(width), "height": int(height), "dpi": int(dpi),
                 "extent": [
@@ -3086,6 +3325,14 @@ class QgisMCPServer(QObject):
                 "basemap_attribution": basemap_spec.get("attribution") if basemap_spec else None,
                 "basemap_source": basemap_source,
             }
+            return self._attach_style(
+                response, fonts_missing,
+                outline_color=outline_color, outline_width_mm=outline_width_mm,
+                fill_opacity=fill_opacity, label_field=label_field,
+                label_size_pt=label_size_pt, label_font=label_font,
+                label_color=label_color, label_halo_mm=label_halo_mm,
+                label_halo_color=label_halo_color,
+            )
         finally:
             for tid in transient_ids:
                 try:
@@ -3107,6 +3354,15 @@ class QgisMCPServer(QObject):
         height=1200,
         dpi=150,
         background="white",
+        outline_color=None,
+        outline_width_mm=None,
+        fill_opacity=None,
+        label_field=None,
+        label_size_pt=None,
+        label_font=None,
+        label_color=None,
+        label_halo_mm=None,
+        label_halo_color=None,
         **kwargs,
     ):
         """Render pie/bar charts on each feature (chart-in-map). v2 workflow tool.
@@ -3134,6 +3390,7 @@ class QgisMCPServer(QObject):
                 base.setColor(QColor(236, 236, 236))
             except Exception:
                 pass
+            self._apply_figure_symbol(base, outline_color, outline_width_mm, fill_opacity)
             layer.setRenderer(QgsSingleSymbolRenderer(base))
 
             n = len(value_fields)
@@ -3149,8 +3406,8 @@ class QgisMCPServer(QObject):
                 ds.sizeType = RENDER_MM
             except Exception:
                 pass
-            ds.penColor = QColor("white")
-            ds.penWidth = 0.2
+            ds.penColor = QColor(outline_color) if outline_color is not None else QColor("white")
+            ds.penWidth = 0.2 if outline_width_mm is None else float(outline_width_mm)
 
             dr = QgsSingleCategoryDiagramRenderer()
             dr.setDiagram(diagram)
@@ -3166,6 +3423,18 @@ class QgisMCPServer(QObject):
                 except Exception:
                     pass
             layer.setDiagramLayerSettings(dls)
+            along_line = False
+            try:
+                along_line = layer.geometryType() == GEOM_LINE
+            except Exception:
+                along_line = False
+            fonts_missing = self._label_layer(
+                layer, label_field,
+                size=9.0 if label_size_pt is None else float(label_size_pt),
+                buffer_mm=1.0 if label_halo_mm is None else float(label_halo_mm),
+                along_line=along_line,
+                font_family=label_font, text_color=label_color, halo_color=label_halo_color,
+            )
 
             tile_bm, basemap_source, basemap_spec = self._load_basemap_layer(
                 basemap_spec, project, transient_ids
@@ -3208,7 +3477,7 @@ class QgisMCPServer(QObject):
             attr = basemap_spec.get("attribution") if basemap_spec else None
             self._save_map_image(img, output_png, ms, kwargs, attr)
 
-            return {
+            response = {
                 "output_path": output_png,
                 "width": int(width), "height": int(height), "dpi": int(dpi),
                 "extent": [
@@ -3223,6 +3492,14 @@ class QgisMCPServer(QObject):
                 "basemap_attribution": basemap_spec.get("attribution") if basemap_spec else None,
                 "basemap_source": basemap_source,
             }
+            return self._attach_style(
+                response, fonts_missing,
+                outline_color=outline_color, outline_width_mm=outline_width_mm,
+                fill_opacity=fill_opacity, label_field=label_field,
+                label_size_pt=label_size_pt, label_font=label_font,
+                label_color=label_color, label_halo_mm=label_halo_mm,
+                label_halo_color=label_halo_color,
+            )
         finally:
             for tid in transient_ids:
                 try:
@@ -3248,6 +3525,14 @@ class QgisMCPServer(QObject):
         height=1200,
         dpi=150,
         label_field=None,
+        outline_color=None,
+        outline_width_mm=None,
+        fill_opacity=None,
+        label_size_pt=None,
+        label_font=None,
+        label_color=None,
+        label_halo_mm=None,
+        label_halo_color=None,
         **kwargs,
     ):
         """Render a graduated link-density choropleth from a {link_id → density} dict.
@@ -3323,13 +3608,21 @@ class QgisMCPServer(QObject):
             renderer.setSourceColorRamp(ramp)
             renderer.setClassificationMethod(method_cls())
             renderer.updateClasses(drm_layer, int(n_classes))
+            self._paint_renderer(renderer, outline_color, outline_width_mm, fill_opacity)
             drm_layer.setRenderer(renderer)
+            fonts_missing = []
             if label_field:
                 halo_field = density_field if label_field in (True, "density", density_field) else label_field
                 names = [f.name() for f in drm_layer.fields()]
                 if halo_field not in names:
                     halo_field = density_field
-                self._apply_label_halo(drm_layer, halo_field, size=7.0, along_line=True)
+                fonts_missing = self._apply_label_halo(
+                    drm_layer, halo_field,
+                    size=7.0 if label_size_pt is None else float(label_size_pt),
+                    buffer_mm=1.0 if label_halo_mm is None else float(label_halo_mm),
+                    along_line=True,
+                    font_family=label_font, text_color=label_color, halo_color=label_halo_color,
+                ) or []
 
             ranges = list(renderer.ranges())
             breaks: list[float] = []
@@ -3388,7 +3681,7 @@ class QgisMCPServer(QObject):
             attr = basemap_spec.get("attribution") if basemap_spec else None
             self._save_map_image(img, output_png, ms, kwargs, attr)
 
-            return {
+            response = {
                 "output_path": output_png,
                 "width": int(width),
                 "height": int(height),
@@ -3410,6 +3703,14 @@ class QgisMCPServer(QObject):
                 "min_density": float(min_density),
                 "max_density": float(max_density),
             }
+            return self._attach_style(
+                response, fonts_missing, label_size_default=7.0,
+                outline_color=outline_color, outline_width_mm=outline_width_mm,
+                fill_opacity=fill_opacity,
+                label_size_pt=label_size_pt, label_font=label_font,
+                label_color=label_color, label_halo_mm=label_halo_mm,
+                label_halo_color=label_halo_color,
+            )
         finally:
             # Revert subset filter and remove temp attribute before unloading
             try:

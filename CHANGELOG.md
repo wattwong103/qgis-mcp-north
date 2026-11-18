@@ -3,6 +3,29 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.21.0 — 2026-11-18 — line and point figure controls
+
+### Added
+
+- `qgis_render_trajectory`, `qgis_render_od_flows`, `qgis_render_link_density`,
+  `qgis_render_diagram_map`, `qgis_render_catchment` and `qgis_render_from_duckdb`
+  take the choropleth stroke, opacity and label arguments: `outline_color`,
+  `outline_width_mm` (0 to 5; 0 is a one-pixel hairline) and `fill_opacity`
+  (0 to 1). On a line the outline is the line. On a point it is the marker
+  outline and the fill stays. Omitted arguments are not sent.
+- Trajectory lines coloured by `mode_col` refuse a stroke that would replace
+  those colours. Heatmap refuses stroke and opacity. A new `label_field`
+  labels `trip_id`, `mode`, `speed_kmh`, another CSV column, or a GPX field
+  (9 pt when the label type is omitted).
+- OD width, when set, replaces the flow-scaled width. Omitted, the arcs still
+  scale. OD labels stay 8 pt and link-density labels stay 7 pt when the new
+  label arguments are omitted. Link-density colour, when set, replaces the ramp.
+- Diagram stroke also sets the chart pen. Catchment opacity replaces the cell
+  alpha of 90/255. DuckDB paints the graduated renderer, or the unstyled
+  `#1f78b4` line and point.
+- Compound `qgis_render` forwards these controls for those modes. `breaks`
+  stays choropleth-only. An older plugin raises `PluginOutdatedError`.
+
 ## v1.20.0 — 2026-11-18 — aggregate points and lines onto polygons
 
 ### Added

@@ -25,6 +25,13 @@ from qgis.PyQt.QtCore import QIODevice, Qt
 from qgis.PyQt.QtGui import QFontDatabase
 from qgis.PyQt.QtWidgets import QToolButton
 
+try:
+    PEN_SOLID = Qt.PenStyle.SolidLine
+    PEN_NONE = Qt.PenStyle.NoPen
+except AttributeError:
+    PEN_SOLID = Qt.SolidLine
+    PEN_NONE = Qt.NoPen
+
 # ── Layer types ──────────────────────────────────────────────────────
 try:
     LAYER_VECTOR = Qgis.LayerType.Vector

@@ -59,7 +59,7 @@ for free — a v0.4 architectural promise that v0.5+ tools inherit.
 | `qgis_route_on_network` | Snap stop sequences onto DRM/rail (GUFM Tokyo TSV); writes routed CSV |
 | `qgis_ping` | Liveness check against the plugin socket or headless subprocess |
 | `qgis_diagnose` | Stack health + plugin vs server version match |
-| `qgis_render_from_duckdb` | Render a DuckDB query result directly, skipping the CSV intermediate
+| `qgis_render_from_duckdb` | Render a DuckDB query result directly, with optional stroke, opacity and labels
 | `qgis_list_basemaps` | List every basemap `basemap=` accepts here: presets + QuickMapServices catalog |
 | `qgis_layer_inspect` | Metadata-only inspect (no project mutation) |
 | `qgis_load_layer` | Register layer + return layer_id; optional CRS override |
@@ -68,8 +68,8 @@ for free — a v0.4 architectural promise that v0.5+ tools inherit.
 | `qgis_style_graduated` | Graduated (value-binned) — quantile/equal/jenks/pretty |
 | `qgis_render_map` | Generic multi-layer render to PNG |
 | `qgis_render_choropleth` | Zone polygon + value CSV → choropleth, one call |
-| `qgis_render_trajectory` | Lines/points/heatmap from CSV/GPX. Stride sampling; optional `movingpandas` speed bins |
-| `qgis_render_od_flows` | Origin-destination arcs over a zones layer, data-defined widths |
+| `qgis_render_trajectory` | Lines/points/heatmap from CSV/GPX. Stride sampling; optional stroke, opacity and labels |
+| `qgis_render_od_flows` | Origin-destination arcs over a zones layer. Width scales with flow unless a stroke width is set |
 | `qgis_export_layout` | Print-composer → PNG/PDF/SVG |
 | `qgis_compose_panels` | Grid of map panels on linked colour scales with colour bars, set fonts and line weights → PDF/SVG/PNG |
 | `qgis_batch_render` | Fan-out per attribute value; manifest + per-value errors |

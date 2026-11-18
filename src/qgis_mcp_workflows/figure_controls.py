@@ -126,6 +126,43 @@ def color_params(colors: list[str] | None, classes: list[str] | None) -> dict:
     return {"colors": list(colors)}
 
 
+def control_params(
+    *,
+    outline_color: str | None,
+    outline_width_mm: float | None,
+    fill_opacity: float | None,
+    label_field: str | None,
+    label_size_pt: float | None,
+    label_font: str | None,
+    label_color: str | None,
+    label_halo_mm: float | None,
+    label_halo_color: str | None,
+    track_label_field: bool = False,
+) -> dict:
+    """Stroke, opacity and label keys the caller set.
+
+    ``track_label_field`` is for tools that did not label before. OD and link
+    density already take ``label_field``, so an older plugin still labels and
+    that key alone is not an override.
+    """
+    sent = symbol_params(
+        outline_color=outline_color,
+        outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity,
+    )
+    sent.update(label_params(
+        label_field=label_field,
+        label_size_pt=label_size_pt,
+        label_font=label_font,
+        label_color=label_color,
+        label_halo_mm=label_halo_mm,
+        label_halo_color=label_halo_color,
+    ))
+    if track_label_field and label_field is not None:
+        sent["label_field"] = label_field
+    return sent
+
+
 def label_params(
     *,
     label_field: str | None,
@@ -135,7 +172,7 @@ def label_params(
     label_halo_mm: float | None,
     label_halo_color: str | None,
 ) -> dict:
-    """Choropleth label type. Any of these requires ``label_field``."""
+    """Label type. Any of these requires ``label_field``."""
     provided = {
         "label_size_pt": label_size_pt,
         "label_font": label_font,
@@ -159,3 +196,10 @@ def require_style_applied(result: dict, sent: dict, transport: str) -> None:
     """An older plugin accepts the keys and draws the old figure."""
     if sent and "style_applied" not in result:
         raise PluginOutdatedError(transport)
+
+
+def echoed_style(result: dict, sent: dict, transport: str) -> tuple[dict | None, list]:
+    """``style_applied`` from the plugin, after the outdated-plugin check."""
+    require_style_applied(result, sent, transport)
+    missing = result.get("fonts_missing") or []
+    return result.get("style_applied"), list(missing)
