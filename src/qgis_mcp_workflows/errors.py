@@ -367,6 +367,66 @@ class ExpressionEmptyError(QgisMcpWorkflowsError):
         self.detail = detail
 
 
+class BufferCrsError(QgisMcpWorkflowsError):
+    """No projected CRS could be chosen, so a buffer in metres cannot be measured."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"distance_m is metres. A geographic layer is measured in a UTM zone "
+            f"(or EPSG:3995 / EPSG:3031 near the poles) and written back in the source CRS. "
+            f"Next: call qgis_layer_inspect and check crs. A layer with no CRS cannot be buffered in metres."
+        )
+        self.detail = detail
+
+
+class BufferEmptyError(QgisMcpWorkflowsError):
+    """A buffer wrote no features."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"Next: call qgis_layer_inspect and check n_features and geometry_type, then retry qgis_buffer."
+        )
+        self.detail = detail
+
+
+class DissolveEmptyError(QgisMcpWorkflowsError):
+    """A dissolve wrote no features."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"Next: call qgis_layer_inspect and check n_features, then retry qgis_dissolve."
+        )
+        self.detail = detail
+
+
+class ClipEmptyError(QgisMcpWorkflowsError):
+    """A study-area clip kept no input features."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"Likely the layers do not overlap. "
+            f"Next: call qgis_layer_inspect on both paths and compare crs, extent, and geometry_type."
+        )
+        self.detail = detail
+
+
+class VoronoiError(QgisMcpWorkflowsError):
+    """Voronoi polygons need at least three points, or the diagram was empty."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"qgis_voronoi writes polygons with QgsGeometry.voronoiDiagram, the same call "
+            f"qgis_render_catchment uses for the PNG, and it needs at least 3 points. "
+            f"Next: call qgis_layer_inspect and check geometry_type is point and n_features is at least 3."
+        )
+        self.detail = detail
+
+
 class PythonEvalDisabledError(QgisMcpWorkflowsError):
     """qgis_eval was called while allow_python_eval is false."""
 

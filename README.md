@@ -46,12 +46,16 @@ The headless runner injects a stub `iface` that no-ops UI calls. Every command
 handler that doesn't touch the canvas / layer-tree-view works in both transports
 for free — a v0.4 architectural promise that v0.5+ tools inherit.
 
-## Tools (30 standalone — 29 workflow + `qgis_eval`; 5 grouped in compound mode)
+## Tools (34 standalone — 33 workflow + `qgis_eval`; 5 grouped in compound mode)
 
 | Tool | Purpose |
 |---|---|
 | `qgis_spatial_join` | Join attributes by location; writes GeoPackage / GeoJSON |
 | `qgis_aggregate_to_zones` | Count, sum, or mean points or lines onto polygons; writes GeoPackage / GeoJSON. Full mode only |
+| `qgis_buffer` | Buffer points, lines, or polygons by a distance in metres; writes GeoPackage / GeoJSON. Full mode only |
+| `qgis_dissolve` | One feature, or one feature per field value; writes GeoPackage / GeoJSON. Full mode only |
+| `qgis_clip` | Cut a layer to a polygon study area; writes GeoPackage / GeoJSON. Full mode only |
+| `qgis_voronoi` | Voronoi polygons from the same diagram as the catchment PNG; writes GeoPackage / GeoJSON. Full mode only |
 | `qgis_expression` | Calculated column and/or filter from a QGIS expression; writes GeoPackage / GeoJSON. Full mode only |
 | `qgis_zonal_stats` | Raster statistics per polygon (JAXA LULC, DEM), plus majority and a class histogram → GeoPackage or CSV |
 | `qgis_export_atlas` | Export every atlas page from a print layout (PNG per feature or one PDF) |

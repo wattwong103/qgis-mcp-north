@@ -361,6 +361,10 @@ class QgisMCPServer(QObject):
                 "export_atlas": self.export_atlas,
                 "spatial_join": self.spatial_join,
                 "aggregate_to_zones": self.aggregate_to_zones,
+                "buffer": self.buffer,
+                "dissolve": self.dissolve,
+                "clip": self.clip,
+                "voronoi": self.voronoi,
                 "apply_expression": self.apply_expression,
                 "zonal_stats": self.zonal_stats,
                 "compose_layout": self.compose_layout,
@@ -5237,6 +5241,523 @@ class QgisMCPServer(QObject):
             "n_with_value": count_with_value(reduced),
             "field_name": out_name,
             "statistic": stat,
+        }
+
+    def _load_vector(self, path, name):
+        layer = QgsVectorLayer(path, name, "ogr")
+        if not layer.isValid():
+            raise Exception("LAYER_NOT_FOUND: %s" % path)
+        return layer
+
+    def _unit_sources(self):
+        sources = []
+        try:
+            distance = getattr(Qgis, "DistanceUnit", None)
+            if distance is not None:
+                sources.append(distance)
+        except Exception:
+            pass
+        try:
+            from qgis.core import QgsUnitTypes
+
+            sources.append(QgsUnitTypes)
+        except Exception:
+            pass
+        return sources
+
+    def _distance_unit_key(self, crs):
+        """Map-unit key for plan_buffer: m, ft, deg, unknown, and the rest."""
+        try:
+            unit = crs.mapUnits()
+        except Exception:
+            return "unknown"
+        table = (
+            (("Meters", "DistanceMeters"), "m"),
+            (("Kilometers", "DistanceKilometers"), "km"),
+            (("Centimeters", "DistanceCentimeters"), "cm"),
+            (("Millimeters", "DistanceMillimeters"), "mm"),
+            (("Feet", "DistanceFeet"), "ft"),
+            (("Yards", "DistanceYards"), "yd"),
+            (("Miles", "DistanceMiles"), "mi"),
+            (("NauticalMiles", "DistanceNauticalMiles"), "nmi"),
+            (("Degrees", "DistanceDegrees"), "deg"),
+            (("FeetUs", "DistanceUSSurveyFeet", "DistanceFeetUs"), "us_ft"),
+        )
+        sources = self._unit_sources()
+        for names, key in table:
+            consts = []
+            for source in sources:
+                for name in names:
+                    const = getattr(source, name, None)
+                    if const is not None:
+                        consts.append(const)
+            if unit in consts:
+                return key
+        return "unknown"
+
+    def _centroid_lonlat(self, layer, crs):
+        """Layer-extent centroid in EPSG:4326, or (None, None) when it cannot be transformed."""
+        try:
+            ext = layer.extent()
+            if ext is None or ext.isEmpty():
+                return None, None
+            cx = (ext.xMinimum() + ext.xMaximum()) / 2.0
+            cy = (ext.yMinimum() + ext.yMaximum()) / 2.0
+        except Exception:
+            return None, None
+        dest = QgsCoordinateReferenceSystem("EPSG:4326")
+        if not dest.isValid():
+            return None, None
+        try:
+            if crs.authid() == "EPSG:4326":
+                return cx, cy
+            point = QgsCoordinateTransform(crs, dest, QgsProject.instance()).transform(
+                QgsPointXY(cx, cy)
+            )
+            return point.x(), point.y()
+        except Exception:
+            try:
+                if crs.isGeographic() and abs(cx) <= 180.0 and abs(cy) <= 90.0:
+                    return cx, cy
+            except Exception:
+                pass
+            return None, None
+
+    def _union_geometries(self, geoms):
+        cleaned = []
+        for geom in geoms:
+            if geom is None or geom.isEmpty():
+                continue
+            cleaned.append(QgsGeometry(geom))
+        if not cleaned:
+            return None
+        unary = getattr(QgsGeometry, "unaryUnion", None)
+        if unary is not None:
+            try:
+                merged = unary(cleaned)
+                if merged is not None and not merged.isEmpty():
+                    return merged
+            except Exception:
+                pass
+        merged = QgsGeometry(cleaned[0])
+        for geom in cleaned[1:]:
+            try:
+                merged = merged.combine(geom)
+            except Exception:
+                return None
+            if merged is None or merged.isEmpty():
+                return None
+        return merged
+
+    def _multi_wkb(self, layer, fallback):
+        try:
+            text = QgsWkbTypes.displayString(QgsWkbTypes.multiType(layer.wkbType()))
+            if text:
+                return text
+        except Exception:
+            pass
+        return fallback
+
+    def _force_multi(self, geom):
+        if geom is None or geom.isEmpty():
+            return None
+        geom = QgsGeometry(geom)
+        try:
+            if not QgsWkbTypes.isMultiType(geom.wkbType()):
+                geom.convertToMultiType()
+        except Exception:
+            pass
+        if geom.isEmpty():
+            return None
+        return geom
+
+    def _same_type_parts(self, geom, geom_type):
+        """Drop collection pieces that are not the input geometry type."""
+        if geom is None or geom.isEmpty():
+            return None
+        try:
+            flat = QgsWkbTypes.flatType(geom.wkbType())
+        except Exception:
+            return geom
+        collection = getattr(QgsWkbTypes, "GeometryCollection", None)
+        if collection is None or flat != collection:
+            return geom
+        try:
+            pieces = geom.asGeometryCollection()
+        except Exception:
+            return None
+        parts = []
+        for part in pieces:
+            if part is None or part.isEmpty():
+                continue
+            try:
+                if part.type() != geom_type:
+                    continue
+            except Exception:
+                continue
+            parts.append(part)
+        if not parts:
+            return None
+        if len(parts) == 1:
+            return parts[0]
+        collected = getattr(QgsGeometry, "collectGeometry", None)
+        if collected is not None:
+            try:
+                return collected(parts)
+            except Exception:
+                pass
+        merged = QgsGeometry(parts[0])
+        for part in parts[1:]:
+            merged = merged.combine(part)
+        return merged
+
+    def _geometry_memory(self, layer, name, wkb):
+        crs = layer.crs()
+        auth = ""
+        try:
+            auth = crs.authid() or ""
+        except Exception:
+            auth = ""
+        mem = QgsVectorLayer("%s?crs=%s" % (wkb, auth or "EPSG:4326"), name, "memory")
+        if not mem.isValid():
+            raise Exception("WRITE_FAILED: could not create memory layer %s" % name)
+        if crs is not None and crs.isValid():
+            try:
+                mem.setCrs(crs)
+            except Exception:
+                pass
+        provider = mem.dataProvider()
+        provider.addAttributes(layer.fields().toList())
+        mem.updateFields()
+        return mem
+
+    def _write_features(self, layer, features, output_path):
+        if features:
+            layer.dataProvider().addFeatures(features)
+        layer.updateExtents()
+        return self._write_vector_layer(layer, output_path)
+
+    def _feature_point(self, geom):
+        try:
+            if geom.isMultipart():
+                points = geom.asMultiPoint()
+                if not points:
+                    return None
+                return points[0]
+            return geom.asPoint()
+        except Exception:
+            return None
+
+    def buffer(self, path, output_path, distance_m):
+        """Buffer every feature. Geographic layers are measured in a projected CRS.
+
+        The written file is in the source CRS. This handler does not touch iface
+        and does not add the layer to the project.
+        """
+        from .geometry import (
+            BUFFER_SEGMENTS,
+            buffer_crs_detail,
+            buffer_empty_detail,
+            buffer_geometry_detail,
+            plan_buffer,
+        )
+
+        layer = self._load_vector(path, "_buffer_in")
+        geom_label = self._geom_label(layer)
+        crs_label = self._crs_label(layer)
+        if geom_label not in ("point", "line", "polygon"):
+            raise Exception(buffer_geometry_detail(geom_label, crs_label))
+        crs = layer.crs()
+        geographic = False
+        unit = "unknown"
+        lon, lat = None, None
+        if crs is not None and crs.isValid():
+            try:
+                geographic = bool(crs.isGeographic())
+            except Exception:
+                geographic = False
+            unit = self._distance_unit_key(crs)
+            lon, lat = self._centroid_lonlat(layer, crs)
+        plan = plan_buffer(crs_label, geographic, unit, lon, lat)
+        if plan is None:
+            raise Exception(buffer_crs_detail(crs_label))
+        measure_crs, metres_per_unit, reproject = plan
+        distance_map = float(distance_m) / float(metres_per_unit)
+        work = layer
+        back = None
+        if reproject:
+            measure = QgsCoordinateReferenceSystem(measure_crs)
+            if not measure.isValid():
+                raise Exception(buffer_crs_detail(crs_label))
+            work = self._memory_copy(layer, "_buffer_measure", dest_crs=measure)
+            back = QgsCoordinateTransform(measure, crs, QgsProject.instance())
+        out = self._geometry_memory(layer, "buffered", "MultiPolygon")
+        written = []
+        for feat in work.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            buffered = geom.buffer(distance_map, int(BUFFER_SEGMENTS))
+            if buffered is None or buffered.isEmpty():
+                continue
+            if back is not None:
+                try:
+                    buffered.transform(back)
+                except Exception as err:
+                    raise Exception(buffer_crs_detail(crs_label)) from err
+            buffered = self._force_multi(buffered)
+            if buffered is None:
+                continue
+            feature = QgsFeature(out.fields())
+            feature.setAttributes(list(feat.attributes()))
+            feature.setGeometry(buffered)
+            written.append(feature)
+        n_input = int(layer.featureCount())
+        if not written:
+            raise Exception(buffer_empty_detail(n_input, geom_label, crs_label))
+        path_written = self._write_features(out, written, output_path)
+        return {
+            "output_path": os.path.abspath(path_written),
+            "n_input": n_input,
+            "n_output": len(written),
+            "distance_m": float(distance_m),
+            "measure_crs": measure_crs,
+            "source_crs": crs_label,
+        }
+
+    def dissolve(self, path, output_path, field=None):
+        """One feature, or one feature per field value. Does not touch iface."""
+        from .geometry import dissolve_empty_detail, dissolve_groups, group_key
+
+        layer = self._load_vector(path, "_dissolve_in")
+        geom_label = self._geom_label(layer)
+        crs_label = self._crs_label(layer)
+        column = (field or "").strip()
+        if column:
+            names = [item.name() for item in layer.fields()]
+            if column not in names:
+                raise Exception("FIELD_NOT_FOUND: %s. Available: %s" % (column, names))
+        kept = []
+        for feat in layer.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            value = None
+            if column:
+                value = group_key(self._plain_value(feat[column]))
+            kept.append((list(feat.attributes()), QgsGeometry(geom), value))
+        n_input = int(layer.featureCount())
+        if not kept:
+            raise Exception(dissolve_empty_detail(n_input, geom_label, crs_label))
+        keys = None if not column else [item[2] for item in kept]
+        groups = dissolve_groups(len(kept), keys)
+        if geom_label == "line":
+            fallback = "MultiLineString"
+        elif geom_label == "point":
+            fallback = "MultiPoint"
+        else:
+            fallback = "MultiPolygon"
+        out = self._geometry_memory(layer, "dissolved", self._multi_wkb(layer, fallback))
+        written = []
+        for group in groups:
+            merged = self._union_geometries([kept[index][1] for index in group])
+            merged = self._force_multi(merged)
+            if merged is None:
+                continue
+            feature = QgsFeature(out.fields())
+            feature.setAttributes(list(kept[group[0]][0]))
+            feature.setGeometry(merged)
+            written.append(feature)
+        if not written:
+            raise Exception(dissolve_empty_detail(n_input, geom_label, crs_label))
+        path_written = self._write_features(out, written, output_path)
+        return {
+            "output_path": os.path.abspath(path_written),
+            "n_input": n_input,
+            "n_output": len(written),
+            "field": column or None,
+        }
+
+    def clip(self, path, overlay_path, output_path):
+        """Cut features to a polygon study area. Does not touch iface."""
+        from .geometry import clip_empty_detail, clip_geometry_detail, clip_roles_ok
+
+        src = self._load_vector(path, "_clip_in")
+        overlay = self._load_vector(overlay_path, "_clip_overlay")
+        src_geom = self._geom_label(src)
+        over_geom = self._geom_label(overlay)
+        src_crs = self._crs_label(src)
+        over_crs = self._crs_label(overlay)
+        if not clip_roles_ok(src_geom, over_geom):
+            raise Exception(clip_geometry_detail(src_geom, src_crs, over_geom, over_crs))
+        same_crs = False
+        try:
+            same_crs = overlay.crs() == src.crs()
+        except Exception:
+            same_crs = False
+        overlay_work = overlay
+        if not same_crs:
+            overlay_work = self._memory_copy(overlay, "_clip_overlay_reproj", dest_crs=src.crs())
+        parts = []
+        for feat in overlay_work.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            parts.append(QgsGeometry(geom))
+        n_input = int(src.featureCount())
+        n_overlay = int(overlay.featureCount())
+        mask = self._union_geometries(parts)
+        if mask is None:
+            raise Exception(
+                clip_empty_detail(n_input, src_geom, src_crs, n_overlay, over_geom, over_crs)
+            )
+        if src_geom == "line":
+            fallback = "MultiLineString"
+        elif src_geom == "point":
+            fallback = "MultiPoint"
+        else:
+            fallback = "MultiPolygon"
+        out = self._geometry_memory(src, "clipped", self._multi_wkb(src, fallback))
+        written = []
+        geom_type = src.geometryType()
+        for feat in src.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            try:
+                hits = geom.intersects(mask)
+            except Exception:
+                hits = False
+            if not hits:
+                continue
+            try:
+                cut = geom.intersection(mask)
+            except Exception:
+                continue
+            cut = self._same_type_parts(cut, geom_type)
+            cut = self._force_multi(cut)
+            if cut is None:
+                continue
+            feature = QgsFeature(out.fields())
+            feature.setAttributes(list(feat.attributes()))
+            feature.setGeometry(cut)
+            written.append(feature)
+        if not written:
+            raise Exception(
+                clip_empty_detail(n_input, src_geom, src_crs, n_overlay, over_geom, over_crs)
+            )
+        path_written = self._write_features(out, written, output_path)
+        return {
+            "output_path": os.path.abspath(path_written),
+            "n_input": n_input,
+            "n_overlay": n_overlay,
+            "n_output": len(written),
+        }
+
+    def voronoi(self, path, output_path):
+        """Write Voronoi polygons. Same QgsGeometry.voronoiDiagram as the catchment PNG.
+
+        Does not touch iface. The output CRS is the source CRS.
+        """
+        from .geometry import (
+            claim_cells,
+            voronoi_empty_detail,
+            voronoi_geometry_detail,
+            voronoi_points_detail,
+            voronoi_ready,
+        )
+
+        layer = self._load_vector(path, "_voronoi_in")
+        geom_label = self._geom_label(layer)
+        crs_label = self._crs_label(layer)
+        if geom_label != "point":
+            raise Exception(voronoi_geometry_detail(geom_label, crs_label))
+        sites = []
+        for feat in layer.getFeatures():
+            geom = feat.geometry()
+            if geom is None or geom.isEmpty():
+                continue
+            point = self._feature_point(geom)
+            if point is None:
+                continue
+            sites.append((point, list(feat.attributes())))
+        n_input = len(sites)
+        if not voronoi_ready(n_input):
+            raise Exception(voronoi_points_detail(n_input, geom_label, crs_label))
+        diagram = QgsGeometry.fromMultiPointXY([site[0] for site in sites]).voronoiDiagram()
+        if diagram is None or diagram.isEmpty():
+            raise Exception(voronoi_empty_detail(crs_label))
+        cells = []
+        for part in diagram.asGeometryCollection():
+            if part is not None and not part.isEmpty():
+                cells.append(part)
+        if not cells:
+            raise Exception(voronoi_empty_detail(crs_label))
+        pairs = []
+        for point_i, (point, _attrs) in enumerate(sites):
+            located = QgsGeometry.fromPointXY(point)
+            for cell_i, cell in enumerate(cells):
+                try:
+                    hit = cell.intersects(located)
+                except Exception:
+                    hit = False
+                if hit:
+                    pairs.append((point_i, cell_i))
+                    break
+        claimed = claim_cells(n_input, pairs)
+        matched = set()
+        used = set()
+        for point_i, cell_i in claimed:
+            matched.add(point_i)
+            used.add(cell_i)
+        # A point that met a cell already claimed by an earlier point shares
+        # that cell. Only a point that met no cell at all falls back to the
+        # nearest unclaimed cell.
+        seen = set()
+        for point_i, _cell_i in pairs:
+            seen.add(point_i)
+        extra = []
+        for point_i, (point, _attrs) in enumerate(sites):
+            if point_i in matched or point_i in seen:
+                continue
+            best = None
+            best_d = None
+            for cell_i, cell in enumerate(cells):
+                if cell_i in used:
+                    continue
+                try:
+                    centre = cell.centroid().asPoint()
+                    dx = centre.x() - point.x()
+                    dy = centre.y() - point.y()
+                    dist = dx * dx + dy * dy
+                except Exception:
+                    continue
+                if best_d is None or dist < best_d:
+                    best_d = dist
+                    best = cell_i
+            if best is None:
+                continue
+            extra.append((point_i, best))
+            used.add(best)
+        if extra:
+            claimed = claim_cells(n_input, pairs + extra)
+        out = self._geometry_memory(layer, "voronoi", "MultiPolygon")
+        written = []
+        for point_i, cell_i in claimed:
+            geom = self._force_multi(cells[cell_i])
+            if geom is None:
+                continue
+            feature = QgsFeature(out.fields())
+            feature.setAttributes(list(sites[point_i][1]))
+            feature.setGeometry(geom)
+            written.append(feature)
+        if not written:
+            raise Exception(voronoi_empty_detail(crs_label))
+        path_written = self._write_features(out, written, output_path)
+        return {
+            "output_path": os.path.abspath(path_written),
+            "n_input": n_input,
+            "n_output": len(written),
         }
 
     def _expression_context(self, layer):

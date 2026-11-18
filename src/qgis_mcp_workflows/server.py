@@ -113,6 +113,9 @@ pipelines (PFLOW, GUFM). First call qgis_ping / qgis_diagnose. Then:
 - qgis_spatial_join to copy attributes by location (first match);
   qgis_aggregate_to_zones to count or sum points or lines onto polygons;
   qgis_zonal_stats for raster-per-polygon (JAXA LULC onto zones; majority and a class histogram).
+- qgis_buffer (metres; a geographic layer is measured in a projected CRS),
+  qgis_dissolve, qgis_clip, and qgis_voronoi write a polygon or line file
+  another tool can join. qgis_render_catchment stays the Voronoi PNG.
 - qgis_render_choropleth for zone polygons + value CSV (pass scale_bar=True
   and north_arrow=True for a publication PNG). GUFM 23-ward polygons:
   assets/zones_tokyo23.gpkg, join_field=zone_id (JIS N03_007).
@@ -216,6 +219,20 @@ def prompt_gufm_route() -> str:
         "rail_network_path=~/Dropbox/gufm/10_data/network_cache/rail_inner_tokyo.tsv). "
         "Then qgis_render_trajectory(input_path=output_csv, mode_col='mode', "
         "scale_bar=True, north_arrow=True). Needs `uv sync --extra network`."
+    )
+
+
+@mcp.prompt(title="Geometry writers", description="Buffer, dissolve, clip, or Voronoi polygons to a file.")
+def prompt_geometry() -> str:
+    return (
+        "qgis_layer_inspect the layer first (crs, geometry_type, n_features). "
+        "qgis_buffer(path, output_path, distance_m) writes polygons. distance_m is metres. "
+        "A geographic layer is measured in a UTM zone and written back in the source CRS. "
+        "qgis_dissolve(path, output_path, field=...) writes one feature, or one per field value. "
+        "qgis_clip(path, overlay_path, output_path) cuts to a polygon study area. "
+        "qgis_voronoi(path, output_path) writes polygons from the same QgsGeometry.voronoiDiagram "
+        "as qgis_render_catchment. The PNG tool stays a PNG. At least 3 points. "
+        "Then qgis_spatial_join or qgis_render_choropleth on the written file."
     )
 
 
@@ -1164,6 +1181,291 @@ def qgis_aggregate_to_zones(
         n_with_value=int(result.get("n_with_value") or 0),
         field_name=str(result.get("field_name") or ""),
         statistic=str(result.get("statistic") or stat),
+    )
+
+
+_GEOMETRY_OUTPUTS = (".gpkg", ".geojson", ".json")
+
+
+def _geometry_output(tool: str, output_path: str) -> str:
+    abs_out = user_abs(output_path)
+    if os.path.splitext(abs_out)[1].lower() not in _GEOMETRY_OUTPUTS:
+        raise InvalidArgumentError(
+            f"output_path {output_path!r} must end in .gpkg or .geojson.",
+            next_step=f"pass a .gpkg or .geojson output_path, then retry {tool}",
+        )
+    return abs_out
+
+
+def _positive_metres(distance_m: float) -> float:
+    if isinstance(distance_m, bool) or not isinstance(distance_m, (int, float)):
+        bad = True
+        value = 0.0
+    else:
+        bad = False
+        value = float(distance_m)
+    if bad or not math.isfinite(value) or value <= 0.0:
+        raise InvalidArgumentError(
+            f"distance_m {distance_m!r} must be metres greater than 0.",
+            next_step="pass distance_m as a positive number of metres, then retry qgis_buffer",
+        )
+    return value
+
+
+def _layer_named_in(message: str, *paths: str) -> str:
+    for path in paths:
+        if path and path in message:
+            return path
+    return paths[0]
+
+
+class BufferResult(BaseModel):
+    output_path: str
+    n_input: int
+    n_output: int
+    distance_m: float
+    measure_crs: str
+    source_crs: str
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_buffer(
+    path: Annotated[str, Field(description="Point, line, or polygon layer to buffer.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+    distance_m: Annotated[float, Field(description="Buffer distance in metres. Must be finite and greater than 0.")],
+) -> BufferResult:
+    """Write a buffer polygon around every feature.
+
+    When to use: a walk-shed around stops, or a corridor around a line, as a
+    file ``qgis_spatial_join`` or ``qgis_render_choropleth`` can use.
+    ``distance_m`` is metres. A geographic layer is measured in a UTM zone
+    (EPSG:3995 or EPSG:3031 near the poles) and the file is written in the
+    source CRS. ``measure_crs`` names the CRS the distance was applied in.
+    The open project is unchanged. Full mode only. No Processing.
+
+    Returns: ``BufferResult`` with ``n_output``, ``measure_crs`` and ``source_crs``.
+
+    Chains into: ``qgis_spatial_join``, ``qgis_aggregate_to_zones``,
+    ``qgis_render_choropleth``.
+    """
+    from qgis_mcp_workflows.errors import (
+        BufferCrsError,
+        BufferEmptyError,
+        ExecutorError,
+        LayerNotFoundError,
+    )
+    from qgis_mcp_workflows.executors import get_executor
+
+    metres = _positive_metres(distance_m)
+    abs_path = user_abs(path)
+    abs_out = _geometry_output("qgis_buffer", output_path)
+    params = {"path": abs_path, "output_path": abs_out, "distance_m": metres}
+    try:
+        result = get_executor().dispatch("buffer", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "BUFFER_CRS" in message:
+            raise BufferCrsError(message) from err
+        if "BUFFER_EMPTY" in message:
+            raise BufferEmptyError(message) from err
+        if "BUFFER_GEOMETRY" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="pass a point, line, or polygon path, then retry qgis_buffer",
+            ) from err
+        if "LAYER_NOT_FOUND" in message:
+            raise LayerNotFoundError(_layer_named_in(message, abs_path)) from err
+        raise
+    return BufferResult(
+        output_path=user_abs(result["output_path"]),
+        n_input=int(result.get("n_input") or 0),
+        n_output=int(result.get("n_output") or 0),
+        distance_m=float(result.get("distance_m") or metres),
+        measure_crs=str(result.get("measure_crs") or ""),
+        source_crs=str(result.get("source_crs") or ""),
+    )
+
+
+class DissolveResult(BaseModel):
+    output_path: str
+    n_input: int
+    n_output: int
+    field: str | None = None
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_dissolve(
+    path: Annotated[str, Field(description="Point, line, or polygon layer to dissolve.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+    field: Annotated[
+        str | None,
+        Field(description="One feature per value of this field. Omit to dissolve the layer into one feature."),
+    ] = None,
+) -> DissolveResult:
+    """Write one feature, or one feature per field value.
+
+    When to use: prefectures dissolved from municipalities, or one study-area
+    polygon from many parts. The geometry may be multipart. Attributes come
+    from the first feature in each group. The open project is unchanged.
+    Full mode only. No Processing.
+
+    Returns: ``DissolveResult`` with ``n_output`` and the ``field`` used, or
+    null when the whole layer became one feature.
+
+    Chains into: ``qgis_render_choropleth``, ``qgis_spatial_join``.
+    """
+    from qgis_mcp_workflows.errors import (
+        DissolveEmptyError,
+        ExecutorError,
+        FieldNotFoundError,
+        LayerNotFoundError,
+    )
+    from qgis_mcp_workflows.executors import get_executor
+
+    abs_path = user_abs(path)
+    abs_out = _geometry_output("qgis_dissolve", output_path)
+    column = (field or "").strip()
+    params: dict = {"path": abs_path, "output_path": abs_out}
+    if column:
+        params["field"] = column
+    try:
+        result = get_executor().dispatch("dissolve", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "DISSOLVE_EMPTY" in message:
+            raise DissolveEmptyError(message) from err
+        if "FIELD_NOT_FOUND" in message:
+            raise FieldNotFoundError(column or "?", []) from err
+        if "LAYER_NOT_FOUND" in message:
+            raise LayerNotFoundError(_layer_named_in(message, abs_path)) from err
+        raise
+    written = result.get("field")
+    return DissolveResult(
+        output_path=user_abs(result["output_path"]),
+        n_input=int(result.get("n_input") or 0),
+        n_output=int(result.get("n_output") or 0),
+        field=None if written in (None, "") else str(written),
+    )
+
+
+class ClipResult(BaseModel):
+    output_path: str
+    n_input: int
+    n_overlay: int
+    n_output: int
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_clip(
+    path: Annotated[str, Field(description="Points, lines, or polygons to cut.")],
+    overlay_path: Annotated[str, Field(description="Polygon study area. Features outside it are dropped.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+) -> ClipResult:
+    """Cut a layer to a polygon study area and write the result.
+
+    When to use: mesh cells or trajectories inside the 23 wards. Overlay
+    polygons are unioned into one mask and transformed into the input CRS.
+    Each input feature that meets the mask is written once, with its attributes.
+    The open project is unchanged. Full mode only. No Processing.
+
+    Returns: ``ClipResult`` with ``n_input``, ``n_overlay`` and ``n_output``.
+
+    Chains into: ``qgis_render_choropleth``, ``qgis_aggregate_to_zones``.
+    """
+    from qgis_mcp_workflows.errors import ClipEmptyError, ExecutorError, LayerNotFoundError
+    from qgis_mcp_workflows.executors import get_executor
+
+    abs_path = user_abs(path)
+    abs_overlay = user_abs(overlay_path)
+    abs_out = _geometry_output("qgis_clip", output_path)
+    params = {"path": abs_path, "overlay_path": abs_overlay, "output_path": abs_out}
+    try:
+        result = get_executor().dispatch("clip", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "CLIP_EMPTY" in message:
+            raise ClipEmptyError(message) from err
+        if "CLIP_GEOMETRY" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="pass a point, line, or polygon path and a polygon overlay_path, then retry qgis_clip",
+            ) from err
+        if "LAYER_NOT_FOUND" in message:
+            raise LayerNotFoundError(_layer_named_in(message, abs_path, abs_overlay)) from err
+        raise
+    return ClipResult(
+        output_path=user_abs(result["output_path"]),
+        n_input=int(result.get("n_input") or 0),
+        n_overlay=int(result.get("n_overlay") or 0),
+        n_output=int(result.get("n_output") or 0),
+    )
+
+
+class VoronoiResult(BaseModel):
+    output_path: str
+    n_input: int
+    n_output: int
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_voronoi(
+    path: Annotated[str, Field(description="Point layer. At least 3 points with geometry.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+) -> VoronoiResult:
+    """Write Voronoi polygons for a point layer.
+
+    When to use: catchment cells that ``qgis_spatial_join`` or a choropleth
+    can use. The diagram is ``QgsGeometry.voronoiDiagram`` with no extent, the
+    same call ``qgis_render_catchment`` uses. That tool stays a PNG. Each cell
+    keeps the attributes of the point that falls in it. The output CRS is the
+    source CRS. The open project is unchanged. Full mode only. No Processing.
+
+    Returns: ``VoronoiResult`` with ``n_input`` and ``n_output``. Coincident
+    points share one cell, so ``n_output`` can be lower.
+
+    Chains into: ``qgis_spatial_join``, ``qgis_aggregate_to_zones``,
+    ``qgis_render_choropleth``.
+    """
+    from qgis_mcp_workflows.errors import ExecutorError, LayerNotFoundError, VoronoiError
+    from qgis_mcp_workflows.executors import get_executor
+
+    abs_path = user_abs(path)
+    abs_out = _geometry_output("qgis_voronoi", output_path)
+    params = {"path": abs_path, "output_path": abs_out}
+    try:
+        result = get_executor().dispatch("voronoi", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "VORONOI_POINTS" in message or "VORONOI_EMPTY" in message:
+            raise VoronoiError(message) from err
+        if "VORONOI_GEOMETRY" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="pass a point path with at least 3 features, then retry qgis_voronoi",
+            ) from err
+        if "LAYER_NOT_FOUND" in message:
+            raise LayerNotFoundError(_layer_named_in(message, abs_path)) from err
+        raise
+    return VoronoiResult(
+        output_path=user_abs(result["output_path"]),
+        n_input=int(result.get("n_input") or 0),
+        n_output=int(result.get("n_output") or 0),
     )
 
 

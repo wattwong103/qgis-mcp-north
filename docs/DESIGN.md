@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.22.0**, 2026-11-18
+Status: **v1.23.0**, 2026-11-18
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -12,7 +12,7 @@ This document is the spec. Implementation follows. If a tool's signature, respon
 
 Three problems with upstream that the fork solves:
 
-**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **29 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
+**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **33 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
 
 **No headless mode.** Upstream requires QGIS Desktop running with the plugin enabled. That's incompatible with scheduled overnight runs, CI, or any automation. We add a **PyQGIS-subprocess transport** alongside the existing plugin transport. Same tools, two backends, selected by config or CLI flag.
 
@@ -98,7 +98,7 @@ Upstream's plugin and server stay untouched. If the user installs both, Claude D
 
 ---
 
-## 4. Tool surface (29 workflow + 1 escape hatch)
+## 4. Tool surface (33 workflow + 1 escape hatch)
 
 For each tool: signature, what it does, response shape, and the typical chain.
 
@@ -160,9 +160,9 @@ ProjectInfo = {
 
 Chains into: `qgis_export_layout`, `qgis_render_map`, `qgis_batch_render`.
 
-### Analysis (3)
+### Analysis (7)
 
-GitHub analogue: nkarasiak `spatial_join` / `zonal_statistics` / `get_unique_values`. Wrapped as atomic workflows (load + compute + write + cleanup). No Processing toolbox.
+GitHub analogue: nkarasiak `spatial_join` / `zonal_statistics` / `get_unique_values`. Wrapped as atomic workflows (load + compute + write + cleanup). No Processing toolbox. `qgis_buffer`, `qgis_dissolve`, `qgis_clip` and `qgis_voronoi` write a polygon or line file another tool can join. They do not call Processing.
 
 #### `qgis_spatial_join(target_path: str, join_path: str, output_path: str, predicate: str = "intersects", method: str = "one_to_one", join_fields: list[str] | None = None, prefix: str = "", keep_unmatched: bool = True) → SpatialJoinResult`
 
@@ -224,6 +224,73 @@ ZonalStatsResult = {
 ```
 
 Chains into: `qgis_render_choropleth(zones_path=output_path, value_field=...)`. A histogram column such as `lulc_2` is a `value_field` the same way `lulc_mean` is.
+
+#### `qgis_buffer(path: str, output_path: str, distance_m: float) → BufferResult`
+
+Write a buffer around every feature. `distance_m` is metres and must be finite and greater than 0. Points, lines and polygons are accepted. Each output feature keeps the input attributes and a polygon geometry (a multipart buffer stays one feature). The open project is unchanged. The handler does not touch `iface`.
+
+A geographic layer is projected for the measurement and the file is written in the source CRS. The measurement CRS is the UTM zone of the layer-extent centroid after transforming that centroid to EPSG:4326, EPSG:326xx in the north and EPSG:327xx in the south. North of 84° the measurement CRS is EPSG:3995. South of −80° it is EPSG:3031. Quarter-circles use 8 segments. That segment count is not an argument.
+
+A projected layer whose map units are metres, kilometres, centimetres, millimetres, feet, US survey feet, yards, miles or nautical miles is buffered in that CRS. `distance_m` is converted into those units first, so a foot-based CRS still means metres. `measure_crs` is the CRS the distance was applied in. `source_crs` is the layer CRS as opened. When no projected CRS can be chosen, `BufferCrsError` names the layer CRS. A layer with no features, or whose buffers are all empty, raises `BufferEmptyError`. Output is GeoPackage (`.gpkg`) or GeoJSON (`.geojson` or `.json`). Anything else raises `InvalidArgumentError` before dispatch. Full mode only. No Processing.
+
+```python
+BufferResult = {
+    "output_path": str,
+    "n_input": int,
+    "n_output": int,
+    "distance_m": float,
+    "measure_crs": str,
+    "source_crs": str,
+}
+```
+
+Chains into: `qgis_spatial_join`, `qgis_aggregate_to_zones`, `qgis_render_choropleth`.
+
+#### `qgis_dissolve(path: str, output_path: str, field: str | None = None) → DissolveResult`
+
+Write one feature, or one feature per value of `field`. The geometry is the union of that group and may be multipart when the parts do not touch. `field` omitted, or blank, dissolves the layer into one feature. A value groups with Python equality of the plain field value, so `1` and `1.0` are one group and `"1"` is another. NULL is one group. Attributes on the written feature come from the first feature in the group. Empty geometries are skipped and are not a group of their own. A missing `field` raises `FieldNotFoundError`. Zero features written raises `DissolveEmptyError`. Output formats, project, `iface` and full-mode rules match `qgis_buffer`. No Processing.
+
+```python
+DissolveResult = {
+    "output_path": str,
+    "n_input": int,
+    "n_output": int,
+    "field": str | None,
+}
+```
+
+Chains into: `qgis_render_choropleth`, `qgis_spatial_join`, `qgis_layer_inspect`.
+
+#### `qgis_clip(path: str, overlay_path: str, output_path: str) → ClipResult`
+
+Cut `path` to the study area in `overlay_path`. The overlay must be polygons. The input may be points, lines or polygons. Overlay polygons are unioned into one mask and transformed into the input CRS before the cut. Each input feature that meets the mask is written once, with its own attributes and the intersection geometry. A feature wholly outside is dropped. A feature the mask splits stays one feature (multipart). The output CRS is the input CRS. Zero features kept raises `ClipEmptyError`. The message names both layers' CRS and geometry types. A non-polygon overlay, or an input that is not point, line or polygon, raises `InvalidArgumentError` and names both geometry types and both CRS. Output formats, project, `iface` and full-mode rules match `qgis_buffer`. No Processing.
+
+```python
+ClipResult = {
+    "output_path": str,
+    "n_input": int,
+    "n_overlay": int,
+    "n_output": int,
+}
+```
+
+Chains into: `qgis_render_choropleth`, `qgis_aggregate_to_zones`, `qgis_spatial_join`.
+
+#### `qgis_voronoi(path: str, output_path: str) → VoronoiResult`
+
+Write Voronoi polygons for a point layer. The diagram is `QgsGeometry.voronoiDiagram()` with no extent argument, the same call `qgis_render_catchment` uses to draw the PNG. This tool writes the cells so another tool can join them. The PNG tool stays a PNG. At least 3 points with geometry are required, matching the PNG tool. Fewer than 3, or an empty diagram, raises `VoronoiError`. A layer that is not points raises `InvalidArgumentError` and names the geometry type and the CRS.
+
+Each written cell takes the attributes of the point that falls in it. The first point wins a shared boundary. Coincident points share one cell, so `n_output` can be below `n_input`. The output CRS is the source CRS. The cells are not reprojected. Output formats, project, `iface` and full-mode rules match `qgis_buffer`. No Processing. Network isochrones are not this tool.
+
+```python
+VoronoiResult = {
+    "output_path": str,
+    "n_input": int,
+    "n_output": int,
+}
+```
+
+Chains into: `qgis_spatial_join`, `qgis_aggregate_to_zones`, `qgis_render_choropleth`. `qgis_render_catchment` still draws the PNG.
 
 ### Styling (2)
 
@@ -505,7 +572,7 @@ transit-figure pipeline. Each a separate commit, unit-tested + live-verified.
 **New tools (3):**
 - `qgis_compose_layout(layer_paths, output_path, title=None, extent=None, page="a4_landscape", legend=True, scale_bar=True, north_arrow=True, dpi=300) → ComposeLayoutResult` — programmatic `QgsPrintLayout`: a titled map panel with linked legend, scale bar and north arrow, exported PNG/PDF/SVG. Complements `qgis_export_layout` (which only exports pre-authored `.qgz`). Single panel; multi-panel/inset is future.
 - `qgis_render_diagram_map(layer_path, value_fields, output_png, diagram_type="pie", size=10.0, palette="Set2", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150, outline_color=None, outline_width_mm=None, fill_opacity=None, label_field=None, label_size_pt=None, label_font=None, label_color=None, label_halo_mm=None, label_halo_color=None) → DiagramMapResult` — chart-in-map: a pie/bar `QgsDiagramRenderer` glyph per feature, one slice/bar per `value_field`. v1.21: stroke and opacity on the base symbol, and the same stroke on the diagram pen (omitted pen stays white, 0.2). `size` is unchanged. `label_field` is a field on the layer; omitted label type is 9 pt, 1 mm, white.
-- `qgis_render_catchment(points_path, output_png, method="voronoi", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150, outline_color=None, outline_width_mm=None, fill_opacity=None, label_field=None, label_size_pt=None, label_font=None, label_color=None, label_halo_mm=None, label_halo_color=None) → CatchmentResult` — Voronoi (Thiessen) service-area catchments around points via `QgsGeometry.voronoiDiagram` (no Processing dependency). v1.21: stroke and opacity on the cells. Omitted cells stay `200,220,240` at alpha 90 with outline `70,90,120` at 0.3 mm; `fill_opacity` replaces that alpha. Point markers take the same stroke and opacity; omitted markers stay `#b2182b` with no outline. `label_field` is a field on the point layer (9 pt when the label type is omitted).
+- `qgis_render_catchment(points_path, output_png, method="voronoi", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150, outline_color=None, outline_width_mm=None, fill_opacity=None, label_field=None, label_size_pt=None, label_font=None, label_color=None, label_halo_mm=None, label_halo_color=None) → CatchmentResult` — Voronoi (Thiessen) service-area catchments around points via `QgsGeometry.voronoiDiagram` (no Processing dependency). The cells are a PNG. `qgis_voronoi` writes the same diagram as a polygon file. v1.21: stroke and opacity on the cells. Omitted cells stay `200,220,240` at alpha 90 with outline `70,90,120` at 0.3 mm; `fill_opacity` replaces that alpha. Point markers take the same stroke and opacity; omitted markers stay `#b2182b` with no outline. `label_field` is a field on the point layer (9 pt when the label type is omitted).
 
 **New parameters on existing tools:**
 - `qgis_render_choropleth` / `qgis_style_graduated`: `diverging: bool = False` + `center: float = 0.0` — diverging colormap with symmetric class breaks pinned at `center`, for signed / net-flux data. `palette` now also resolves scientific colormaps (viridis, cividis, magma, batlow, vik, roma, balance, RdBu, BrBG) vendored in `qgis_mcp_workflows_plugin/colormaps.py` via the shared `_resolve_color_ramp` / `_build_graduated_renderer` helpers. Response echoes `diverging`, `center`, `diverging_one_sided`.
@@ -730,7 +797,7 @@ Every typed error derives from `QgisMcpWorkflowsError`, which subclasses the SDK
 - 3D view. Not on the roadmap.
 - Map server / WMS / WFS. Not on the roadmap.
 
-If a v1 user needs any of these, the answer is: install upstream alongside, or write the call inside `qgis_eval`. A calculated column or a feature filter is `qgis_expression`, not `qgis_eval`.
+If a v1 user needs any of these, the answer is: install upstream alongside, or write the call inside `qgis_eval`. A calculated column or a feature filter is `qgis_expression`, not `qgis_eval`. A buffer, dissolve, study-area clip, or Voronoi polygon file is `qgis_buffer`, `qgis_dissolve`, `qgis_clip`, or `qgis_voronoi`, not a Processing algorithm. Network isochrones stay out.
 
 ---
 
@@ -779,6 +846,8 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 **v1.21 — line and point figure controls.** ✅ The choropleth stroke, opacity and label arguments on `qgis_render_trajectory`, `qgis_render_od_flows`, `qgis_render_link_density`, `qgis_render_diagram_map`, `qgis_render_catchment` and `qgis_render_from_duckdb`, and on compound `qgis_render` for those modes. Omitted arguments are not dispatched. A line's outline is the line; a point's outline is the marker stroke and the fill stays. OD flow width and the link-density ramp stay as they are until the caller sets the control. OD labels stay 8 pt and link-density labels stay 7 pt when the new label arguments are omitted. `breaks` stays on the choropleth.
 
 **v1.22 — categorical zonal stats.** ✅ `qgis_zonal_stats` accepts `majority` and `histogram`. `majority` is the most frequent cell value. `histogram` writes one integer column per class id that occurs inside the zones (`lulc_2` is JAXA built-up). A class that does not occur gets no column. `mean` stays the numeric mean.
+
+**v1.23 — geometry writers.** ✅ `qgis_buffer`, `qgis_dissolve`, `qgis_clip` and `qgis_voronoi` write a GeoPackage or GeoJSON another tool can join. Buffer distance is metres. A geographic layer is measured in a projected CRS and written back in the source CRS. Dissolve writes one feature, or one feature per field value. Clip cuts to a polygon study area. Voronoi polygons use the same `QgsGeometry.voronoiDiagram` as the catchment PNG, which stays a PNG. Full mode only. No Processing.
 
 ---
 

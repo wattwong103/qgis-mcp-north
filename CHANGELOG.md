@@ -3,6 +3,28 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.23.0 — 2026-11-18 — geometry writers
+
+### Added
+
+- `qgis_buffer` writes a polygon around every point, line, or polygon.
+  `distance_m` is metres. A geographic layer is measured in a UTM zone
+  (EPSG:3995 or EPSG:3031 near the poles) and the file is written back in
+  the source CRS. `measure_crs` names the CRS the distance was applied in.
+  A projected layer in feet or another linear unit is buffered in that CRS
+  after converting metres. `BufferCrsError` names the layer CRS when no
+  projected CRS can be chosen.
+- `qgis_dissolve` writes one feature, or one feature per field value. The
+  geometry may be multipart. Attributes come from the first feature in the
+  group.
+- `qgis_clip` cuts points, lines, or polygons to a polygon study area. The
+  overlay is unioned into one mask and transformed into the input CRS.
+  `ClipEmptyError` names both layers' CRS and geometry types.
+- `qgis_voronoi` writes Voronoi polygons with `QgsGeometry.voronoiDiagram`,
+  the same call `qgis_render_catchment` uses. The catchment tool stays a PNG.
+  At least 3 points. Each cell keeps the attributes of the point that falls
+  in it. Output is GeoPackage or GeoJSON. Full mode only. No Processing.
+
 ## v1.22.0 — 2026-11-18 — categorical zonal stats
 
 ### Added
