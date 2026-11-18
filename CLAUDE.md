@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`qgis-mcp-workflows` (v1.25.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
+`qgis-mcp-workflows` (v1.26.0) is a focused fork of `nkarasiak/qgis-mcp` for transportation-research figure pipelines (PFLOW, GUFM). Renamed from `qgis-mcp-north` in v1.1.0 to put the fork's positioning (workflow tools, not 51 PyQGIS primitives) in the name. It exposes QGIS to Claude over MCP via **two transports**: a TCP-socket plugin running in QGIS Desktop, and a long-lived PyQGIS subprocess (headless mode) for cron / CI / unattended renders. The fork rationale, full tool surface, response shapes, error model, and roadmap live in [`docs/DESIGN.md`](docs/DESIGN.md) — that document is the spec; if code disagrees with it, update the doc first.
 
 Key differences from upstream:
-- 34 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
+- 35 workflow tools + 1 escape hatch (`qgis_eval`), not 51 PyQGIS-mirroring tools.
 - Two transports: `plugin` (TCP socket → running QGIS) and `headless` (PyQGIS subprocess), selected via `--transport=auto|plugin|headless`.
 - Plugin folder: `qgis_mcp_workflows_plugin/`. Python package: `qgis-mcp-workflows` (importable as `qgis_mcp_workflows`). Default socket port: **9877** (vs upstream 9876). Both servers can run side-by-side.
 
@@ -81,9 +81,10 @@ uv tool run ruff check src/ tests/
 | `QGIS_MCP_WORKFLOWS_PROVENANCE` | `1` | `0` disables `<file>.provenance.json` sidecars (read per call) |
 | `QGIS_MCP_WORKFLOWS_PROVENANCE_HASH_MAX_MB` | `256` | Inputs above this get size + mtime instead of sha256 |
 | `DROPBOX_ROOT` | (per machine) | Provenance stores paths under it as `${DROPBOX_ROOT}/…`; `install.py` passes it into GUI client configs |
-| `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` | `1` | `0` refuses `qgis_eval`. Overrides `allow_python_eval` in `config.toml` (default true). No CLI flag |
+| `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` | `1` | `0` refuses `qgis_eval`. Overrides `allow_python_eval` in `config.toml` (default true). No CLI flag. Does not disable `qgis_recipe` |
+| `QGIS_MCP_WORKFLOWS_RECIPE_DIR` | (off) | User recipe JSON directory. Overrides `recipe_dir` in `config.toml`. Empty, `0`, `off`, or `false` leaves user recipes off |
 
-## MCP Tools (35 total as of v1.25; 5 grouped tools in compound mode. See `docs/DESIGN.md` §4 for full signatures.)
+## MCP Tools (36 total as of v1.26; 5 grouped tools in compound mode. See `docs/DESIGN.md` §4 for full signatures.)
 
 | Tool | Status | Notes |
 |---|---|---|
@@ -118,10 +119,11 @@ uv tool run ruff check src/ tests/
 | `qgis_voronoi` | ✅ v1.23 | Voronoi polygons via `QgsGeometry.voronoiDiagram`, the same call as the catchment PNG. The PNG tool stays. Full mode only. |
 | `qgis_make_grid` | ✅ v1.25 | Metre fishnet of square polygons over an extent. Cells align to the CRS origin; `cell_id` is the join field. Does not replace `assets/zones_mesh_l3.gpkg`. Full mode only. |
 | `qgis_expression` | ✅ v1.19 | Calculated column and/or filter from a QGIS expression; writes GeoPackage/GeoJSON. Built-ins only (`env` refused). Full mode only. |
+| `qgis_recipe` | ✅ v1.26 | Named recipes: reproject, centroids, explode, points from lon/lat, extent polygon. User JSON recipes stay off unless `recipe_dir` is set, and those calls need `trust_foreign` to replay. Not a Python sandbox. Full mode only. |
 | `qgis_zonal_stats` | ✅ v1.12 | Raster stats per polygon (`QgsZonalStatistics`); JAXA LULC onto zones. v1.22: `majority`, and a histogram column per class id that occurs (`lulc_2` is built-up). `mean` stays numeric. |
 | `qgis_assign_section_load` | ✅ v1.9 | All-or-nothing OD assignment onto a line network (networkx). Writes `link_id,volume` for `qgis_render_link_density(load_csv=...)`. `[network]` extra. |
 | `qgis_route_on_network` | ✅ v1.14 | Snap consecutive stops onto GUFM DRM/rail TSV (or a line GeoJSON/GPKG). Writes routed `trip_id,seq,lon,lat,mode,datetime,link_id` for `qgis_render_trajectory`. `[network]` extra. |
-| `qgis_eval` | ✅ v1.0 | Arbitrary PyQGIS escape hatch with `return_vars` capture. Plugin's `execute_code` augmented with `_json_safe()` fallback (non-serializable values → `repr()`). v1.19: try `qgis_expression` first; `allow_python_eval` (default true) can refuse it. |
+| `qgis_eval` | ✅ v1.0 | Arbitrary PyQGIS escape hatch with `return_vars` capture. Plugin's `execute_code` augmented with `_json_safe()` fallback (non-serializable values → `repr()`). v1.19: try `qgis_expression` first; `allow_python_eval` (default true) can refuse it. v1.26: try `qgis_recipe` for a reproject, centroids, explode, points, or an extent. |
 
 ## Key Details
 

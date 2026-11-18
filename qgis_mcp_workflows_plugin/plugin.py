@@ -371,6 +371,7 @@ class QgisMCPServer(QObject):
                 "clip": self.clip,
                 "voronoi": self.voronoi,
                 "make_grid": self.make_grid,
+                "run_recipe": self.run_recipe,
                 "apply_expression": self.apply_expression,
                 "zonal_stats": self.zonal_stats,
                 "compose_layout": self.compose_layout,
@@ -5956,6 +5957,267 @@ class QgisMCPServer(QObject):
             "grid_extent": [float(value) for value in plan["grid_extent"]],
             "id_field": ID_FIELD,
         }
+
+    def run_recipe(self, recipe, layer_path, output_path, crs=None, lon_field=None, lat_field=None):
+        """Write one named recipe. Does not touch the canvas or the open project.
+
+        The caller passes a recipe name. This method does not execute user Python.
+        """
+        name = recipe if isinstance(recipe, str) else ""
+        if name == "reproject":
+            return self._recipe_reproject(layer_path, output_path, crs)
+        if name == "centroids":
+            return self._recipe_centroids(layer_path, output_path)
+        if name == "explode":
+            return self._recipe_explode(layer_path, output_path)
+        if name == "points_from_xy":
+            return self._recipe_points(layer_path, output_path, crs, lon_field, lat_field)
+        if name == "extent":
+            return self._recipe_extent(layer_path, output_path)
+        raise Exception("RECIPE_UNKNOWN: %s" % name)
+
+    def _recipe_result(self, path, recipe, n_input, n_output, crs, source_crs, extent):
+        return {
+            "output_path": os.path.abspath(path),
+            "n_input": int(n_input),
+            "n_output": int(n_output),
+            "recipe": recipe,
+            "crs": crs,
+            "source_crs": source_crs,
+            "extent": extent,
+        }
+
+    def _recipe_count(self, layer):
+        try:
+            count = int(layer.featureCount())
+        except Exception:
+            count = -1
+        if count >= 0:
+            return count
+        return sum(1 for _feat in layer.getFeatures())
+
+    def _recipe_crs(self, text):
+        from .recipes import crs_detail
+
+        crs = QgsCoordinateReferenceSystem(text)
+        if not crs.isValid():
+            factory = getattr(QgsCoordinateReferenceSystem, "fromUserInput", None)
+            made = None
+            if callable(factory):
+                try:
+                    made = factory(text)
+                except Exception:
+                    made = None
+            if made is not None and made.isValid():
+                crs = made
+        if not crs.isValid():
+            raise Exception(crs_detail(text or "unknown"))
+        return crs
+
+    def _recipe_auth(self, crs_obj, fallback):
+        try:
+            return crs_obj.authid() or fallback
+        except Exception:
+            return fallback
+
+    def _recipe_parts(self, geometry):
+        if geometry is None or geometry.isEmpty():
+            return []
+        try:
+            multi = bool(geometry.isMultipart())
+        except Exception:
+            multi = False
+        if not multi:
+            return [QgsGeometry(geometry)]
+        try:
+            parts = geometry.asGeometryCollection()
+        except Exception:
+            parts = None
+        if not parts:
+            return [QgsGeometry(geometry)]
+        kept = []
+        for part in parts:
+            if part is None or part.isEmpty():
+                continue
+            kept.append(QgsGeometry(part))
+        return kept or [QgsGeometry(geometry)]
+
+    def _recipe_layer(self, wkb, crs_obj, name, fields):
+        auth = self._recipe_auth(crs_obj, "EPSG:4326")
+        mem = QgsVectorLayer("%s?crs=%s" % (wkb, auth), name, "memory")
+        if not mem.isValid():
+            raise Exception("WRITE_FAILED: could not create memory layer %s" % name)
+        try:
+            mem.setCrs(crs_obj)
+        except Exception:
+            pass
+        if fields is not None:
+            provider = mem.dataProvider()
+            provider.addAttributes(fields.toList())
+            mem.updateFields()
+        return mem
+
+    def _recipe_box(self, rect):
+        if rect is None:
+            return None
+        try:
+            empty = rect.isEmpty()
+        except Exception:
+            return None
+        if empty:
+            return None
+        box = [rect.xMinimum(), rect.yMinimum(), rect.xMaximum(), rect.yMaximum()]
+        if any(not isinstance(value, (int, float)) or value != value for value in box):
+            return None
+        if box[0] >= box[2] or box[1] >= box[3]:
+            return None
+        return [float(value) for value in box]
+
+    def _recipe_polygon(self, rect, box):
+        factory = getattr(QgsGeometry, "fromRect", None)
+        poly = factory(rect) if callable(factory) else None
+        if poly is None or poly.isEmpty():
+            ring = [
+                QgsPointXY(box[0], box[1]),
+                QgsPointXY(box[2], box[1]),
+                QgsPointXY(box[2], box[3]),
+                QgsPointXY(box[0], box[3]),
+                QgsPointXY(box[0], box[1]),
+            ]
+            poly = QgsGeometry.fromPolygonXY([ring])
+        return poly
+
+    def _recipe_reproject(self, layer_path, output_path, crs):
+        from .recipes import empty_detail, geometry_detail
+
+        layer = self._load_vector(layer_path, "_recipe_in")
+        geom = self._geom_label(layer)
+        source = self._crs_label(layer)
+        if geom not in ("point", "line", "polygon"):
+            raise Exception(geometry_detail(geom, source))
+        text = (crs or "").strip()
+        dest = self._recipe_crs(text)
+        n_input = self._recipe_count(layer)
+        if n_input == 0:
+            raise Exception(empty_detail("reproject", n_input, source))
+        try:
+            work = self._memory_copy(layer, "_recipe_reproject", dest_crs=dest)
+        except Exception as err:
+            from .recipes import crs_detail
+
+            raise Exception(crs_detail(text)) from err
+        written = self._write_vector_layer(work, output_path)
+        return self._recipe_result(
+            written, "reproject", n_input, self._recipe_count(work), self._recipe_auth(dest, text), source, None
+        )
+
+    def _recipe_centroids(self, layer_path, output_path):
+        from .recipes import empty_detail, geometry_detail
+
+        layer = self._load_vector(layer_path, "_recipe_in")
+        geom = self._geom_label(layer)
+        source = self._crs_label(layer)
+        if geom not in ("point", "line", "polygon"):
+            raise Exception(geometry_detail(geom, source))
+        out = self._geometry_memory(layer, "centroids", "Point")
+        written = []
+        n_input = 0
+        for feat in layer.getFeatures():
+            n_input += 1
+            geometry = feat.geometry()
+            if geometry is None or geometry.isEmpty():
+                continue
+            try:
+                point = geometry.centroid()
+            except Exception:
+                point = None
+            if point is None or point.isEmpty():
+                continue
+            feature = QgsFeature(out.fields())
+            feature.setAttributes(list(feat.attributes()))
+            feature.setGeometry(point)
+            written.append(feature)
+        if not written:
+            raise Exception(empty_detail("centroids", n_input, source))
+        path = self._write_features(out, written, output_path)
+        return self._recipe_result(path, "centroids", n_input, len(written), source, source, None)
+
+    def _recipe_explode(self, layer_path, output_path):
+        from .recipes import empty_detail, geometry_detail
+
+        layer = self._load_vector(layer_path, "_recipe_in")
+        geom = self._geom_label(layer)
+        source = self._crs_label(layer)
+        wkb = {"point": "Point", "line": "LineString", "polygon": "Polygon"}.get(geom)
+        if wkb is None:
+            raise Exception(geometry_detail(geom, source))
+        out = self._geometry_memory(layer, "explode", wkb)
+        written = []
+        n_input = 0
+        for feat in layer.getFeatures():
+            n_input += 1
+            for part in self._recipe_parts(feat.geometry()):
+                feature = QgsFeature(out.fields())
+                feature.setAttributes(list(feat.attributes()))
+                feature.setGeometry(part)
+                written.append(feature)
+        if not written:
+            raise Exception(empty_detail("explode", n_input, source))
+        path = self._write_features(out, written, output_path)
+        return self._recipe_result(path, "explode", n_input, len(written), source, source, None)
+
+    def _recipe_points(self, layer_path, output_path, crs, lon_field, lat_field):
+        from .recipes import empty_detail, fields_detail, finite_number
+
+        layer = self._load_vector(layer_path, "_recipe_in")
+        names = [field.name() for field in layer.fields()]
+        missing = [name for name in (lon_field, lat_field) if name not in names]
+        if missing:
+            raise Exception(fields_detail(missing[0], names))
+        text = (crs or "EPSG:4326").strip()
+        dest = self._recipe_crs(text)
+        dest_label = self._recipe_auth(dest, text)
+        mem = self._recipe_layer("Point", dest, "points_from_xy", layer.fields())
+        written = []
+        n_input = 0
+        for feat in layer.getFeatures():
+            n_input += 1
+            lon = finite_number(self._plain_value(feat[lon_field]))
+            lat = finite_number(self._plain_value(feat[lat_field]))
+            if lon is None or lat is None:
+                continue
+            feature = QgsFeature(mem.fields())
+            feature.setAttributes(list(feat.attributes()))
+            feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(lon, lat)))
+            written.append(feature)
+        if not written:
+            raise Exception(empty_detail("points_from_xy", n_input, dest_label))
+        path = self._write_features(mem, written, output_path)
+        return self._recipe_result(
+            path, "points_from_xy", n_input, len(written), dest_label, self._crs_label(layer), None
+        )
+
+    def _recipe_extent(self, layer_path, output_path):
+        from .recipes import empty_detail, geometry_detail
+
+        layer = self._load_vector(layer_path, "_recipe_in")
+        geom = self._geom_label(layer)
+        source = self._crs_label(layer)
+        if geom not in ("point", "line", "polygon"):
+            raise Exception(geometry_detail(geom, source))
+        n_input = self._recipe_count(layer)
+        rect = layer.extent()
+        box = self._recipe_box(rect)
+        if box is None:
+            raise Exception(empty_detail("extent", n_input, source))
+        poly = self._recipe_polygon(rect, box)
+        if poly is None or poly.isEmpty():
+            raise Exception(empty_detail("extent", n_input, source))
+        out = self._recipe_layer("Polygon", layer.crs(), "extent", None)
+        feature = QgsFeature(out.fields())
+        feature.setGeometry(poly)
+        path = self._write_features(out, [feature], output_path)
+        return self._recipe_result(path, "extent", n_input, 1, source, source, box)
 
     def _expression_context(self, layer):
         """Fields, geometry, and this layer. Does not load python/expressions.

@@ -18,7 +18,7 @@ about=Companion QGIS plugin for the qgis-mcp-workflows MCP server. Exposes a TCP
 
     Default socket port: 9877 (vs upstream nkarasiak/qgis-mcp on 9876).
 
-version=1.25.0
+version=1.26.0
 author=North
 email=
 tags=mcp,ai,claude,llm,workflows,transportation,research,pflow,gufm,drm
@@ -30,7 +30,8 @@ category=Plugins
 icon=icons/icon.png
 experimental=True
 deprecated=False
-changelog=1.25.0 : qgis_make_grid writes a metre fishnet of square polygons. JIS L3 stays scripts/build_gufm_zones.py.
+changelog=1.26.0 : qgis_recipe runs reproject, centroids, explode, points_from_xy, and extent. User recipes stay off unless recipe_dir is set.
+ 1.25.0 : qgis_make_grid writes a metre fishnet of square polygons. JIS L3 stays scripts/build_gufm_zones.py.
  1.24.0 : compose_layout fonts and page millimetres; panel difference columns and per-panel extents.
  1.23.0 : qgis_buffer, qgis_dissolve, qgis_clip, and qgis_voronoi write a polygon or line file.
  1.22.0 : qgis_zonal_stats majority and a per-class histogram; mean stays the numeric stat.

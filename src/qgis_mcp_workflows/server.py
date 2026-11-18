@@ -4558,21 +4558,147 @@ def qgis_expression(
 
 
 # ---------------------------------------------------------------------------
+# Tools — Recipes (1)
+# ---------------------------------------------------------------------------
+
+
+class RecipeResult(BaseModel):
+    output_path: str
+    name: str
+    recipe: str
+    source: str
+    n_input: int
+    n_output: int
+    crs: str | None = None
+    source_crs: str | None = None
+    extent: list[float] | None = None
+
+
+_RECIPE_OUTPUTS = (".gpkg", ".geojson", ".json")
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_recipe(
+    name: Annotated[
+        str,
+        Field(description="Built-in recipe: reproject, centroids, explode, points_from_xy, or extent. Or a user recipe JSON stem when recipe_dir is set."),
+    ],
+    layer_path: Annotated[str, Field(description="Vector layer to read. The open project is left unchanged.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+    crs: Annotated[
+        str | None,
+        Field(description="Destination CRS for reproject. Optional CRS for points_from_xy (default EPSG:4326)."),
+    ] = None,
+    lon_field: Annotated[str | None, Field(description="Longitude field for points_from_xy.")] = None,
+    lat_field: Annotated[str | None, Field(description="Latitude field for points_from_xy.")] = None,
+) -> RecipeResult:
+    """Write a layer from a named recipe. Not Python, and not a sandbox.
+
+    When to use: reproject a layer, write centroids, explode parts, build
+    points from longitude and latitude, or write the layer extent as one
+    polygon. A calculated column or a filter is ``qgis_expression``. Anything
+    else stays on ``qgis_eval``, which remains available while
+    ``allow_python_eval`` is true.
+
+    Built-in names do not read ``recipe_dir``. A user recipe is
+    ``{recipe_dir}/{name}.json`` and stays off until that directory is set.
+    The file pins a built-in. It is not Python. A call that used a user
+    recipe is left out of ``qgis_export_session`` unless ``trust_foreign``
+    is true. Full mode only.
+
+    Returns: ``RecipeResult`` with ``name``, ``recipe``, ``source``,
+    ``n_input``, ``n_output``, and ``extent`` for the extent recipe.
+
+    Chains into: ``qgis_make_grid`` (pass ``extent``), ``qgis_spatial_join``,
+    ``qgis_render_choropleth``, ``qgis_expression``.
+    """
+    from qgis_mcp_workflows.errors import (
+        ExecutorError,
+        LayerNotFoundError,
+        RecipeCrsError,
+        RecipeEmptyError,
+    )
+    from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.recipes import RecipeRejected, resolve
+
+    abs_layer = user_abs(layer_path)
+    abs_out = user_abs(output_path)
+    if os.path.splitext(abs_out)[1].lower() not in _RECIPE_OUTPUTS:
+        raise InvalidArgumentError(
+            f"output_path {output_path!r} must end in .gpkg or .geojson.",
+            next_step="pass a .gpkg or .geojson output_path, then retry qgis_recipe",
+        )
+    try:
+        call = resolve(
+            name,
+            crs=crs,
+            lon_field=lon_field,
+            lat_field=lat_field,
+            directory=recipe_directory(),
+        )
+    except RecipeRejected as err:
+        raise InvalidArgumentError(str(err), next_step=err.next_step) from err
+    params: dict = {"recipe": call.recipe, "layer_path": abs_layer, "output_path": abs_out}
+    if call.crs is not None:
+        params["crs"] = call.crs
+    if call.lon_field is not None:
+        params["lon_field"] = call.lon_field
+    if call.lat_field is not None:
+        params["lat_field"] = call.lat_field
+    try:
+        result = get_executor().dispatch("run_recipe", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "RECIPE_CRS" in message:
+            raise RecipeCrsError(message) from err
+        if "RECIPE_EMPTY" in message:
+            raise RecipeEmptyError(message) from err
+        if "LAYER_NOT_FOUND" in message:
+            raise LayerNotFoundError(_layer_named_in(message, abs_layer)) from err
+        if "RECIPE_FIELDS" in message or "RECIPE_GEOMETRY" in message or "RECIPE_UNKNOWN" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="call qgis_layer_inspect on the layer, then retry qgis_recipe",
+            ) from err
+        raise
+    extent = result.get("extent")
+    if extent is not None:
+        extent = [float(value) for value in extent]
+    return RecipeResult(
+        output_path=user_abs(result["output_path"]),
+        name=call.name,
+        recipe=call.recipe,
+        source=call.source,
+        n_input=int(result.get("n_input") or 0),
+        n_output=int(result.get("n_output") or 0),
+        crs=(result.get("crs") or call.crs or None),
+        source_crs=result.get("source_crs") or None,
+        extent=extent,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tools — Escape hatch (1)
 # ---------------------------------------------------------------------------
 
 
 def qgis_eval(
-    code: Annotated[str, Field(description="PyQGIS source to execute. Try qgis_expression first for a calculated column or a filter.")],
+    code: Annotated[str, Field(description="PyQGIS source to execute. Try qgis_expression for a column or filter, and qgis_recipe for a named recipe.")],
     return_vars: Annotated[list[str] | None, Field(description="Local variable names to capture from the executed scope and return JSON-serialized.")] = None,
 ) -> EvalResult:
     """Execute arbitrary PyQGIS. Escape hatch — try qgis_expression first.
 
     When to use: a calculated column or a feature filter is qgis_expression,
-    not this tool. Use qgis_eval only when no workflow tool fits — an unusual
-    processing algorithm, a custom symbology that ``qgis_style_*`` can't
-    express, or interactive debugging. For routine work (load, style,
-    render, export, batch, deck) use the dedicated tools.
+    not this tool. A reproject, centroids, exploding parts, points from
+    longitude and latitude, or an extent polygon is qgis_recipe. Use
+    qgis_eval only when no workflow tool fits — an unusual processing
+    algorithm, a custom symbology that ``qgis_style_*`` can't express, or
+    interactive debugging. For routine work (load, style, render, export,
+    batch, deck) use the dedicated tools. There is no Python sandbox.
 
     ``allow_python_eval`` in ``~/.config/qgis-mcp-workflows/config.toml``
     defaults to true, so this tool stays available. Set the key false, or
@@ -4690,6 +4816,32 @@ def allow_python_eval() -> bool:
         return value
     logger.warning("ignoring allow_python_eval=%r in %s", value, config_path())
     return True
+
+
+def recipe_directory():
+    """User recipe directory, or None when it is off.
+
+    ``QGIS_MCP_WORKFLOWS_RECIPE_DIR`` wins over ``recipe_dir`` in config.toml.
+    An empty value, ``0``, ``off``, or ``false`` turns the directory off.
+    A missing key leaves it off. This does not follow ``allow_python_eval``.
+    """
+    from pathlib import Path
+
+    env = os.environ.get("QGIS_MCP_WORKFLOWS_RECIPE_DIR")
+    if env is not None:
+        text = env.strip()
+        if text.lower() in ("", "0", "off", "false"):
+            return None
+        return Path(text)
+    cfg = load_user_config()
+    if "recipe_dir" not in cfg:
+        return None
+    value = cfg["recipe_dir"]
+    if isinstance(value, str) and value.strip():
+        return Path(value.strip())
+    if value not in (None, False, ""):
+        logger.warning("ignoring recipe_dir=%r in %s", value, config_path())
+    return None
 
 
 def resolve_transport(cli: str | None) -> tuple[str, str]:

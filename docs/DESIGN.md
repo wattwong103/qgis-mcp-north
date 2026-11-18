@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.25.0**, 2026-11-18
+Status: **v1.26.0**, 2026-11-18
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -12,7 +12,7 @@ This document is the spec. Implementation follows. If a tool's signature, respon
 
 Three problems with upstream that the fork solves:
 
-**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **34 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
+**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **35 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
 
 **No headless mode.** Upstream requires QGIS Desktop running with the plugin enabled. That's incompatible with scheduled overnight runs, CI, or any automation. We add a **PyQGIS-subprocess transport** alongside the existing plugin transport. Same tools, two backends, selected by config or CLI flag.
 
@@ -50,7 +50,9 @@ Out of scope: replacing upstream as a general-purpose QGIS MCP. We intentionally
 
 **Transport selection.** CLI flag `--transport={plugin,headless,auto}`, then `QGIS_MCP_WORKFLOWS_TRANSPORT`, then `~/.config/qgis-mcp-workflows/config.toml` (`transport`, and optionally `host` / `port`), then `auto`. The server logs the chosen value and where it came from at startup, before any tool call. `auto` uses the plugin when port 9877 accepts a connection. If the port is closed and a QGIS Desktop process is running, `auto` does **not** fall through to headless: the call raises `PluginNotStartedError` telling the user that Run MCP was not started (toolbar button; Plugins menu **QGIS MCP**; the button's menu has Auto-start on startup, off until ticked). That is the open project the caller meant. If Desktop is not running, `auto` uses headless. If headless is unavailable too, `auto` still starts: every tool call re-probes the plugin port, switches to the plugin once Run MCP is listening, and otherwise raises `TransportUnavailableError` naming both reasons. Exiting at startup instead would close the MCP connection before the client could show any error. An explicit `--transport=headless` still fails at startup with `HeadlessUnavailableError`, and that error's `Next:` stays on headless (fix `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER`, restart with `--transport=headless`).
 
-**Python eval.** The same `config.toml` reads `allow_python_eval`, default true, so `qgis_eval` stays available and a replay's `--allow-eval` switch is unchanged. `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` (`1` or `0`) overrides the file. There is no CLI flag. An unknown value is ignored and the next source is used (environment, then the file, then the default). When the effective value is false, `qgis_eval` raises `PythonEvalDisabledError` before any code runs. The hint names `qgis_expression` and setting the key back to true.
+**Python eval.** The same `config.toml` reads `allow_python_eval`, default true, so `qgis_eval` stays available and a replay's `--allow-eval` switch is unchanged. `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` (`1` or `0`) overrides the file. There is no CLI flag. An unknown value is ignored and the next source is used (environment, then the file, then the default). When the effective value is false, `qgis_eval` raises `PythonEvalDisabledError` before any code runs. The hint names `qgis_expression`, `qgis_recipe`, and setting the key back to true.
+
+**Named recipes.** The same `config.toml` may set `recipe_dir` to a directory of user recipe files. The directory is off when the key is missing, blank, or not a string. `QGIS_MCP_WORKFLOWS_RECIPE_DIR` overrides the file; an empty value, `0`, `off`, or `false` turns the directory off even when the file names one. A user recipe is JSON that pins a built-in recipe. It is not Python, and this server does not sandbox Python. `allow_python_eval` does not enable the directory, and turning eval off does not disable the built-in recipes. A call that used a user recipe is left out of `qgis_export_session` unless `trust_foreign=True`, the same gate a foreign `qgis_eval` uses. A built-in recipe does not read the directory and replays without that flag.
 
 **Headless runtime.** Standalone PyQGIS via `qgis_process` (CLI) for simple ops, with a long-lived Python subprocess holding `QgsApplication` for complex ops. Headless mode forces `QT_QPA_PLATFORM=offscreen` and disables any GUI calls. Render only — no project save, no plugin install, no UI mutation.
 
@@ -98,7 +100,7 @@ Upstream's plugin and server stay untouched. If the user installs both, Claude D
 
 ---
 
-## 4. Tool surface (34 workflow + 1 escape hatch)
+## 4. Tool surface (35 workflow + 1 escape hatch)
 
 For each tool: signature, what it does, response shape, and the typical chain.
 
@@ -573,11 +575,53 @@ ExpressionResult = {
 
 Chains into: `qgis_render_choropleth`, `qgis_style_graduated`, `qgis_layer_inspect`.
 
+### Recipes (1)
+
+#### `qgis_recipe(name: str, layer_path: str, output_path: str, crs: str | None = None, lon_field: str | None = None, lat_field: str | None = None) → RecipeResult`
+
+Run one named recipe and write a new file. These are the PyQGIS operations `qgis_expression` does not cover and the geometry writers, the fishnet, aggregation, and zonal stats do not cover. `qgis_expression` adds a column or filters features. It does not change the layer CRS, replace the geometry, or write one feature per part. The caller passes `name`, not Python. This is not a sandbox. `qgis_eval` stays available while `allow_python_eval` is true (see §2). Full mode only. Compound mode does not grow a kind for it. No Processing. The open project is unchanged. The handler does not touch `iface`, so plugin and headless both run it.
+
+Output is GeoPackage (`.gpkg`) or GeoJSON (`.geojson` or `.json`). Anything else raises `InvalidArgumentError` before dispatch.
+
+Built-in names are always available. They do not read `recipe_dir`.
+
+| `name` | Writes | Arguments |
+|---|---|---|
+| `reproject` | Every feature, transformed into `crs`. The output CRS is `crs`. | `crs` required |
+| `centroids` | One point per feature. Attributes are kept. The CRS stays the source CRS. An empty geometry is skipped. | none |
+| `explode` | One feature per part. A single-part feature stays one feature. Attributes are copied onto each part. The CRS stays the source CRS. | none |
+| `points_from_xy` | A point at (`lon_field`, `lat_field`) for each feature whose values are finite numbers. Other attributes are kept. | `lon_field` and `lat_field` required. `crs` defaults to `EPSG:4326` |
+| `extent` | One polygon of the layer extent. `extent` in the result is `[xmin, ymin, xmax, ymax]` in the layer CRS, which is the box `qgis_make_grid` takes. | none |
+
+An argument a recipe does not take is refused before dispatch. The message names the recipe and the argument. A missing required argument is refused the same way. A name that is not a built-in, and is not a user recipe, is refused. The message lists the built-in names.
+
+A user recipe is `{recipe_dir}/{name}.json`. The directory stays off unless `recipe_dir` is set (§2). The file is JSON, not Python. A `code` key is refused; Python stays on `qgis_eval`. The file must contain `recipe`, and that value must be a built-in name. It may pin `crs`, `lon_field`, and `lat_field` for that recipe. It may not set `layer_path`, `output_path`, or any other key. A call argument overrides the file. A file whose stem is a built-in name is never read, so a user file cannot replace `reproject`. The name must be a single path segment (`letters`, digits, `_`); a slash or `..` is refused before the directory is opened. `source` is `builtin` or `user`. `recipe` is the built-in that ran. `name` is the name the caller passed.
+
+A CRS QGIS cannot use raises `RecipeCrsError` and names the CRS. A recipe that writes nothing raises `RecipeEmptyError`. The message includes `n_input` and the layer CRS. A `points_from_xy` field that is not on the layer raises `InvalidArgumentError` and names the field and the fields that are. A layer that is not points, lines, or polygons raises `InvalidArgumentError` for `reproject`, `centroids`, `explode`, and `extent`, and names the geometry type and the CRS. `points_from_xy` accepts a table with no geometry.
+
+`qgis_export_session` replays a built-in `qgis_recipe` with the other file-writing tools. A call whose `name` is not a built-in is a user recipe. It is left out unless `trust_foreign=True`, and the warning tells the caller to pass that flag. That is the same gate foreign `qgis_eval` calls use. The user recipe is not recorded as a `qgis_eval` and does not change `allow_python_eval`.
+
+```python
+RecipeResult = {
+    "output_path": str,
+    "name": str,
+    "recipe": str,          # the built-in that ran
+    "source": str,          # "builtin" or "user"
+    "n_input": int,
+    "n_output": int,
+    "crs": str | None,      # CRS of the written file
+    "source_crs": str | None,
+    "extent": [float, float, float, float] | None,  # set by the extent recipe
+}
+```
+
+Chains into: `qgis_make_grid` (pass `extent`), `qgis_spatial_join`, `qgis_aggregate_to_zones`, `qgis_render_choropleth`, `qgis_expression`.
+
 ### Escape hatch (1)
 
 #### `qgis_eval(code: str, return_vars: list[str] | None = None) → EvalResult`
 
-Execute arbitrary PyQGIS. Try `qgis_expression` first for a calculated column or a filter. Available in plugin transport (executes in QGIS); in headless transport, runs in the standalone PyQGIS subprocess. `return_vars` lists local variables to capture and return JSON-serialized. Stays available while `allow_python_eval` is true (the default; see §2). When that flag is false, the call raises `PythonEvalDisabledError` and does not run the code.
+Execute arbitrary PyQGIS. Try `qgis_expression` first for a calculated column or a filter, and `qgis_recipe` for a reproject, centroids, exploding parts, points from longitude and latitude, or an extent polygon. Available in plugin transport (executes in QGIS); in headless transport, runs in the standalone PyQGIS subprocess. `return_vars` lists local variables to capture and return JSON-serialized. Stays available while `allow_python_eval` is true (the default; see §2). When that flag is false, the call raises `PythonEvalDisabledError` and does not run the code. Turning the flag off does not disable `qgis_recipe`.
 
 ```python
 EvalResult = {
@@ -588,7 +632,7 @@ EvalResult = {
 }
 ```
 
-Use for the long tail that `qgis_expression` and the workflow tools do not cover. This is an escape hatch, not a first choice.
+Use for the long tail that `qgis_expression`, `qgis_recipe`, and the workflow tools do not cover. This is an escape hatch, not a first choice. There is no Python sandbox around it.
 
 ---
 
@@ -859,7 +903,7 @@ Every typed error derives from `QgisMcpWorkflowsError`, which subclasses the SDK
 - 3D view. Not on the roadmap.
 - Map server / WMS / WFS. Not on the roadmap.
 
-If a v1 user needs any of these, the answer is: install upstream alongside, or write the call inside `qgis_eval`. A calculated column or a feature filter is `qgis_expression`, not `qgis_eval`. A buffer, dissolve, study-area clip, or Voronoi polygon file is `qgis_buffer`, `qgis_dissolve`, `qgis_clip`, or `qgis_voronoi`, not a Processing algorithm. A metre fishnet is `qgis_make_grid`, not Processing `native:creategrid`. Network isochrones stay out. JIS L3 regeneration stays `scripts/build_gufm_zones.py`.
+If a v1 user needs any of these, the answer is: install upstream alongside, or write the call inside `qgis_eval`. A calculated column or a feature filter is `qgis_expression`, not `qgis_eval`. A reproject, centroids, exploding parts, points from longitude and latitude, or an extent polygon is `qgis_recipe`, not `qgis_eval`. A buffer, dissolve, study-area clip, or Voronoi polygon file is `qgis_buffer`, `qgis_dissolve`, `qgis_clip`, or `qgis_voronoi`, not a Processing algorithm. A metre fishnet is `qgis_make_grid`, not Processing `native:creategrid`. Network isochrones stay out. JIS L3 regeneration stays `scripts/build_gufm_zones.py`. There is no Python sandbox.
 
 ---
 
@@ -914,6 +958,8 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 **v1.24 — layout type and panel frames.** ✅ `qgis_compose_layout` takes optional `width_mm` and `height_mm`, `font_family`, `title_size_pt`, `legend_size_pt` and `legend_corner`. Omitted, the page preset, the 18 pt title and the top-right legend stay. `qgis_compose_panels` takes `difference_columns` (`name = left - right`, joined into the CSV before the scale) and `panel_extents` (one box per panel). An older plugin that ignores the new keys raises `PluginOutdatedError`.
 
 **v1.25 — fishnet polygons.** ✅ `qgis_make_grid` writes square polygons of `cell_m` metres over an extent, in a projected CRS whose map units are metres. Cells align to the CRS origin, so the same `crs` and `cell_m` share `cell_id`. The file is a GeoPackage or GeoJSON another tool can join. `assets/zones_mesh_l3.gpkg` is unchanged. JIS L3 stays `scripts/build_gufm_zones.py`. Full mode only. No Processing. Named recipes are not this release.
+
+**v1.26 — named recipes.** ✅ `qgis_recipe` writes a file from `reproject`, `centroids`, `explode`, `points_from_xy`, or `extent`. A user recipe directory stays off unless `recipe_dir` is set. A user recipe is JSON that pins a built-in, not Python. Those calls are left out of a replay unless `trust_foreign=True`. No Python sandbox. `qgis_eval` stays available while `allow_python_eval` is true. Full mode only.
 
 ---
 

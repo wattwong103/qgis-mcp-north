@@ -46,7 +46,7 @@ The headless runner injects a stub `iface` that no-ops UI calls. Every command
 handler that doesn't touch the canvas / layer-tree-view works in both transports
 for free — a v0.4 architectural promise that v0.5+ tools inherit.
 
-## Tools (35 standalone — 34 workflow + `qgis_eval`; 5 grouped in compound mode)
+## Tools (36 standalone — 35 workflow + `qgis_eval`; 5 grouped in compound mode)
 
 | Tool | Purpose |
 |---|---|
@@ -58,6 +58,7 @@ for free — a v0.4 architectural promise that v0.5+ tools inherit.
 | `qgis_voronoi` | Voronoi polygons from the same diagram as the catchment PNG; writes GeoPackage / GeoJSON. Full mode only |
 | `qgis_make_grid` | Metre fishnet of square polygons over an extent; writes GeoPackage / GeoJSON. Does not replace the JIS L3 mesh. Full mode only |
 | `qgis_expression` | Calculated column and/or filter from a QGIS expression; writes GeoPackage / GeoJSON. Full mode only |
+| `qgis_recipe` | Named recipes: reproject, centroids, explode, points from lon/lat, extent polygon. User recipes stay off unless `recipe_dir` is set. Full mode only |
 | `qgis_zonal_stats` | Raster statistics per polygon (JAXA LULC, DEM), plus majority and a class histogram → GeoPackage or CSV |
 | `qgis_export_atlas` | Export every atlas page from a print layout (PNG per feature or one PDF) |
 | `qgis_assign_section_load` | All-or-nothing OD → link volumes (`[network]` extra); feed `load_csv` to link-density |

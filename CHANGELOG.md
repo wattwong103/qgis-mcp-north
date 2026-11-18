@@ -3,6 +3,22 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.26.0 — 2026-11-18 — named recipes
+
+### Added
+
+- `qgis_recipe` writes a GeoPackage or GeoJSON from a named recipe:
+  `reproject`, `centroids`, `explode`, `points_from_xy`, and `extent`.
+  These are the PyQGIS operations `qgis_expression` and the geometry
+  writers do not cover. The caller passes a name, not Python. Full mode only.
+- A user recipe is `{recipe_dir}/{name}.json`. The directory stays off
+  unless `recipe_dir` is set in `~/.config/qgis-mcp-workflows/config.toml`.
+  `QGIS_MCP_WORKFLOWS_RECIPE_DIR` overrides the file. The JSON pins a
+  built-in. A `code` key is refused. `qgis_export_session` leaves a user
+  recipe out unless `trust_foreign=True`.
+- `qgis_eval` stays available while `allow_python_eval` is true. Turning
+  that flag off does not disable `qgis_recipe`. There is no Python sandbox.
+
 ## v1.25.0 — 2026-11-18 — fishnet polygons
 
 ### Added

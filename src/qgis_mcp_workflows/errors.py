@@ -453,6 +453,29 @@ class VoronoiError(QgisMcpWorkflowsError):
         self.detail = detail
 
 
+class RecipeCrsError(QgisMcpWorkflowsError):
+    """A named recipe was given a CRS QGIS cannot use."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"Next: pass a CRS QGIS accepts, such as EPSG:6677 or EPSG:4326, then retry qgis_recipe."
+        )
+        self.detail = detail
+
+
+class RecipeEmptyError(QgisMcpWorkflowsError):
+    """A named recipe wrote no features."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"Next: call qgis_layer_inspect and check n_features, geometry_type, and crs, "
+            f"then retry qgis_recipe."
+        )
+        self.detail = detail
+
+
 class PythonEvalDisabledError(QgisMcpWorkflowsError):
     """qgis_eval was called while allow_python_eval is false."""
 
@@ -461,7 +484,9 @@ class PythonEvalDisabledError(QgisMcpWorkflowsError):
             "qgis_eval is off because allow_python_eval is false. "
             "A calculated column or a filter is qgis_expression "
             "(layer_path, output_path, expression=..., field_name=..., filter=...). "
-            "Next: call qgis_expression, or set allow_python_eval = true in "
+            "A reproject, centroids, exploding parts, points from lon/lat, or an extent "
+            "polygon is qgis_recipe. "
+            "Next: call qgis_expression or qgis_recipe, or set allow_python_eval = true in "
             "~/.config/qgis-mcp-workflows/config.toml "
             "(or QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL=1) and retry qgis_eval."
         )
