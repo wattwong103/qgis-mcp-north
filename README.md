@@ -46,18 +46,20 @@ The headless runner injects a stub `iface` that no-ops UI calls. Every command
 handler that doesn't touch the canvas / layer-tree-view works in both transports
 for free — a v0.4 architectural promise that v0.5+ tools inherit.
 
-## Tools (28 standalone — 27 workflow + `qgis_eval`; 5 grouped in compound mode)
+## Tools (30 standalone — 29 workflow + `qgis_eval`; 5 grouped in compound mode)
 
 | Tool | Purpose |
 |---|---|
 | `qgis_spatial_join` | Join attributes by location; writes GeoPackage / GeoJSON |
+| `qgis_aggregate_to_zones` | Count, sum, or mean points or lines onto polygons; writes GeoPackage / GeoJSON. Full mode only |
+| `qgis_expression` | Calculated column and/or filter from a QGIS expression; writes GeoPackage / GeoJSON. Full mode only |
 | `qgis_zonal_stats` | Raster statistics per polygon (JAXA LULC, DEM) → GeoPackage or CSV |
 | `qgis_export_atlas` | Export every atlas page from a print layout (PNG per feature or one PDF) |
 | `qgis_assign_section_load` | All-or-nothing OD → link volumes (`[network]` extra); feed `load_csv` to link-density |
 | `qgis_route_on_network` | Snap stop sequences onto DRM/rail (GUFM Tokyo TSV); writes routed CSV |
 | `qgis_ping` | Liveness check against the plugin socket or headless subprocess |
 | `qgis_diagnose` | Stack health + plugin vs server version match |
-| `qgis_render_from_duckdb` | Render a DuckDB query result directly, skipping the CSV intermediate
+| `qgis_render_from_duckdb` | Render a DuckDB query result directly, with optional stroke, opacity and labels
 | `qgis_list_basemaps` | List every basemap `basemap=` accepts here: presets + QuickMapServices catalog |
 | `qgis_layer_inspect` | Metadata-only inspect (no project mutation) |
 | `qgis_load_layer` | Register layer + return layer_id; optional CRS override |
@@ -66,8 +68,8 @@ for free — a v0.4 architectural promise that v0.5+ tools inherit.
 | `qgis_style_graduated` | Graduated (value-binned) — quantile/equal/jenks/pretty |
 | `qgis_render_map` | Generic multi-layer render to PNG |
 | `qgis_render_choropleth` | Zone polygon + value CSV → choropleth, one call |
-| `qgis_render_trajectory` | Lines/points/heatmap from CSV/GPX. Stride sampling; optional `movingpandas` speed bins |
-| `qgis_render_od_flows` | Origin-destination arcs over a zones layer, data-defined widths |
+| `qgis_render_trajectory` | Lines/points/heatmap from CSV/GPX. Stride sampling; optional stroke, opacity and labels |
+| `qgis_render_od_flows` | Origin-destination arcs over a zones layer. Width scales with flow unless a stroke width is set |
 | `qgis_export_layout` | Print-composer → PNG/PDF/SVG |
 | `qgis_compose_panels` | Grid of map panels on linked colour scales with colour bars, set fonts and line weights → PDF/SVG/PNG |
 | `qgis_batch_render` | Fan-out per attribute value; manifest + per-value errors |

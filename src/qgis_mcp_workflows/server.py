@@ -110,7 +110,8 @@ qgis-mcp-workflows — opinionated QGIS MCP for transportation research figure
 pipelines (PFLOW, GUFM). First call qgis_ping / qgis_diagnose. Then:
 
 - qgis_layer_inspect before any join/render so field names are real.
-- qgis_spatial_join to copy attributes by location (points in zones);
+- qgis_spatial_join to copy attributes by location (first match);
+  qgis_aggregate_to_zones to count or sum points or lines onto polygons;
   qgis_zonal_stats for raster-per-polygon (JAXA LULC onto zones).
 - qgis_render_choropleth for zone polygons + value CSV (pass scale_bar=True
   and north_arrow=True for a publication PNG). GUFM 23-ward polygons:
@@ -179,8 +180,20 @@ def prompt_spatial_join() -> str:
         "qgis_layer_inspect both layers first (crs + extent must overlap). Then "
         "qgis_spatial_join(target_path, join_path, output_path, predicate='intersects', "
         "method='one_to_one'). Use method='one_to_many' when one target should keep "
-        "every matching join feature. Then qgis_render_choropleth or qgis_style_categorized "
-        "on the written GeoPackage."
+        "every matching join feature. To count or sum every point or line onto polygons, "
+        "use qgis_aggregate_to_zones instead. Then qgis_render_choropleth or "
+        "qgis_style_categorized on the written GeoPackage."
+    )
+
+
+@mcp.prompt(title="Aggregate to zones", description="Count or sum points or lines onto polygons.")
+def prompt_aggregate_to_zones() -> str:
+    return (
+        "qgis_layer_inspect both layers first. target_path is polygons; join_path is "
+        "points or lines; crs and extent must overlap. Then "
+        "qgis_aggregate_to_zones(target_path, join_path, output_path, statistic='count'), "
+        "or statistic='sum' or 'mean' with value_field set. "
+        "Then qgis_render_choropleth(zones_path=output_path, value_field=<field_name>)."
     )
 
 
@@ -403,6 +416,7 @@ class StyleResult(BaseModel):
     layer_id: str
     n_classes: int
     classes: list[ClassEntry]
+    style_applied: dict | None = None
 
 
 class GraduatedStyleResult(StyleResult):
@@ -411,6 +425,7 @@ class GraduatedStyleResult(StyleResult):
     diverging: bool = False
     center: float = 0.0
     diverging_one_sided: bool = False
+    n_outside_breaks: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +577,9 @@ class ChoroplethResult(RenderResult):
     diverging: bool = False
     center: float = 0.0
     diverging_one_sided: bool = False
+    style_applied: dict | None = None
+    n_outside_breaks: int | None = None
+    fonts_missing: list[str] = []
 
 
 class TrajectoryResult(RenderResult):
@@ -572,6 +590,8 @@ class TrajectoryResult(RenderResult):
     time_range: list[str] | None = None
     modes: list[str] | None = None
     used_movingpandas: bool
+    style_applied: dict | None = None
+    fonts_missing: list[str] = []
 
 
 class ODFlowResult(RenderResult):
@@ -582,6 +602,8 @@ class ODFlowResult(RenderResult):
     min_flow_rendered: float
     n_unmatched_origins: int
     n_unmatched_destinations: int
+    style_applied: dict | None = None
+    fonts_missing: list[str] = []
 
 
 class LinkDensityResult(RenderResult):
@@ -596,6 +618,8 @@ class LinkDensityResult(RenderResult):
     min_density: float
     max_density: float
     aggregation: str
+    style_applied: dict | None = None
+    fonts_missing: list[str] = []
 
 
 class ExportResult(DrawsMap):
@@ -640,12 +664,16 @@ class DiagramMapResult(RenderResult):
     diagram_type: str
     value_fields: list[str]
     n_features: int
+    style_applied: dict | None = None
+    fonts_missing: list[str] = []
 
 
 class CatchmentResult(RenderResult):
     method: str
     n_points: int
     n_catchments: int
+    style_applied: dict | None = None
+    fonts_missing: list[str] = []
 
 
 class BatchManifestEntry(BaseModel):
@@ -965,9 +993,11 @@ def qgis_spatial_join(
 ) -> SpatialJoinResult:
     """Join attributes by location and write a new layer.
 
-    When to use: PFLOW pickups → zone polygons, stations → catchments, or any
-    two overlapping layers. Atomic (no leftover project layers). Does **not**
-    use the Processing toolbox — ``QgsSpatialIndex`` + geometry predicates.
+    When to use: copy a zone id onto points, or copy attributes between
+    overlapping layers. ``one_to_one`` keeps the first match. To count or sum
+    every point or line onto polygons, use ``qgis_aggregate_to_zones``. Atomic
+    (no leftover project layers). Does **not** use the Processing toolbox —
+    ``QgsSpatialIndex`` + geometry predicates.
 
     Returns: ``SpatialJoinResult`` with match counts and the written path.
 
@@ -1017,6 +1047,119 @@ def qgis_spatial_join(
         predicate=result.get("predicate", predicate),
         method=result.get("method", method),
         joined_fields=list(result.get("joined_fields") or []),
+    )
+
+
+class AggregateToZonesResult(BaseModel):
+    output_path: str
+    n_target: int
+    n_join: int
+    n_with_value: int
+    field_name: str
+    statistic: str
+
+
+_AGGREGATE_OUTPUTS = (".gpkg", ".geojson", ".json")
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_aggregate_to_zones(
+    target_path: Annotated[str, Field(description="Polygon layer that keeps its geometry (wards, mesh cells).")],
+    join_path: Annotated[str, Field(description="Points or lines to count or sum onto each polygon.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+    statistic: Annotated[
+        Literal["count", "sum", "mean"],
+        Field(description="count needs no value_field. sum and mean require value_field on the join layer."),
+    ] = "count",
+    value_field: Annotated[
+        str | None,
+        Field(description="Numeric field on the join layer. Required for sum and mean. Ignored for count."),
+    ] = None,
+    field_name: Annotated[
+        str | None,
+        Field(description="Name of the new field. Default count, sum, or mean. A name already on the polygons gets _2, _3, …"),
+    ] = None,
+) -> AggregateToZonesResult:
+    """Count, sum, or mean points or lines onto polygons.
+
+    When to use: pickups per ward, trip totals per mesh cell. ``qgis_spatial_join``
+    copies the first match; this counts every feature that intersects a polygon.
+    A line that crosses several polygons counts once in each. One feature is one
+    count; a line is not measured by length. The predicate is intersects.
+    The open project is unchanged. Full mode only.
+
+    Returns: ``AggregateToZonesResult`` with ``n_target``, ``n_join``,
+    ``n_with_value``, and the ``field_name`` written.
+
+    Chains into: ``qgis_render_choropleth(zones_path=output_path, value_field=<field_name>)``.
+    """
+    from qgis_mcp_workflows.errors import (
+        AggregateEmptyError,
+        ExecutorError,
+        FieldNotFoundError,
+        LayerNotFoundError,
+    )
+    from qgis_mcp_workflows.executors import get_executor
+
+    stat = (statistic or "").strip().lower()
+    if stat not in ("count", "sum", "mean"):
+        raise InvalidArgumentError(
+            f"statistic {statistic!r} must be count, sum, or mean.",
+            next_step="pass statistic='count', 'sum', or 'mean', then retry qgis_aggregate_to_zones",
+        )
+    column = (value_field or "").strip()
+    if stat in ("sum", "mean") and not column:
+        raise InvalidArgumentError(
+            f"statistic {stat!r} requires value_field on the join layer.",
+            next_step="pass value_field, the numeric field to aggregate, then retry qgis_aggregate_to_zones",
+        )
+    abs_target = user_abs(target_path)
+    abs_join = user_abs(join_path)
+    abs_out = user_abs(output_path)
+    if os.path.splitext(abs_out)[1].lower() not in _AGGREGATE_OUTPUTS:
+        raise InvalidArgumentError(
+            f"output_path {output_path!r} must end in .gpkg or .geojson.",
+            next_step="pass a .gpkg or .geojson output_path, then retry qgis_aggregate_to_zones",
+        )
+    params: dict = {
+        "target_path": abs_target,
+        "join_path": abs_join,
+        "output_path": abs_out,
+        "statistic": stat,
+    }
+    if stat != "count" and column:
+        params["value_field"] = column
+    written_name = (field_name or "").strip()
+    if written_name:
+        params["field_name"] = written_name
+    try:
+        result = get_executor().dispatch("aggregate_to_zones", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "AGGREGATE_EMPTY" in message:
+            raise AggregateEmptyError(message) from err
+        if "AGGREGATE_GEOMETRY" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="pass a polygon target_path and a point or line join_path, then retry qgis_aggregate_to_zones",
+            ) from err
+        if "LAYER_NOT_FOUND" in message:
+            path = abs_target if abs_target in message else abs_join
+            raise LayerNotFoundError(path) from err
+        if "FIELD_NOT_FOUND" in message:
+            raise FieldNotFoundError(column or "?", []) from err
+        raise
+    return AggregateToZonesResult(
+        output_path=user_abs(result["output_path"]),
+        n_target=int(result.get("n_target") or 0),
+        n_join=int(result.get("n_join") or 0),
+        n_with_value=int(result.get("n_with_value") or 0),
+        field_name=str(result.get("field_name") or ""),
+        statistic=str(result.get("statistic") or stat),
     )
 
 
@@ -1155,6 +1298,10 @@ def qgis_style_categorized(
     field: Annotated[str, Field(description="Field name to categorize on (string-typed).")],
     palette: Annotated[str | None, Field(description='ColorBrewer palette name, e.g. "Set2", "Paired", "Dark2", or a continuous ramp such as "Spectral". Default: Set2 while there are at most 8 categories, else Spectral. A named qualitative scheme has a fixed number of colours (Set2: 8, Paired: 12); more categories are refused, so pass classes= or a continuous ramp.')] = None,
     classes: Annotated[list[str] | None, Field(description="Optional subset/order of category values to render; every other value (and NULL) shares one grey 'all other values' class.")] = None,
+    outline_color: Annotated[str | None, Field(description="Stroke colour, #RGB or #RRGGBB. On a line layer this is the line colour. Omit to leave the symbol unchanged.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Stroke width in mm, 0 to 5. 0 is a one-pixel hairline. Omit to leave the width unchanged.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    colors: Annotated[list[str] | None, Field(description="One #RGB or #RRGGBB per classes entry, same length. The grey 'all other values' class stays grey. Requires classes.")] = None,
 ) -> StyleResult:
     """Apply categorical (one-color-per-value) symbology to a vector layer.
 
@@ -1167,6 +1314,11 @@ def qgis_style_categorized(
     """
     from qgis_mcp_workflows.errors import ExecutorError, FieldNotFoundError, LayerNotFoundError
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import (
+        color_params,
+        require_style_applied,
+        symbol_params,
+    )
 
     params = {
         "layer_id": layer_id,
@@ -1176,6 +1328,13 @@ def qgis_style_categorized(
     }
     if classes is not None:
         params["classes_subset"] = list(classes)
+    sent = symbol_params(
+        outline_color=outline_color,
+        outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity,
+    )
+    sent.update(color_params(colors, classes))
+    params.update(sent)
 
     try:
         result = get_executor().dispatch("set_layer_style", params, timeout=30)
@@ -1185,6 +1344,7 @@ def qgis_style_categorized(
         if "Layer not found" in err.message:
             raise LayerNotFoundError(layer_id) from err
         raise
+    require_style_applied(result, sent, _executor_transport_name())
 
     return StyleResult(
         layer_id=layer_id,
@@ -1193,6 +1353,7 @@ def qgis_style_categorized(
             ClassEntry(value=c["value"], color=c["color"], n_features=c["n_features"])
             for c in result.get("classes", [])
         ],
+        style_applied=result.get("style_applied"),
     )
 
 
@@ -1209,6 +1370,10 @@ def qgis_style_graduated(
     palette: Annotated[str, Field(description='Sequential colorbrewer palette, e.g. "YlOrRd", "Blues", "Viridis".')] = "YlOrRd",
     diverging: Annotated[bool, Field(description="Diverging color scheme with a fixed neutral midpoint, for signed data (e.g. net flux). Replaces mode-based boundaries with symmetric breaks around center; pair with a diverging palette (vik/RdBu/balance).")] = False,
     center: Annotated[float, Field(description="Neutral midpoint for diverging mode (e.g. 0). Ignored when diverging is False.")] = 0.0,
+    outline_color: Annotated[str | None, Field(description="Stroke colour, #RGB or #RRGGBB. On a line layer this is the line colour. Omit to leave the symbol unchanged.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Stroke width in mm, 0 to 5. 0 is a one-pixel hairline. Omit to leave the width unchanged.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    breaks: Annotated[list[float] | None, Field(description="Explicit class edges: first lower bound, then each upper bound. Length 2 to 16. mode, n_classes and center are ignored. Refused together with diverging.")] = None,
 ) -> GraduatedStyleResult:
     """Apply graduated (value-based color ramp) symbology — the choropleth primitive.
 
@@ -1220,6 +1385,11 @@ def qgis_style_graduated(
     """
     from qgis_mcp_workflows.errors import ExecutorError, FieldNotFoundError, LayerNotFoundError
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import (
+        break_params,
+        require_style_applied,
+        symbol_params,
+    )
 
     params = {
         "layer_id": layer_id,
@@ -1231,6 +1401,13 @@ def qgis_style_graduated(
         "diverging": diverging,
         "center": center,
     }
+    sent = symbol_params(
+        outline_color=outline_color,
+        outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity,
+    )
+    sent.update(break_params(breaks, diverging=diverging))
+    params.update(sent)
 
     try:
         result = get_executor().dispatch("set_layer_style", params, timeout=30)
@@ -1240,6 +1417,7 @@ def qgis_style_graduated(
         if "Layer not found" in err.message:
             raise LayerNotFoundError(layer_id) from err
         raise
+    require_style_applied(result, sent, _executor_transport_name())
 
     return GraduatedStyleResult(
         layer_id=layer_id,
@@ -1253,6 +1431,8 @@ def qgis_style_graduated(
         diverging=result.get("diverging", diverging),
         center=result.get("center", center),
         diverging_one_sided=result.get("diverging_one_sided", False),
+        style_applied=result.get("style_applied"),
+        n_outside_breaks=result.get("n_outside_breaks"),
     )
 
 
@@ -1371,6 +1551,8 @@ class DuckDbRenderResult(RenderResult):
     field: str | None = None
     breaks: list[float] | None = None
     row_limit_hit: bool = False
+    style_applied: dict | None = None
+    fonts_missing: list[str] = []
 
 
 def _wire_value(value: Any) -> Any:
@@ -1473,6 +1655,15 @@ def qgis_render_from_duckdb(
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
+    outline_color: Annotated[str | None, Field(description="Stroke colour, #RGB or #RRGGBB. On a line this is the line colour. On a point it is the marker outline. Omit to leave it unchanged.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Stroke width in mm, 0 to 5. 0 is a one-pixel hairline. Omit to leave the width unchanged.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    label_field: Annotated[str | None, Field(description="Query column to label. Omit to draw no labels.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 9 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> DuckDbRenderResult:
     """Render the result of a DuckDB query directly, with no CSV in between.
 
@@ -1493,8 +1684,17 @@ def qgis_render_from_duckdb(
     """
     import os
 
-    from qgis_mcp_workflows.errors import QgisMcpWorkflowsError
+    from qgis_mcp_workflows.errors import FieldNotFoundError, QgisMcpWorkflowsError
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import control_params, echoed_style
+
+    sent = control_params(
+        outline_color=outline_color, outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity, label_field=label_field,
+        label_size_pt=label_size_pt, label_font=label_font, label_color=label_color,
+        label_halo_mm=label_halo_mm, label_halo_color=label_halo_color,
+        track_label_field=True,
+    )
 
     try:
         import duckdb
@@ -1599,8 +1799,10 @@ def qgis_render_from_duckdb(
                f"Columns {lon_column!r}/{lat_column!r} should hold numeric coordinates. ")
             + "Next: adjust the query and retry."
         )
+    if label_field is not None and label_field not in attr_cols:
+        raise FieldNotFoundError(label_field, attr_cols)
 
-    result = get_executor().dispatch("render_wkt_features", {
+    wkt_params = {
         "features": features,
         "output_png": user_abs(output_png),
         "crs": crs,
@@ -1614,7 +1816,10 @@ def qgis_render_from_duckdb(
         "width": width,
         "height": height,
         "dpi": dpi,
-    })
+    }
+    wkt_params.update(sent)
+    result = get_executor().dispatch("render_wkt_features", wkt_params)
+    style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
 
     return DuckDbRenderResult(
         output_path=result["output_path"],
@@ -1629,6 +1834,8 @@ def qgis_render_from_duckdb(
         field=result.get("field"),
         breaks=result.get("breaks"),
         row_limit_hit=row_limit_hit,
+        style_applied=style_applied,
+        fonts_missing=fonts_missing,
     )
 
 
@@ -1659,6 +1866,15 @@ def qgis_render_choropleth(
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
     scale_bar: Annotated[bool, Field(description="Draw a metric scale bar in the lower-left of the PNG.")] = False,
     north_arrow: Annotated[bool, Field(description="Draw a north arrow in the upper-right of the PNG.")] = False,
+    outline_color: Annotated[str | None, Field(description="Polygon stroke colour, #RGB or #RRGGBB. Omit to leave the symbol unchanged.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Polygon stroke width in mm, 0 to 5. 0 is a one-pixel hairline. Omit to leave the width unchanged.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    breaks: Annotated[list[float] | None, Field(description="Explicit class edges: first lower bound, then each upper bound. Length 2 to 16. mode, n_classes and center are ignored. Refused together with diverging. Values outside the outer edges are not drawn.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 9 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> ChoroplethResult:
     """Render a zone-level choropleth in one call. PFLOW workflow tool.
 
@@ -1685,6 +1901,12 @@ def qgis_render_choropleth(
 
     from qgis_mcp_workflows.errors import ExecutorError, FieldNotFoundError, JoinError
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import (
+        break_params,
+        label_params,
+        require_style_applied,
+        symbol_params,
+    )
 
     abs_zones = user_abs(zones_path)
     abs_output = user_abs(output_png)
@@ -1736,6 +1958,21 @@ def qgis_render_choropleth(
         "scale_bar": scale_bar,
         "north_arrow": north_arrow,
     }
+    sent = symbol_params(
+        outline_color=outline_color,
+        outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity,
+    )
+    sent.update(break_params(breaks, diverging=diverging))
+    sent.update(label_params(
+        label_field=label_field,
+        label_size_pt=label_size_pt,
+        label_font=label_font,
+        label_color=label_color,
+        label_halo_mm=label_halo_mm,
+        label_halo_color=label_halo_color,
+    ))
+    params.update(sent)
 
     try:
         result = get_executor().dispatch("render_choropleth", params, timeout=60)
@@ -1743,6 +1980,7 @@ def qgis_render_choropleth(
         if "JOIN_NO_MATCH" in str(err):
             raise JoinError(err.message) from err
         raise
+    require_style_applied(result, sent, _executor_transport_name())
 
     join_block = None
     if value_dict is not None:
@@ -1773,7 +2011,36 @@ def qgis_render_choropleth(
         diverging_one_sided=result.get("diverging_one_sided", False),
         basemap_attribution=result.get("basemap_attribution"),
         basemap_source=result.get("basemap_source"),
+        style_applied=result.get("style_applied"),
+        n_outside_breaks=result.get("n_outside_breaks"),
+        fonts_missing=result.get("fonts_missing") or [],
     )
+
+
+def _trajectory_label_column(
+    label_field: str | None,
+    columns: list[str],
+    id_col: str,
+    mode_col: str | None,
+) -> tuple[str | None, bool]:
+    """Layer field to label, and whether each feature must copy that CSV column.
+
+    ``trip_id`` is always on the layer. ``mode`` is the layer name of ``mode_col``.
+    ``speed_kmh`` is the movingpandas field. Any other name is copied as itself.
+    """
+    from qgis_mcp_workflows.errors import FieldNotFoundError
+
+    if not label_field:
+        return None, False
+    if label_field in ("trip_id", id_col):
+        return "trip_id", False
+    if mode_col and label_field == mode_col:
+        return "mode", False
+    if label_field == "speed_kmh":
+        return "speed_kmh", False
+    if label_field not in columns:
+        raise FieldNotFoundError(label_field, list(columns))
+    return label_field, True
 
 
 @_maybe_tool(
@@ -1801,6 +2068,15 @@ def qgis_render_trajectory(
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
     scale_bar: Annotated[bool, Field(description="Draw a metric scale bar in the lower-left of the PNG.")] = False,
     north_arrow: Annotated[bool, Field(description="Draw a north arrow in the upper-right of the PNG.")] = False,
+    outline_color: Annotated[str | None, Field(description="Stroke colour, #RGB or #RRGGBB. On a line with no mode_col this is the line colour. On a point it is the marker outline. Omit to leave it unchanged.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Stroke width in mm, 0 to 5. 0 is a one-pixel hairline. Refused on a line that is coloured by mode_col. Omit to leave the width unchanged.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged. Refused for heatmap.")] = None,
+    label_field: Annotated[str | None, Field(description="Label trip_id, mode (when mode_col is set), speed_kmh (when movingpandas ran), another CSV column, or a GPX field. Omit to draw no labels.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 9 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> TrajectoryResult:
     """Render trajectory data from CSV/GPX. PFLOW/GUFM workflow tool.
 
@@ -1821,8 +2097,38 @@ def qgis_render_trajectory(
     """
     import csv as _csv
 
-    from qgis_mcp_workflows.errors import EmptyAfterFilterError, FieldNotFoundError
+    from qgis_mcp_workflows.errors import (
+        EmptyAfterFilterError,
+        FieldNotFoundError,
+        InvalidArgumentError,
+    )
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import control_params, echoed_style
+
+    sent = control_params(
+        outline_color=outline_color, outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity, label_field=label_field,
+        label_size_pt=label_size_pt, label_font=label_font, label_color=label_color,
+        label_halo_mm=label_halo_mm, label_halo_color=label_halo_color,
+        track_label_field=True,
+    )
+    symbol_set = (
+        outline_color is not None or outline_width_mm is not None or fill_opacity is not None
+    )
+    if render_mode == "heatmap" and symbol_set:
+        raise InvalidArgumentError(
+            "heatmap has no stroke or opacity to set.",
+            next_step='use render_mode="lines" or render_mode="points"',
+        )
+    if (
+        render_mode == "lines"
+        and mode_col
+        and (outline_color is not None or outline_width_mm is not None)
+    ):
+        raise InvalidArgumentError(
+            "outline_color and outline_width_mm replace the mode colours on a line trajectory.",
+            next_step='omit mode_col, or use render_mode="points" where the outline is the marker stroke',
+        )
 
     abs_input = user_abs(input_path)
     _require_file("input_path", abs_input)
@@ -1848,7 +2154,9 @@ def qgis_render_trajectory(
             "scale_bar": scale_bar,
             "north_arrow": north_arrow,
         }
+        params.update(sent)
         result = get_executor().dispatch("render_trajectory", params, timeout=120)
+        style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
         return TrajectoryResult(
             output_path=result["output_path"],
             width=result["width"], height=result["height"], dpi=result["dpi"],
@@ -1862,6 +2170,8 @@ def qgis_render_trajectory(
             used_movingpandas=result.get("used_movingpandas", False),
             basemap_attribution=result.get("basemap_attribution"),
             basemap_source=result.get("basemap_source"),
+            style_applied=style_applied,
+            fonts_missing=fonts_missing,
         )
 
     # CSV path: parse + validate columns MCP-side.
@@ -1873,6 +2183,7 @@ def qgis_render_trajectory(
                 raise FieldNotFoundError(required, columns)
         if mode_col is not None and mode_col not in columns:
             raise FieldNotFoundError(mode_col, columns)
+        layer_label, copy_label = _trajectory_label_column(label_field, columns, id_col, mode_col)
         rows = list(reader)
 
     n_points_total = len(rows)
@@ -1936,6 +2247,8 @@ def qgis_render_trajectory(
             feat["mode"] = mode_val
             if mode_val:
                 modes_seen.add(mode_val)
+        if copy_label and layer_label is not None:
+            feat[layer_label] = row.get(label_field, "")
         features.append(feat)
 
     if not features:
@@ -1977,7 +2290,11 @@ def qgis_render_trajectory(
         "scale_bar": scale_bar,
         "north_arrow": north_arrow,
     }
+    if layer_label is not None:
+        sent["label_field"] = layer_label
+    params.update(sent)
     result = get_executor().dispatch("render_trajectory", params, timeout=120)
+    style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
     return TrajectoryResult(
         output_path=result["output_path"],
         width=result["width"], height=result["height"], dpi=result["dpi"],
@@ -1991,6 +2308,8 @@ def qgis_render_trajectory(
         used_movingpandas=result.get("used_movingpandas", used_mp),
         basemap_attribution=result.get("basemap_attribution"),
         basemap_source=result.get("basemap_source"),
+        style_applied=style_applied,
+        fonts_missing=fonts_missing,
     )
 
 
@@ -2145,6 +2464,14 @@ def qgis_render_od_flows(
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
     scale_bar: Annotated[bool, Field(description="Draw a metric scale bar in the lower-left of the PNG.")] = False,
     north_arrow: Annotated[bool, Field(description="Draw a north arrow in the upper-right of the PNG.")] = False,
+    outline_color: Annotated[str | None, Field(description="Line or arrow colour, #RGB or #RRGGBB. Omit to leave #1f78b4.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Constant stroke width in mm, 0 to 5. Omit to keep the width scaled by flow.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 8 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> ODFlowResult:
     """Render origin-destination arcs over a zones layer. PFLOW workflow tool.
 
@@ -2167,6 +2494,14 @@ def qgis_render_od_flows(
 
     from qgis_mcp_workflows.errors import FieldNotFoundError
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import control_params, echoed_style
+
+    sent = control_params(
+        outline_color=outline_color, outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity, label_field=label_field,
+        label_size_pt=label_size_pt, label_font=label_font, label_color=label_color,
+        label_halo_mm=label_halo_mm, label_halo_color=label_halo_color,
+    )
 
     abs_od = user_abs(od_csv)
     _require_file("od_csv", abs_od)
@@ -2215,7 +2550,9 @@ def qgis_render_od_flows(
         "scale_bar": scale_bar,
         "north_arrow": north_arrow,
     }
+    params.update(sent)
     result = get_executor().dispatch("render_od_flows", params, timeout=60)
+    style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
     return ODFlowResult(
         output_path=result["output_path"],
         width=result["width"], height=result["height"], dpi=result["dpi"],
@@ -2229,6 +2566,8 @@ def qgis_render_od_flows(
         n_unmatched_destinations=result["n_unmatched_destinations"],
         basemap_attribution=result.get("basemap_attribution"),
         basemap_source=result.get("basemap_source"),
+        style_applied=style_applied,
+        fonts_missing=fonts_missing,
     )
 
 
@@ -2260,6 +2599,14 @@ def qgis_render_link_density(
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
     scale_bar: Annotated[bool, Field(description="Draw a metric scale bar in the lower-left of the PNG.")] = False,
     north_arrow: Annotated[bool, Field(description="Draw a north arrow in the upper-right of the PNG.")] = False,
+    outline_color: Annotated[str | None, Field(description="Line colour, #RGB or #RRGGBB. When set, replaces the density ramp. Omit to keep the palette.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Line width in mm, 0 to 5. 0 is a one-pixel hairline. Omit to leave 0.6 mm.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 7 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> LinkDensityResult:
     """Render a DRM-link traffic-density choropleth from PFLOW trajectories. v2 workflow tool.
 
@@ -2286,6 +2633,14 @@ def qgis_render_link_density(
         EmptyAfterFilterError,
     )
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import control_params, echoed_style
+
+    sent = control_params(
+        outline_color=outline_color, outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity, label_field=label_field,
+        label_size_pt=label_size_pt, label_font=label_font, label_color=label_color,
+        label_halo_mm=label_halo_mm, label_halo_color=label_halo_color,
+    )
 
     abs_drm = user_abs(drm_network_path)
     abs_output = user_abs(output_png)
@@ -2351,7 +2706,9 @@ def qgis_render_link_density(
         "scale_bar": scale_bar,
         "north_arrow": north_arrow,
     }
+    params.update(sent)
     result = get_executor().dispatch("render_link_density", params, timeout=120)
+    style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
 
     return LinkDensityResult(
         output_path=result["output_path"],
@@ -2370,6 +2727,8 @@ def qgis_render_link_density(
         aggregation=aggregation,
         basemap_attribution=result.get("basemap_attribution"),
         basemap_source=result.get("basemap_source"),
+        style_applied=style_applied,
+        fonts_missing=fonts_missing,
     )
 
 
@@ -2576,6 +2935,15 @@ def qgis_render_diagram_map(
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
+    outline_color: Annotated[str | None, Field(description="Base-symbol and diagram-pen colour, #RGB or #RRGGBB. Omit to leave the base symbol and the white pen.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Base-symbol and diagram-pen width in mm, 0 to 5. Omit to leave them unchanged.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Base-symbol opacity, 0 to 1. Omit to leave it unchanged.")] = None,
+    label_field: Annotated[str | None, Field(description="Field on the layer to label. Omit to draw no labels.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 9 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> DiagramMapResult:
     """Render pie/bar charts on each map feature — "chart in map". v2 workflow tool.
 
@@ -2589,6 +2957,15 @@ def qgis_render_diagram_map(
     Chains into: ``qgis_compose_layout``, ``qgis_figures_to_pptx``.
     """
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import control_params, echoed_style
+
+    sent = control_params(
+        outline_color=outline_color, outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity, label_field=label_field,
+        label_size_pt=label_size_pt, label_font=label_font, label_color=label_color,
+        label_halo_mm=label_halo_mm, label_halo_color=label_halo_color,
+        track_label_field=True,
+    )
 
     abs_layer = user_abs(layer_path)
     abs_output = user_abs(output_png)
@@ -2605,7 +2982,9 @@ def qgis_render_diagram_map(
         "height": height,
         "dpi": dpi,
     }
+    params.update(sent)
     result = get_executor().dispatch("render_diagram_map", params, timeout=120)
+    style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
     return DiagramMapResult(
         output_path=result["output_path"],
         width=result["width"], height=result["height"], dpi=result["dpi"],
@@ -2615,6 +2994,8 @@ def qgis_render_diagram_map(
         n_features=result["n_features"],
         basemap_attribution=result.get("basemap_attribution"),
         basemap_source=result.get("basemap_source"),
+        style_applied=style_applied,
+        fonts_missing=fonts_missing,
     )
 
 
@@ -2633,6 +3014,15 @@ def qgis_render_catchment(
     width: Annotated[int, Field(description="Image width in pixels.", ge=200, le=8000)] = 1600,
     height: Annotated[int, Field(description="Image height in pixels.", ge=200, le=8000)] = 1200,
     dpi: Annotated[int, Field(description="Image DPI.", ge=72, le=600)] = 150,
+    outline_color: Annotated[str | None, Field(description="Cell stroke colour, #RGB or #RRGGBB. Also the point-marker outline. Omit to leave both unchanged.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Cell stroke width in mm, 0 to 5. Also the point-marker outline. Omit to leave 0.3 mm on the cells.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Cell fill opacity, 0 to 1, replacing the default alpha of 90/255. Also the point opacity. Omit to leave both unchanged.")] = None,
+    label_field: Annotated[str | None, Field(description="Field on the point layer to label. Omit to draw no labels.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points, above 0 and at most 72. Requires label_field. Omit for 9 pt.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. A missing family is listed in fonts_missing and the default font draws. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm, 0 to 5. Requires label_field. Omit for 1 mm.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field. Omit for white.")] = None,
 ) -> CatchmentResult:
     """Render Voronoi service-area catchments around points. v2 workflow tool.
 
@@ -2645,6 +3035,15 @@ def qgis_render_catchment(
     Chains into: ``qgis_compose_layout``, ``qgis_figures_to_pptx``.
     """
     from qgis_mcp_workflows.executors import get_executor
+    from qgis_mcp_workflows.figure_controls import control_params, echoed_style
+
+    sent = control_params(
+        outline_color=outline_color, outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity, label_field=label_field,
+        label_size_pt=label_size_pt, label_font=label_font, label_color=label_color,
+        label_halo_mm=label_halo_mm, label_halo_color=label_halo_color,
+        track_label_field=True,
+    )
 
     abs_points = user_abs(points_path)
     abs_output = user_abs(output_png)
@@ -2658,7 +3057,9 @@ def qgis_render_catchment(
         "height": height,
         "dpi": dpi,
     }
+    params.update(sent)
     result = get_executor().dispatch("render_catchment", params, timeout=180)
+    style_applied, fonts_missing = echoed_style(result, sent, _executor_transport_name())
     return CatchmentResult(
         output_path=result["output_path"],
         width=result["width"], height=result["height"], dpi=result["dpi"],
@@ -2668,6 +3069,8 @@ def qgis_render_catchment(
         n_catchments=result["n_catchments"],
         basemap_attribution=result.get("basemap_attribution"),
         basemap_source=result.get("basemap_source"),
+        style_applied=style_applied,
+        fonts_missing=fonts_missing,
     )
 
 
@@ -3396,20 +3799,144 @@ def qgis_export_session(
 
 
 # ---------------------------------------------------------------------------
+# Tools — Expressions (1)
+# ---------------------------------------------------------------------------
+
+
+class ExpressionResult(BaseModel):
+    output_path: str
+    n_input: int
+    n_output: int
+    field_added: str | None = None
+
+
+_EXPRESSION_OUTPUTS = (".gpkg", ".geojson", ".json")
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_expression(
+    layer_path: Annotated[str, Field(description="Vector layer to copy. The open project is left unchanged.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+    expression: Annotated[
+        str | None,
+        Field(description="QGIS expression for a new column, e.g. \"sim\" - \"obs\" or \"trips\" / sum(\"trips\"). Requires field_name."),
+    ] = None,
+    field_name: Annotated[
+        str | None,
+        Field(description="Name of the column expression adds. Required when expression is set."),
+    ] = None,
+    filter: Annotated[
+        str | None,
+        Field(description="QGIS expression. Keeps features for which it is true. Runs before expression."),
+    ] = None,
+) -> ExpressionResult:
+    """Write a new layer from a QGIS expression: a calculated column, a filter, or both.
+
+    When to use: a difference column (``sim - obs``), a share (``trips / sum("trips")``),
+    or keeping features a filter selects. This is the supported path before
+    ``qgis_eval``. The open project is unchanged. Full mode only.
+
+    ``expression`` adds ``field_name`` on a copy of the layer. ``filter`` keeps
+    features for which it is true. When both are set, the filter runs first and
+    the column is computed on the kept features. At least one is required.
+    Output is GeoPackage or GeoJSON.
+
+    The expression may use fields, geometry, and QGIS built-in functions.
+    ``env`` and profile Python functions are refused.
+
+    Returns: ``ExpressionResult`` with ``n_input``, ``n_output``, and ``field_added``.
+
+    Chains into: ``qgis_render_choropleth``, ``qgis_style_graduated``,
+    ``qgis_layer_inspect`` on ``output_path``.
+    """
+    from qgis_mcp_workflows.errors import (
+        ExecutorError,
+        ExpressionEmptyError,
+        ExpressionError,
+        ExpressionUnsafeError,
+        InvalidArgumentError,
+        LayerNotFoundError,
+    )
+    from qgis_mcp_workflows.executors import get_executor
+
+    expr = (expression or "").strip()
+    filt = (filter or "").strip()
+    name = (field_name or "").strip()
+    if not expr and not filt:
+        raise InvalidArgumentError(
+            "qgis_expression needs expression or filter.",
+            next_step="pass expression and field_name to add a column, or filter to keep features, then retry qgis_expression",
+        )
+    if expr and not name:
+        raise InvalidArgumentError(
+            "expression requires field_name.",
+            next_step="pass field_name for the new column, then retry qgis_expression",
+        )
+    abs_layer = user_abs(layer_path)
+    abs_out = user_abs(output_path)
+    if os.path.splitext(abs_out)[1].lower() not in _EXPRESSION_OUTPUTS:
+        raise InvalidArgumentError(
+            f"output_path {output_path!r} must end in .gpkg or .geojson.",
+            next_step="pass a .gpkg or .geojson output_path, then retry qgis_expression",
+        )
+    params: dict = {"layer_path": abs_layer, "output_path": abs_out}
+    if expr:
+        params["expression"] = expr
+        params["field_name"] = name
+    if filt:
+        params["filter"] = filt
+    try:
+        result = get_executor().dispatch("apply_expression", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "EXPRESSION_EMPTY" in message:
+            raise ExpressionEmptyError(message) from err
+        if "EXPRESSION_UNSAFE" in message:
+            raise ExpressionUnsafeError(message) from err
+        if "EXPRESSION_PARSE" in message or "EXPRESSION_EVAL" in message:
+            raise ExpressionError(message) from err
+        if "LAYER_NOT_FOUND" in message:
+            raise LayerNotFoundError(abs_layer) from err
+        if "FIELD_EXISTS" in message or "EXPRESSION_ARGS" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="pass a new field_name, or expression with field_name, or a filter, then retry qgis_expression",
+            ) from err
+        raise
+    added = result.get("field_added")
+    return ExpressionResult(
+        output_path=user_abs(result["output_path"]),
+        n_input=int(result.get("n_input") or 0),
+        n_output=int(result.get("n_output") or 0),
+        field_added=added if added else None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tools — Escape hatch (1)
 # ---------------------------------------------------------------------------
 
 
 def qgis_eval(
-    code: Annotated[str, Field(description="PyQGIS source to execute.")],
+    code: Annotated[str, Field(description="PyQGIS source to execute. Try qgis_expression first for a calculated column or a filter.")],
     return_vars: Annotated[list[str] | None, Field(description="Local variable names to capture from the executed scope and return JSON-serialized.")] = None,
 ) -> EvalResult:
-    """Execute arbitrary PyQGIS. Escape hatch — prefer the workflow tools.
+    """Execute arbitrary PyQGIS. Escape hatch — try qgis_expression first.
 
-    When to use: only when no workflow tool fits — e.g., an unusual
+    When to use: a calculated column or a feature filter is qgis_expression,
+    not this tool. Use qgis_eval only when no workflow tool fits — an unusual
     processing algorithm, a custom symbology that ``qgis_style_*`` can't
     express, or interactive debugging. For routine work (load, style,
     render, export, batch, deck) use the dedicated tools.
+
+    ``allow_python_eval`` in ``~/.config/qgis-mcp-workflows/config.toml``
+    defaults to true, so this tool stays available. Set the key false, or
+    set ``QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL=0``, to refuse it. The
+    environment wins over the file. There is no CLI flag.
 
     In plugin transport, executes inside the running QGIS process. In
     headless transport, executes in the standalone PyQGIS subprocess.
@@ -3418,6 +3945,11 @@ def qgis_eval(
     Returns: ``EvalResult`` with stdout, stderr, captured ``return_values``
     (if ``return_vars`` was given), and exception traceback (if any).
     """
+    if not allow_python_eval():
+        from qgis_mcp_workflows.errors import PythonEvalDisabledError
+
+        raise PythonEvalDisabledError()
+
     from qgis_mcp_workflows.executors import get_executor
 
     params: dict = {"code": code}
@@ -3495,6 +4027,28 @@ def load_user_config() -> dict:
         logger.warning("ignoring %s (%s)", path, exc)
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def allow_python_eval() -> bool:
+    """Whether ``qgis_eval`` may run. Environment, then config.toml, then true.
+
+    ``QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL`` is ``1`` or ``0`` and wins over
+    the file. The file key is ``allow_python_eval`` (a TOML boolean). A missing
+    file, a missing key, or a value that is not a boolean leaves eval on.
+    """
+    env = os.environ.get("QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL", "").strip()
+    if env in ("1", "0"):
+        return env == "1"
+    if env:
+        logger.warning("Unknown QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL=%r; ignoring", env)
+    cfg = load_user_config()
+    if "allow_python_eval" not in cfg:
+        return True
+    value = cfg["allow_python_eval"]
+    if isinstance(value, bool):
+        return value
+    logger.warning("ignoring allow_python_eval=%r in %s", value, config_path())
+    return True
 
 
 def resolve_transport(cli: str | None) -> tuple[str, str]:

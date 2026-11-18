@@ -236,7 +236,9 @@ WRITTEN_BY_MODEL: dict[str, Callable[[Any], list[str]]] = {
     "ExportResult": lambda r: [r.output_path],
     "ComposeLayoutResult": lambda r: [r.output_path],
     "SpatialJoinResult": lambda r: [r.output_path],
+    "AggregateToZonesResult": lambda r: [r.output_path],
     "ZonalStatsResult": lambda r: [r.output_path],
+    "ExpressionResult": lambda r: [r.output_path],
 }
 # Results that name a file which is not a figure: the replay script itself.
 NOT_RECORDED_MODELS = frozenset({"SessionExportResult"})

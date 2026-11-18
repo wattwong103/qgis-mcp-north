@@ -129,6 +129,28 @@ class JoinError(QgisMcpWorkflowsError):
         self.description = description
 
 
+class PluginOutdatedError(QgisMcpWorkflowsError):
+    """The running QGIS side ignored figure controls it does not know.
+
+    ``set_layer_style`` and ``render_choropleth`` accept ``**kwargs``, so an
+    older plugin process returns success and draws the old figure. The server
+    asks for ``style_applied`` whenever the caller set a control.
+    """
+
+    def __init__(self, transport: str) -> None:
+        if transport == "headless":
+            hint = "restart the MCP server so the headless runner loads this checkout's plugin"
+        elif transport == "plugin":
+            hint = "restart QGIS so the workflows plugin reloads"
+        else:
+            hint = "restart QGIS (plugin transport) or the MCP server (headless) so the figure controls load"
+        super().__init__(
+            "The QGIS plugin did not apply the figure controls, so it is older than this server. "
+            f"Next: {hint}."
+        )
+        self.transport = transport
+
+
 class PluginNotStartedError(QgisMcpWorkflowsError):
     """QGIS Desktop is open, but the toolbar control that listens on the socket was not clicked.
 
@@ -273,6 +295,18 @@ class NetworkExtraMissingError(QgisMcpWorkflowsError):
         self.extra_hint = extra_hint
 
 
+class AggregateEmptyError(QgisMcpWorkflowsError):
+    """No join feature intersects a target polygon."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"Likely the layers do not overlap. "
+            f"Next: call qgis_layer_inspect on both paths and compare crs, extent, and geometry_type."
+        )
+        self.detail = detail
+
+
 class SpatialJoinEmptyError(QgisMcpWorkflowsError):
     """A spatial join matched zero target features."""
 
@@ -295,3 +329,53 @@ class ZonalStatsError(QgisMcpWorkflowsError):
             f"then retry qgis_zonal_stats."
         )
         self.detail = detail
+
+
+class ExpressionError(QgisMcpWorkflowsError):
+    """A QGIS expression failed to parse or to evaluate."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"Next: call qgis_layer_inspect to see the field names, then retry qgis_expression."
+        )
+        self.detail = detail
+
+
+class ExpressionUnsafeError(QgisMcpWorkflowsError):
+    """The expression calls env or a function that is not a QGIS built-in."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"The expression may use fields, geometry, and built-in functions. "
+            f"Python stays on qgis_eval. "
+            f"Next: drop the refused function and retry qgis_expression, or call qgis_eval for Python."
+        )
+        self.detail = detail
+
+
+class ExpressionEmptyError(QgisMcpWorkflowsError):
+    """A filter expression kept zero features."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"{detail} "
+            f"Next: call qgis_layer_inspect on the layer and check the filter expression, "
+            f"then retry qgis_expression."
+        )
+        self.detail = detail
+
+
+class PythonEvalDisabledError(QgisMcpWorkflowsError):
+    """qgis_eval was called while allow_python_eval is false."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "qgis_eval is off because allow_python_eval is false. "
+            "A calculated column or a filter is qgis_expression "
+            "(layer_path, output_path, expression=..., field_name=..., filter=...). "
+            "Next: call qgis_expression, or set allow_python_eval = true in "
+            "~/.config/qgis-mcp-workflows/config.toml "
+            "(or QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL=1) and retry qgis_eval."
+        )

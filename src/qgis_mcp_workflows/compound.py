@@ -124,6 +124,11 @@ def qgis_style(
     classes: Annotated[list[str] | None, Field(description="categorized only: subset/order of category values.")] = None,
     diverging: Annotated[bool, Field(description="graduated only: symmetric breaks around center.")] = False,
     center: Annotated[float, Field(description="graduated only: neutral midpoint when diverging.")] = 0.0,
+    outline_color: Annotated[str | None, Field(description="Stroke colour, #RGB or #RRGGBB.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Stroke width in mm, 0 to 5.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1.")] = None,
+    breaks: Annotated[list[float] | None, Field(description="graduated only: explicit class edges, length 2 to 16.")] = None,
+    colors: Annotated[list[str] | None, Field(description="categorized only: one #RGB or #RRGGBB per classes entry.")] = None,
 ) -> StyleResult | GraduatedStyleResult:
     """Apply categorical or graduated symbology — compound replacement for the 2 styling tools.
 
@@ -132,13 +137,27 @@ def qgis_style(
     - type="graduated"   → qgis_style_graduated (palette, n_classes, mode)
     """
     if type == "categorized":
+        if breaks is not None:
+            raise InvalidArgumentError(
+                "breaks is a graduated argument.",
+                next_step="call qgis_style_graduated, or qgis_style(type='graduated')",
+            )
         return qgis_style_categorized(
-            layer_id=layer_id, field=field, palette=palette, classes=classes
+            layer_id=layer_id, field=field, palette=palette, classes=classes,
+            outline_color=outline_color, outline_width_mm=outline_width_mm,
+            fill_opacity=fill_opacity, colors=colors,
         )
     if type == "graduated":
+        if colors is not None:
+            raise InvalidArgumentError(
+                "colors is a categorized argument.",
+                next_step="call qgis_style_categorized, or qgis_style(type='categorized', classes=...)",
+            )
         return qgis_style_graduated(
             layer_id=layer_id, field=field, n_classes=n_classes, mode=mode, palette=palette,
             diverging=diverging, center=center,
+            outline_color=outline_color, outline_width_mm=outline_width_mm,
+            fill_opacity=fill_opacity, breaks=breaks,
         )
     raise InvalidArgumentError(f"Unknown type: {type!r}.", _VALID_HINT)
 
@@ -170,7 +189,16 @@ def qgis_render(
     legend: Annotated[bool, Field(description="choropleth legend.")] = True,
     diverging: Annotated[bool, Field(description="choropleth/duckdb: symmetric breaks around center.")] = False,
     center: Annotated[float, Field(description="Neutral midpoint when diverging.")] = 0.0,
-    label_field: Annotated[str | None, Field(description="choropleth: haloed polygon label field.")] = None,
+    label_field: Annotated[str | None, Field(description="Haloed label field on choropleth, trajectory, od_flows, link_density, diagram_map, catchment, and duckdb.")] = None,
+    outline_color: Annotated[str | None, Field(description="Stroke colour, #RGB or #RRGGBB. On a line this is the line colour.")] = None,
+    outline_width_mm: Annotated[float | None, Field(description="Stroke width in mm, 0 to 5.")] = None,
+    fill_opacity: Annotated[float | None, Field(description="Symbol opacity, 0 to 1.")] = None,
+    breaks: Annotated[list[float] | None, Field(description="choropleth only: explicit class edges, length 2 to 16.")] = None,
+    label_size_pt: Annotated[float | None, Field(description="Label size in points. Requires label_field.")] = None,
+    label_font: Annotated[str | None, Field(description="Label font family. Requires label_field.")] = None,
+    label_color: Annotated[str | None, Field(description="Label text colour, #RGB or #RRGGBB. Requires label_field.")] = None,
+    label_halo_mm: Annotated[float | None, Field(description="Label halo width in mm. Requires label_field.")] = None,
+    label_halo_color: Annotated[str | None, Field(description="Label halo colour, #RGB or #RRGGBB. Requires label_field.")] = None,
     input_path: Annotated[str | None, Field(description="trajectory: CSV or GPX path.")] = None,
     lon_col: Annotated[str, Field(description="trajectory/duckdb lon col.")] = "lon",
     lat_col: Annotated[str, Field(description="trajectory/duckdb lat col.")] = "lat",
@@ -216,6 +244,32 @@ def qgis_render(
     north_arrow: Annotated[bool, Field(description="Draw a north arrow on the PNG.")] = False,
 ) -> RenderResult | ChoroplethResult | TrajectoryResult | ODFlowResult | LinkDensityResult | DiagramMapResult | CatchmentResult | DuckDbRenderResult:
     """Render any figure type — compound replacement for the standalone render tools."""
+    if breaks is not None and mode != "choropleth":
+        raise InvalidArgumentError(
+            "breaks applies to choropleth.",
+            next_step="call qgis_render(mode='choropleth') or qgis_render_choropleth",
+        )
+    symbol_label = (
+        outline_color, outline_width_mm, fill_opacity, label_size_pt, label_font,
+        label_color, label_halo_mm, label_halo_color,
+    )
+    if any(value is not None for value in symbol_label) and mode not in (
+        "choropleth", "trajectory", "od_flows", "link_density",
+        "diagram_map", "catchment", "duckdb",
+    ):
+        raise InvalidArgumentError(
+            f"outline, opacity, and label controls do not apply to mode={mode!r}.",
+            next_step=(
+                "call qgis_render with mode choropleth, trajectory, od_flows, "
+                "link_density, diagram_map, catchment, or duckdb"
+            ),
+        )
+    figure = dict(
+        outline_color=outline_color, outline_width_mm=outline_width_mm,
+        fill_opacity=fill_opacity, label_size_pt=label_size_pt, label_font=label_font,
+        label_color=label_color, label_halo_mm=label_halo_mm,
+        label_halo_color=label_halo_color,
+    )
     if mode == "map":
         if not layer_ids:
             raise InvalidArgumentError('qgis_render(mode="map") requires layer_ids.')
@@ -235,6 +289,10 @@ def qgis_render(
             basemap_paths=basemap_paths, basemap=basemap, basemap_opacity=basemap_opacity,
             width=width, height=height, dpi=dpi,
             scale_bar=scale_bar, north_arrow=north_arrow,
+            outline_color=outline_color, outline_width_mm=outline_width_mm,
+            fill_opacity=fill_opacity, breaks=breaks,
+            label_size_pt=label_size_pt, label_font=label_font, label_color=label_color,
+            label_halo_mm=label_halo_mm, label_halo_color=label_halo_color,
         )
     if mode == "trajectory":
         if not input_path:
@@ -246,6 +304,7 @@ def qgis_render(
             basemap_paths=basemap_paths, basemap=basemap, basemap_opacity=basemap_opacity,
             extent=extent, width=width, height=height, dpi=dpi,
             scale_bar=scale_bar, north_arrow=north_arrow,
+            label_field=label_field, **figure,
         )
     if mode == "od_flows":
         if not od_csv or not zones_path:
@@ -258,6 +317,7 @@ def qgis_render(
             label_field=label_field,
             width=width, height=height, dpi=dpi,
             scale_bar=scale_bar, north_arrow=north_arrow,
+            **figure,
         )
     if mode == "link_density":
         if not drm_network_path or not (trajectory_csvs or load_csv):
@@ -276,6 +336,7 @@ def qgis_render(
             label_field=label_field,
             width=width, height=height, dpi=dpi,
             scale_bar=scale_bar, north_arrow=north_arrow,
+            **figure,
         )
     if mode == "diagram_map":
         if not layer_path or not value_fields:
@@ -285,6 +346,7 @@ def qgis_render(
             diagram_type=diagram_type, size=size, palette=palette, extent=extent,
             basemap=basemap, basemap_opacity=basemap_opacity,
             width=width, height=height, dpi=dpi,
+            label_field=label_field, **figure,
         )
     if mode == "catchment":
         if not points_path:
@@ -293,6 +355,7 @@ def qgis_render(
             points_path=points_path, output_png=output_png, method=method, extent=extent,
             basemap=basemap, basemap_opacity=basemap_opacity,
             width=width, height=height, dpi=dpi,
+            label_field=label_field, **figure,
         )
     if mode == "duckdb":
         if not db_path or not query:
@@ -304,6 +367,7 @@ def qgis_render(
             palette=palette, diverging=diverging, center=center, max_features=max_features,
             basemap=basemap, basemap_opacity=basemap_opacity,
             width=width, height=height, dpi=dpi,
+            label_field=label_field, **figure,
         )
     raise InvalidArgumentError(f"Unknown mode: {mode!r}.", _VALID_HINT)
 

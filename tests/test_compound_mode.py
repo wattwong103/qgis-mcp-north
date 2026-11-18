@@ -9,9 +9,11 @@ from __future__ import annotations
 import contextlib
 import importlib
 import sys
+from pathlib import Path
 
 import pytest
 
+from qgis_mcp_workflows.errors import InvalidArgumentError
 from tests.mcp_compat import field
 
 
@@ -322,3 +324,83 @@ async def test_compound_mode_feeds_the_ledger(compound_module, fake_executor, tm
     assert [(d["call"]["module"], d["call"]["tool"]) for d in deps] == [("compound", "qgis_inspect"),
                                                                        ("compound", "qgis_style")]
     provenance.reset_for_tests()
+
+
+def test_compound_style_refuses_the_other_tools_argument(compound_module, fake_executor):
+    _server, compound = compound_module
+    with pytest.raises(InvalidArgumentError, match="qgis_style_graduated"):
+        compound.qgis_style(type="categorized", layer_id="L1", field="mode", breaks=[0, 1])
+    with pytest.raises(InvalidArgumentError, match="qgis_style_categorized"):
+        compound.qgis_style(
+            type="graduated", layer_id="L1", field="n", colors=["#111111"], classes=["a"]
+        )
+    assert fake_executor.calls == []
+
+
+def test_compound_forwards_choropleth_controls_only(compound_module, fake_executor):
+    _server, compound = compound_module
+    fake_executor.responses["render_choropleth"] = {
+        "output_path": "/tmp/x.png",
+        "width": 1600, "height": 1200, "dpi": 150,
+        "extent": [0.0, 0.0, 1.0, 1.0], "crs": "EPSG:4326", "n_layers": 1,
+        "field": "n", "n_classes": 2,
+        "breaks": [0.0, 1.0, 2.0], "mode": "explicit",
+        "min_value": 0.0, "max_value": 2.0, "n_features": 2,
+        "n_matched": 2, "n_unmatched": 0, "n_outside_breaks": 0,
+        "style_applied": {"outline_color": "#cccccc", "breaks": [0.0, 1.0, 2.0]},
+    }
+    result = compound.qgis_render(
+        mode="choropleth",
+        zones_path="/z.gpkg",
+        value_field="n",
+        output_png="/o.png",
+        outline_color="#cccccc",
+        breaks=[0, 1, 2],
+        label_field="name",
+        label_size_pt=8,
+    )
+    params = fake_executor.calls[0][1]
+    assert params["outline_color"] == "#cccccc"
+    assert params["breaks"] == [0, 1, 2]
+    assert params["label_size_pt"] == 8
+    assert result.mode == "explicit"
+
+    fake_executor.calls.clear()
+    with pytest.raises(InvalidArgumentError, match="choropleth"):
+        compound.qgis_render(
+            mode="trajectory",
+            output_png="/o.png",
+            input_path="/t.csv",
+            breaks=[0, 1],
+        )
+    assert fake_executor.calls == []
+
+
+def test_compound_forwards_line_and_point_controls(compound_module, fake_executor):
+    """Stroke and opacity on the line and point modes. breaks stays choropleth-only."""
+    _server, compound = compound_module
+    od = Path(__file__).parent / "fixtures" / "tiny_od.csv"
+    zones = Path(__file__).parent / "fixtures" / "tiny_zones.geojson"
+    fake_executor.responses["render_od_flows"] = {
+        "output_path": "/tmp/od.png", "width": 1600, "height": 1200, "dpi": 150,
+        "extent": [0.0, 0.0, 1.0, 1.0], "crs": "EPSG:4326", "n_layers": 2,
+        "n_flows": 1, "n_flows_rendered": 1, "n_zones": 1, "max_flow": 1.0,
+        "min_flow_rendered": 1.0, "n_unmatched_origins": 0, "n_unmatched_destinations": 0,
+        "style_applied": {"outline_color": "#abc", "label_size_pt": 10.0,
+                          "label_halo_mm": 1.0, "label_halo_color": "#ffffff"},
+    }
+    compound.qgis_render(
+        mode="od_flows", od_csv=str(od), zones_path=str(zones), output_png="/o.png",
+        outline_color="#abc", label_field="origin", label_size_pt=10,
+    )
+    params = fake_executor.calls[0][1]
+    assert params["outline_color"] == "#abc"
+    assert params["label_size_pt"] == 10
+    assert params["label_field"] == "origin"
+
+    fake_executor.calls.clear()
+    with pytest.raises(InvalidArgumentError, match="map"):
+        compound.qgis_render(
+            mode="map", layer_ids=["L1"], output_png="/m.png", fill_opacity=0.5,
+        )
+    assert fake_executor.calls == []

@@ -3,6 +3,82 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.21.0 — 2026-11-18 — line and point figure controls
+
+### Added
+
+- `qgis_render_trajectory`, `qgis_render_od_flows`, `qgis_render_link_density`,
+  `qgis_render_diagram_map`, `qgis_render_catchment` and `qgis_render_from_duckdb`
+  take the choropleth stroke, opacity and label arguments: `outline_color`,
+  `outline_width_mm` (0 to 5; 0 is a one-pixel hairline) and `fill_opacity`
+  (0 to 1). On a line the outline is the line. On a point it is the marker
+  outline and the fill stays. Omitted arguments are not sent.
+- Trajectory lines coloured by `mode_col` refuse a stroke that would replace
+  those colours. Heatmap refuses stroke and opacity. A new `label_field`
+  labels `trip_id`, `mode`, `speed_kmh`, another CSV column, or a GPX field
+  (9 pt when the label type is omitted).
+- OD width, when set, replaces the flow-scaled width. Omitted, the arcs still
+  scale. OD labels stay 8 pt and link-density labels stay 7 pt when the new
+  label arguments are omitted. Link-density colour, when set, replaces the ramp.
+- Diagram stroke also sets the chart pen. Catchment opacity replaces the cell
+  alpha of 90/255. DuckDB paints the graduated renderer, or the unstyled
+  `#1f78b4` line and point.
+- Compound `qgis_render` forwards these controls for those modes. `breaks`
+  stays choropleth-only. An older plugin raises `PluginOutdatedError`.
+
+## v1.20.0 — 2026-11-18 — aggregate points and lines onto polygons
+
+### Added
+
+- `qgis_aggregate_to_zones` counts, sums, or averages every point or line that
+  intersects a polygon and writes the polygon layer plus one field. `count`
+  needs no value field. `sum` and `mean` require `value_field` on the join
+  layer. The predicate is intersects. A line that crosses several polygons
+  counts once in each. `qgis_spatial_join` still copies the first match.
+  Zero intersecting join features raise `AggregateEmptyError` and the message
+  names both layers' CRS and geometry types. Full mode only. The new field is
+  a `value_field` for `qgis_render_choropleth`.
+
+## v1.19.0 — 2026-11-18 — QGIS expressions, eval still on
+
+### Added
+
+- `qgis_expression` writes a GeoPackage or GeoJSON from a QGIS expression:
+  a calculated column (`field_name`), a filter, or both. The filter runs
+  first. The open project is unchanged. Full mode only. `env` and profile
+  Python expression functions are refused; fields, geometry, and built-in
+  functions are allowed.
+- `allow_python_eval` in `~/.config/qgis-mcp-workflows/config.toml` defaults
+  to true, so `qgis_eval` stays available. `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL`
+  (`1` / `0`) overrides the file. When the flag is false, `qgis_eval` raises
+  `PythonEvalDisabledError` and points at `qgis_expression`.
+
+## v1.18.0 — 2026-11-18 — choropleth and style figure controls
+
+### Added
+
+- `qgis_render_choropleth`, `qgis_style_graduated` and `qgis_style_categorized`
+  take optional `outline_color` (`#RGB` or `#RRGGBB`), `outline_width_mm`
+  (0 to 5; 0 is a one-pixel hairline) and `fill_opacity` (0 to 1). On a line
+  layer the outline arguments are the line. Omitted arguments are not sent,
+  so a v1.17.0 call draws the same figure.
+- `breaks` on the choropleth and on `qgis_style_graduated`: explicit class
+  edges (first lower bound, then each upper bound, length 2 to 16). The
+  response `mode` is `"explicit"`. Values outside the outer edges are not
+  drawn (`n_outside_breaks`). A field whose numbers all fall outside is refused
+  with the data min and max. `diverging=True` together with `breaks` is refused.
+- `colors` on `qgis_style_categorized`: one hex colour per `classes` entry.
+  The grey "all other values" class stays grey.
+- Choropleth labels take `label_size_pt`, `label_font`, `label_color`,
+  `label_halo_mm` and `label_halo_color`, and they require `label_field`.
+  With `label_field` and these omitted, the halo stays 9 pt, 1 mm and white.
+  A missing font is listed in `fonts_missing` and the default font draws.
+- Compound `qgis_style` and `qgis_render(mode="choropleth")` forward the same
+  arguments. `breaks` on a categorized style, `colors` on a graduated style,
+  and these controls on any other render mode are refused.
+- An older plugin that ignores the new keys raises `PluginOutdatedError`.
+  Plugin transport: restart QGIS. Headless: restart the MCP server.
+
 ## v1.17.0 — 2026-11-18 — first click, transport, and a join that works
 
 ### Fixed

@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.17.0**, 2026-11-18
+Status: **v1.21.0**, 2026-11-18
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -12,7 +12,7 @@ This document is the spec. Implementation follows. If a tool's signature, respon
 
 Three problems with upstream that the fork solves:
 
-**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **27 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
+**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **29 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
 
 **No headless mode.** Upstream requires QGIS Desktop running with the plugin enabled. That's incompatible with scheduled overnight runs, CI, or any automation. We add a **PyQGIS-subprocess transport** alongside the existing plugin transport. Same tools, two backends, selected by config or CLI flag.
 
@@ -49,6 +49,8 @@ Out of scope: replacing upstream as a general-purpose QGIS MCP. We intentionally
 **Two transports, one tool surface.** The MCP server exposes the same tools regardless of transport. A thin executor abstraction (`src/qgis_mcp_workflows/executors/{plugin,headless}.py`) hides the difference. Tools are written against the executor interface; they never directly speak socket or PyQGIS.
 
 **Transport selection.** CLI flag `--transport={plugin,headless,auto}`, then `QGIS_MCP_WORKFLOWS_TRANSPORT`, then `~/.config/qgis-mcp-workflows/config.toml` (`transport`, and optionally `host` / `port`), then `auto`. The server logs the chosen value and where it came from at startup, before any tool call. `auto` uses the plugin when port 9877 accepts a connection. If the port is closed and a QGIS Desktop process is running, `auto` does **not** fall through to headless: the call raises `PluginNotStartedError` telling the user that Run MCP was not started (toolbar button; Plugins menu **QGIS MCP**; the button's menu has Auto-start on startup, off until ticked). That is the open project the caller meant. If Desktop is not running, `auto` uses headless. If headless is unavailable too, `auto` still starts: every tool call re-probes the plugin port, switches to the plugin once Run MCP is listening, and otherwise raises `TransportUnavailableError` naming both reasons. Exiting at startup instead would close the MCP connection before the client could show any error. An explicit `--transport=headless` still fails at startup with `HeadlessUnavailableError`, and that error's `Next:` stays on headless (fix `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER`, restart with `--transport=headless`).
+
+**Python eval.** The same `config.toml` reads `allow_python_eval`, default true, so `qgis_eval` stays available and a replay's `--allow-eval` switch is unchanged. `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` (`1` or `0`) overrides the file. There is no CLI flag. An unknown value is ignored and the next source is used (environment, then the file, then the default). When the effective value is false, `qgis_eval` raises `PythonEvalDisabledError` before any code runs. The hint names `qgis_expression` and setting the key back to true.
 
 **Headless runtime.** Standalone PyQGIS via `qgis_process` (CLI) for simple ops, with a long-lived Python subprocess holding `QgsApplication` for complex ops. Headless mode forces `QT_QPA_PLATFORM=offscreen` and disables any GUI calls. Render only — no project save, no plugin install, no UI mutation.
 
@@ -96,7 +98,7 @@ Upstream's plugin and server stay untouched. If the user installs both, Claude D
 
 ---
 
-## 4. Tool surface (27 workflow + 1 escape hatch)
+## 4. Tool surface (29 workflow + 1 escape hatch)
 
 For each tool: signature, what it does, response shape, and the typical chain.
 
@@ -158,13 +160,13 @@ ProjectInfo = {
 
 Chains into: `qgis_export_layout`, `qgis_render_map`, `qgis_batch_render`.
 
-### Analysis (2)
+### Analysis (3)
 
 GitHub analogue: nkarasiak `spatial_join` / `zonal_statistics` / `get_unique_values`. Wrapped as atomic workflows (load + compute + write + cleanup). No Processing toolbox.
 
 #### `qgis_spatial_join(target_path: str, join_path: str, output_path: str, predicate: str = "intersects", method: str = "one_to_one", join_fields: list[str] | None = None, prefix: str = "", keep_unmatched: bool = True) → SpatialJoinResult`
 
-Join attributes by location. Target keeps geometry; join-layer attributes are copied onto matching features. `predicate ∈ {intersects, contains, within, touches, overlaps, crosses, equals}`. `method="one_to_one"` keeps the first match; `one_to_many` duplicates the target once per match. Collision names get a `_j` suffix. Raises `SpatialJoinEmptyError` when nothing overlaps.
+Join attributes by location. Target keeps geometry; join-layer attributes are copied onto matching features. `predicate ∈ {intersects, contains, within, touches, overlaps, crosses, equals}`. `method="one_to_one"` keeps the first match; `one_to_many` duplicates the target once per match. Collision names get a `_j` suffix. Raises `SpatialJoinEmptyError` when nothing overlaps. This copies attributes. Counting or summing every point or line onto the polygons is `qgis_aggregate_to_zones`.
 
 ```python
 SpatialJoinResult = {
@@ -178,6 +180,29 @@ SpatialJoinResult = {
 ```
 
 Chains into: `qgis_render_choropleth`, `qgis_style_categorized`, `qgis_layer_inspect`.
+
+#### `qgis_aggregate_to_zones(target_path: str, join_path: str, output_path: str, statistic: str = "count", value_field: str | None = None, field_name: str | None = None) → AggregateToZonesResult`
+
+Count, sum, or mean every join feature that intersects a target polygon. `qgis_spatial_join` with `method="one_to_one"` copies the first match; this tool uses every match. `target_path` is polygons. `join_path` is points or lines. The predicate is `intersects`: a point on the boundary counts, and a line that crosses several polygons counts once in each. One feature is one count. A line is not measured by its length.
+
+`statistic ∈ {count, sum, mean}`. `count` does not read `value_field` (a passed `value_field` is ignored). `sum` and `mean` require `value_field` on the join layer. Nulls, booleans, and values that are not numbers are skipped for `sum` and `mean`; they still count for `count`. A numeric string is read as a number. `sum` of no numbers is 0. `mean` of no numbers is null. A polygon with no match keeps `count` 0 and `sum` 0.
+
+The join layer is transformed into the target CRS before the test, the same way `qgis_spatial_join` does. An empty result still names the CRS each file was opened with.
+
+Zero join features that meet the predicate raise `AggregateEmptyError`. The message names both layers' CRS and geometry types. A target that is not polygon, or a join layer that is not point or line, raises `InvalidArgumentError` before any file is written, and that message names both geometry types and both CRS. The open project is unchanged. The handler does not touch `iface`, so plugin and headless both run it. Output is GeoPackage (`.gpkg`) or GeoJSON (`.geojson` or `.json`), keeps the polygon geometry, and adds one field. The field is `field_name`, or `count` / `sum` / `mean` when `field_name` is omitted. A name already on the target (compared case-insensitively) becomes `name_2`, `name_3`, and so on. The result's `field_name` is the name written. `n_with_value` is the number of polygons whose new field is not null: every polygon for `count` and `sum`, and only polygons with at least one numeric join value for `mean`. Full mode only. Compound mode does not grow a kind for it.
+
+```python
+AggregateToZonesResult = {
+    "output_path": str,
+    "n_target": int,
+    "n_join": int,
+    "n_with_value": int,
+    "field_name": str,
+    "statistic": str,
+}
+```
+
+Chains into: `qgis_render_choropleth(zones_path=output_path, value_field=<field_name>)`.
 
 #### `qgis_zonal_stats(zones_path: str, raster_path: str, output_path: str, stats: list[str] | None = None, prefix: str = "", raster_band: int = 1) → ZonalStatsResult`
 
@@ -196,24 +221,32 @@ Chains into: `qgis_render_choropleth(zones_path=output_path, value_field=...)`.
 
 ### Styling (2)
 
-#### `qgis_style_categorized(layer_id: str, field: str, palette: str | None = None, classes: list[str] | None = None) → StyleResult`
+#### `qgis_style_categorized(layer_id: str, field: str, palette: str | None = None, classes: list[str] | None = None, outline_color: str | None = None, outline_width_mm: float | None = None, fill_opacity: float | None = None, colors: list[str] | None = None) → StyleResult`
 
 Categorical symbology — one color per unique value of `field`. `palette` is a colorbrewer name; with none given the plugin picks Set2 for up to 8 categories, else Spectral (the same rule colours trajectory modes, by their sorted order). A qualitative scheme (`Set1/2/3`, `Paired`, `Dark2`, `Pastel1/2`, `Accent`) gives its first colors in order and refuses more categories than it has (Set2: 8) with a `Next:` hint to pass `classes` or a continuous palette; a continuous ramp is sampled end to end. An unknown palette name is refused in every tool, never replaced (until v1.15.0 it silently became Spectral, and QGIS's default style has no qualitative ramps, so `"Set2"` always did). `classes` optionally restricts to a subset/order: the listed values take palette colors in the given order (matched on their string form, so `"3"` matches an integer 3), and every other value plus NULL shares one grey `"all other values"` class, reported last in `classes`. The catch-all is omitted when the subset covers every feature. A listed value the layer lacks stays as a 0-feature class, so weekly batches keep one legend and one color per value; a repeated value keeps its first position. NULL cannot be listed by name — it always falls in the catch-all.
+
+`colors` is one `#RGB` or `#RRGGBB` per `classes` entry (same length) and is refused without `classes`. Those values take the listed colours in order; the grey `"all other values"` class stays grey. `outline_color` (`#RGB` or `#RRGGBB`), `outline_width_mm` (0 to 5; `0` is QGIS's one-pixel hairline) and `fill_opacity` (0 to 1) change the stroke and the symbol opacity. On a line layer `outline_color` and `outline_width_mm` are the line. Omitted controls are not sent, and the symbol is unchanged.
 
 ```python
 StyleResult = {
     "layer_id": str,
     "n_classes": int,
     "classes": [{"value": str, "color": str, "n_features": int}],
+    "style_applied": dict | None,  # the controls the caller set; absent from the plugin result when none were
 }
 ```
 
-#### `qgis_style_graduated(layer_id: str, field: str, n_classes: int = 5, mode: str = "quantile", palette: str = "YlOrRd") → GraduatedStyleResult`
+#### `qgis_style_graduated(layer_id: str, field: str, n_classes: int = 5, mode: str = "quantile", palette: str = "YlOrRd", diverging: bool = False, center: float = 0.0, outline_color: str | None = None, outline_width_mm: float | None = None, fill_opacity: float | None = None, breaks: list[float] | None = None) → GraduatedStyleResult`
 
 Numeric symbology — value-based color ramp. `mode ∈ {"quantile", "equal_interval", "natural_breaks", "pretty"}`. This is the **primitive under `qgis_render_choropleth`**; expose it directly for cases where the user wants styling without immediately rendering.
 
+`breaks`, when set, is the class edges the tool already returns (first lower bound, then each upper bound), length 2–16. The response then has `mode="explicit"` and `n_classes=len(breaks)-1`. `mode`, `n_classes` and `center` do not move those edges. `diverging=True` together with `breaks` is refused. Values outside `[breaks[0], breaks[-1]]` are not drawn; `n_outside_breaks` counts them. If every numeric value is outside, or the field has no number, the call fails and the message includes the data min and max when there are numbers. A class with zero features stays in the legend. The palette is still sampled across the classes, and a qualitative palette that is shorter than the class count is still refused. Stroke and opacity are the same optional arguments as `qgis_style_categorized`.
+
 ```python
-GraduatedStyleResult = StyleResult | {"breaks": [float, ...], "mode": str}
+GraduatedStyleResult = StyleResult | {
+    "breaks": [float, ...], "mode": str,
+    "n_outside_breaks": int | None,
+}
 ```
 
 ### Rendering (5)
@@ -233,7 +266,7 @@ RenderResult = {
 }
 ```
 
-#### `qgis_render_choropleth(zones_path: str, value_field: str, output_png: str, value_csv: str | None = None, join_field: str = "zone_id", n_classes: int = 5, mode: str = "quantile", palette: str = "YlOrRd", title: str | None = None, legend: bool = True, basemap_paths: list[str] | None = None, width: int = 1600, height: int = 1200, dpi: int = 150) → ChoroplethResult`
+#### `qgis_render_choropleth(zones_path: str, value_field: str, output_png: str, value_csv: str | None = None, join_field: str = "zone_id", n_classes: int = 5, mode: str = "quantile", palette: str = "YlOrRd", title: str | None = None, legend: bool = True, basemap_paths: list[str] | None = None, width: int = 1600, height: int = 1200, dpi: int = 150, outline_color: str | None = None, outline_width_mm: float | None = None, fill_opacity: float | None = None, breaks: list[float] | None = None, label_size_pt: float | None = None, label_font: str | None = None, label_color: str | None = None, label_halo_mm: float | None = None, label_halo_color: str | None = None) → ChoroplethResult`
 
 **Workflow tool.** Renders a zone-level choropleth in one call.
 
@@ -244,6 +277,8 @@ Two data shapes supported:
 The CSV-join path is the PFLOW reality: `zone_trips.csv` (columns `zone_id, origin_trips, dest_trips, total_trips`) joined to a polygon layer keyed by `zone_id`. Zone IDs in PFLOW are string-typed (`MFS01`–`MFS111`, `Z01`–`Z65`, `PRF01`–`PRF47`); `join_field` is whatever the polygon layer uses.
 
 `basemap_paths` lets the caller supply Japan basemap layers (e.g., `polbnda_jpn_new.shp`, `coastl_jpn.shp`) drawn under the choropleth. Optional, but the W17 deck uses them.
+
+Stroke, opacity and `breaks` match `qgis_style_graduated` (v1.18). `label_size_pt` (above 0, at most 72), `label_font`, `label_color`, `label_halo_mm` (0 to 5) and `label_halo_color` extend `label_field`. Any of them without `label_field` is refused. With `label_field` and those omitted, the halo stays 9 pt, 1 mm, white, the default font and the default text colour. A missing `label_font` is listed in `fonts_missing` and the default font draws. An older plugin that accepts the new keys and does not return `style_applied` raises `PluginOutdatedError`: restart QGIS on the plugin transport, or restart the MCP server on headless.
 
 ```python
 ChoroplethResult = RenderResult | {
@@ -259,7 +294,7 @@ ChoroplethResult = RenderResult | {
 
 Chains into: `qgis_figures_to_pptx`, `qgis_batch_render`.
 
-#### `qgis_render_trajectory(input_path: str, output_png: str, lon_col: str = "lon", lat_col: str = "lat", time_col: str = "datetime", id_col: str = "trip_id", mode_col: str | None = None, render_mode: str = "lines", sample_rate: float = 1.0, max_points: int = 500_000, basemap_paths: list[str] | None = None, extent: list[float] | None = None, width: int = 1600, height: int = 1200, dpi: int = 150) → TrajectoryResult`
+#### `qgis_render_trajectory(input_path: str, output_png: str, lon_col: str = "lon", lat_col: str = "lat", time_col: str = "datetime", id_col: str = "trip_id", mode_col: str | None = None, render_mode: str = "lines", sample_rate: float = 1.0, max_points: int = 500_000, basemap_paths: list[str] | None = None, extent: list[float] | None = None, width: int = 1600, height: int = 1200, dpi: int = 150, outline_color: str | None = None, outline_width_mm: float | None = None, fill_opacity: float | None = None, label_field: str | None = None, label_size_pt: float | None = None, label_font: str | None = None, label_color: str | None = None, label_halo_mm: float | None = None, label_halo_color: str | None = None) → TrajectoryResult`
 
 **Workflow tool.** Render trajectory data from CSV (with `lon, lat, datetime, trip_id` columns by default — matches PFLOW trajectory CSV schema) or GPX. `render_mode ∈ {"lines", "points", "heatmap"}`.
 
@@ -269,6 +304,8 @@ Big-data discipline. PFLOW trajectory CSVs are 3M+ rows each (74 GB total). Defa
 - `extent=[lon_min, lat_min, lon_max, lat_max]` (EPSG:4326) clips before rendering.
 
 If `movingpandas` and Trajectools plugin are installed, automatically uses them for richer rendering (speed bins, stop detection); otherwise plain line/point rendering.
+
+Stroke, opacity and labels are the choropleth controls (v1.21). Omitted, they are not sent, and the figure stays `#1f78b4` at 0.6 mm (lines) or a 1.5 mm marker with no outline (points). On a line with no `mode_col`, `outline_color` and `outline_width_mm` are the line, including a movingpandas speed ramp (the colour replaces the ramp). On a line with `mode_col` those two are refused, because they would replace the mode colours; `fill_opacity` still applies. On points the outline is the marker stroke and the fill stays the mode or default colour; a marker drawn with no outline gains a solid stroke when either outline argument is set. `render_mode="heatmap"` refuses all three symbol arguments. `label_field` labels `trip_id`, `mode` (when `mode_col` is set), `speed_kmh` (when movingpandas ran), another CSV column copied onto the layer, or a field on a GPX. Any label argument without `label_field` is refused. With `label_field` and the label arguments omitted, the halo is 9 pt, 1 mm, white. Lines are labeled along the line. `style_applied` and `PluginOutdatedError` match the choropleth.
 
 ```python
 TrajectoryResult = RenderResult | {
@@ -282,11 +319,13 @@ TrajectoryResult = RenderResult | {
 }
 ```
 
-#### `qgis_render_od_flows(od_csv: str, zones_layer_path: str, output_png: str, origin_col: str = "origin", dest_col: str = "destination", value_col: str = "trip_count", zone_id_field: str = "zone_id", top_n: int | None = None, basemap_paths: list[str] | None = None, width: int = 1600, height: int = 1200, dpi: int = 150) → ODFlowResult`
+#### `qgis_render_od_flows(od_csv: str, zones_layer_path: str, output_png: str, origin_col: str = "origin", dest_col: str = "destination", value_col: str = "trip_count", zone_id_field: str = "zone_id", top_n: int | None = None, basemap_paths: list[str] | None = None, width: int = 1600, height: int = 1200, dpi: int = 150, outline_color: str | None = None, outline_width_mm: float | None = None, fill_opacity: float | None = None, label_size_pt: float | None = None, label_font: str | None = None, label_color: str | None = None, label_halo_mm: float | None = None, label_halo_color: str | None = None) → ODFlowResult`
 
 **Workflow tool.** Render origin-destination arcs over a zones layer. Defaults match PFLOW's `od_flows.csv` schema (`origin, destination, trip_count, avg_distance_km`). `top_n` limits to the strongest N flows. Arc width scales with `value_col`.
 
 Note: PFLOW uses **multiple zone-id systems in different files** (`MFS##`, `PRF##`, `Z##`). The caller must ensure `od_csv[origin_col/dest_col]` and `zones_layer[zone_id_field]` use the same system. Mismatches surface as `n_unmatched_origins` / `n_unmatched_destinations` in the response, not as a silent zero-flow render.
+
+`outline_color` recolors the straight line or the arrow fill. `outline_width_mm`, when set, replaces the data-defined flow width with that constant (mm); omitted, the width still scales with `value_col`. `fill_opacity` is the symbol opacity. The label arguments extend the existing `label_field` (`origin`, `destination`, `trip_count`) and require it. With `label_field` and those omitted, the halo stays 8 pt, 1 mm, white. `style_applied` and `PluginOutdatedError` match the choropleth. `label_field` alone is not a new control: an older plugin already labels.
 
 ```python
 ODFlowResult = RenderResult | {
@@ -332,6 +371,8 @@ Prerequisite: `assets/drm_network.gpkg` built once via `scripts/build_drm_networ
 Big-data discipline. PFLOW trajectory CSVs are 3M+ rows; aggregation streams row-by-row MCP-side, sending only the per-link totals (typically <100k entries) to the plugin. `min_density` denoises rare-traffic links; `top_n` clips to the N densest links.
 
 `aggregation ∈ {"count", "sum"}`. `count` totals trajectory points per link (default). `sum` totals a numeric column (set `value_col`).
+
+`outline_color`, `outline_width_mm` and `fill_opacity` are the choropleth controls on the graduated lines (v1.21). Omitted, the lines stay the palette at 0.6 mm. `outline_color`, when set, replaces the ramp. The label arguments extend `label_field` and require it. With `label_field` and those omitted, the halo stays 7 pt, 1 mm, white. `style_applied` and `PluginOutdatedError` match the choropleth.
 
 ```python
 LinkDensityResult = RenderResult | {
@@ -410,11 +451,32 @@ SessionExportResult = {"output_path": str, "n_figures": int, "n_calls": int, "n_
                        "skipped": [{"figure": str, "reason": str}], "warnings": [str]}
 ```
 
+### Expressions (1)
+
+#### `qgis_expression(layer_path: str, output_path: str, expression: str | None = None, field_name: str | None = None, filter: str | None = None) → ExpressionResult`
+
+Write a new file from a QGIS expression. `expression` adds `field_name` on a copy of the layer (a difference `sim - obs`, a share `"trips" / sum("trips")`). `filter` is its own expression and keeps the features for which it is true. At least one of `expression` or `filter` is required; a blank string counts as omitted. `expression` requires `field_name`. When both are set, the filter runs first and the column is computed on the kept features, so an aggregate sees that filtered set. The open project is unchanged (the layer is never added to it). The handler does not touch `iface`, so plugin and headless both run it. Output is GeoPackage (`.gpkg`) or GeoJSON (`.geojson` or `.json`). Anything else raises `InvalidArgumentError` before dispatch. Full mode only. Compound mode does not grow a kind for it; `qgis_export` stays as it is.
+
+Before any feature is written, the plugin builds each expression on a context that does not load the profile's Python expression functions (`python/expressions`). `referencedFunctions()` must be a subset of `QgsExpression.builtinFunctions()`, and `env` is refused by name even though it is built in (`ExpressionUnsafeError`). The hint says the expression may use fields, geometry, and built-in functions, and that Python stays on `qgis_eval`. A parse error, an unknown field, or an evaluation error (`ExpressionError`) names the QGIS message and the field names on the layer. A filter that keeps nothing raises `ExpressionEmptyError`; the hint says to check the expression with `qgis_layer_inspect`. A `field_name` that is already on the layer is refused.
+
+The new field is numeric when every value is a number or null, boolean when every value is boolean, and text otherwise.
+
+```python
+ExpressionResult = {
+    "output_path": str,
+    "n_input": int,
+    "n_output": int,
+    "field_added": str | None,  # the new column, or null when only a filter was set
+}
+```
+
+Chains into: `qgis_render_choropleth`, `qgis_style_graduated`, `qgis_layer_inspect`.
+
 ### Escape hatch (1)
 
 #### `qgis_eval(code: str, return_vars: list[str] | None = None) → EvalResult`
 
-Execute arbitrary PyQGIS. Available in plugin transport (executes in QGIS); in headless transport, runs in the standalone PyQGIS subprocess. `return_vars` lists local variables to capture and return JSON-serialized.
+Execute arbitrary PyQGIS. Try `qgis_expression` first for a calculated column or a filter. Available in plugin transport (executes in QGIS); in headless transport, runs in the standalone PyQGIS subprocess. `return_vars` lists local variables to capture and return JSON-serialized. Stays available while `allow_python_eval` is true (the default; see §2). When that flag is false, the call raises `PythonEvalDisabledError` and does not run the code.
 
 ```python
 EvalResult = {
@@ -425,7 +487,7 @@ EvalResult = {
 }
 ```
 
-Use for the long tail. Document explicitly that this is an escape hatch, not a first choice.
+Use for the long tail that `qgis_expression` and the workflow tools do not cover. This is an escape hatch, not a first choice.
 
 ---
 
@@ -436,8 +498,8 @@ transit-figure pipeline. Each a separate commit, unit-tested + live-verified.
 
 **New tools (3):**
 - `qgis_compose_layout(layer_paths, output_path, title=None, extent=None, page="a4_landscape", legend=True, scale_bar=True, north_arrow=True, dpi=300) → ComposeLayoutResult` — programmatic `QgsPrintLayout`: a titled map panel with linked legend, scale bar and north arrow, exported PNG/PDF/SVG. Complements `qgis_export_layout` (which only exports pre-authored `.qgz`). Single panel; multi-panel/inset is future.
-- `qgis_render_diagram_map(layer_path, value_fields, output_png, diagram_type="pie", size=10.0, palette="Set2", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150) → DiagramMapResult` — chart-in-map: a pie/bar `QgsDiagramRenderer` glyph per feature, one slice/bar per `value_field`.
-- `qgis_render_catchment(points_path, output_png, method="voronoi", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150) → CatchmentResult` — Voronoi (Thiessen) service-area catchments around points via `QgsGeometry.voronoiDiagram` (no Processing dependency).
+- `qgis_render_diagram_map(layer_path, value_fields, output_png, diagram_type="pie", size=10.0, palette="Set2", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150, outline_color=None, outline_width_mm=None, fill_opacity=None, label_field=None, label_size_pt=None, label_font=None, label_color=None, label_halo_mm=None, label_halo_color=None) → DiagramMapResult` — chart-in-map: a pie/bar `QgsDiagramRenderer` glyph per feature, one slice/bar per `value_field`. v1.21: stroke and opacity on the base symbol, and the same stroke on the diagram pen (omitted pen stays white, 0.2). `size` is unchanged. `label_field` is a field on the layer; omitted label type is 9 pt, 1 mm, white.
+- `qgis_render_catchment(points_path, output_png, method="voronoi", extent=None, basemap="none", basemap_opacity=1.0, width=1600, height=1200, dpi=150, outline_color=None, outline_width_mm=None, fill_opacity=None, label_field=None, label_size_pt=None, label_font=None, label_color=None, label_halo_mm=None, label_halo_color=None) → CatchmentResult` — Voronoi (Thiessen) service-area catchments around points via `QgsGeometry.voronoiDiagram` (no Processing dependency). v1.21: stroke and opacity on the cells. Omitted cells stay `200,220,240` at alpha 90 with outline `70,90,120` at 0.3 mm; `fill_opacity` replaces that alpha. Point markers take the same stroke and opacity; omitted markers stay `#b2182b` with no outline. `label_field` is a field on the point layer (9 pt when the label type is omitted).
 
 **New parameters on existing tools:**
 - `qgis_render_choropleth` / `qgis_style_graduated`: `diverging: bool = False` + `center: float = 0.0` — diverging colormap with symmetric class breaks pinned at `center`, for signed / net-flux data. `palette` now also resolves scientific colormaps (viridis, cividis, magma, batlow, vik, roma, balance, RdBu, BrBG) vendored in `qgis_mcp_workflows_plugin/colormaps.py` via the shared `_resolve_color_ramp` / `_build_graduated_renderer` helpers. Response echoes `diverging`, `center`, `diverging_one_sided`.
@@ -539,6 +601,8 @@ Rendering is a separate plugin primitive, `render_wkt_features`, which takes
 `[{"wkt": ..., **attrs}]` and builds a memory layer. It is transport-agnostic on
 purpose: any future caller holding geometry from somewhere other than a file — a
 database cursor, an API — renders through the same path.
+
+`outline_color`, `outline_width_mm`, `fill_opacity` and the label arguments (v1.21) are the choropleth controls. On a graduated `value_field` they paint that renderer. On the unstyled path, a line stays `#1f78b4` at 0.6 mm and a point stays `#1f78b4` at 2.5 mm with no outline until a control is set; the point outline is the marker stroke and the fill stays. `label_field` must be a column in the query result. Omitted label type is 9 pt, 1 mm, white. `style_applied` and `PluginOutdatedError` match the choropleth. Compound `qgis_render` forwards these controls for `trajectory`, `od_flows`, `link_density`, `diagram_map`, `catchment` and `duckdb`. `breaks` stays choropleth-only. `mode="map"` refuses them.
 
 ---
 
@@ -660,7 +724,7 @@ Every typed error derives from `QgisMcpWorkflowsError`, which subclasses the SDK
 - 3D view. Not on the roadmap.
 - Map server / WMS / WFS. Not on the roadmap.
 
-If a v1 user needs any of these, the answer is: install upstream alongside, or write the call inside `qgis_eval`.
+If a v1 user needs any of these, the answer is: install upstream alongside, or write the call inside `qgis_eval`. A calculated column or a feature filter is `qgis_expression`, not `qgis_eval`.
 
 ---
 
@@ -699,6 +763,14 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 **v1.16 — panel grids.** ✅ Built 2026-11-10 (TASK-22). `qgis_compose_panels` composes a rows × cols grid of one polygon layer on linked colour scales with colour bars, for camera-ready comparison figures (PFLOW `fig_spatial`); scales are computed server-side in `panels.py`, fonts and line weights are arguments, and headless QGIS registers the OS fonts when a requested family is missing. Next: mesh-grid polygons.
 
 **v1.17 — first-use transport and paths.** ✅ `auto` refuses headless while QGIS Desktop is open and Run MCP is not listening (`PluginNotStartedError`). Drawn results carry `transport`. Tool paths expand `~`. `~/.config/qgis-mcp-workflows/config.toml` is read (CLI, then env, then the file). `qgis_figures_to_pptx` raises a typed error when the `pptx` extra is missing. `install.py` syncs the pipeline extras and names the real toolbar control.
+
+**v1.18 — polygon figure controls.** ✅ Optional `outline_color`, `outline_width_mm` and `fill_opacity` on `qgis_render_choropleth`, `qgis_style_graduated` and `qgis_style_categorized` (and the compound forwarders). Explicit `breaks` on the two graduated tools. `colors` on categorized, one hex per `classes` entry. Choropleth label size, font, colour and halo. Omitted arguments are not dispatched, so a v1.17.0 call draws the same figure.
+
+**v1.19 — expressions, eval still on.** ✅ `qgis_expression` writes a GeoPackage or GeoJSON from a QGIS expression (calculated column, filter, or both). `allow_python_eval` in `config.toml` defaults to true; `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` overrides it. `qgis_eval` keeps running until the flag is set false. Full mode only.
+
+**v1.20 — aggregate points and lines onto polygons.** ✅ `qgis_aggregate_to_zones` counts, sums, or averages every point or line that intersects a polygon. `qgis_spatial_join` still copies the first match. The new field is a `value_field` for `qgis_render_choropleth`. Full mode only.
+
+**v1.21 — line and point figure controls.** ✅ The choropleth stroke, opacity and label arguments on `qgis_render_trajectory`, `qgis_render_od_flows`, `qgis_render_link_density`, `qgis_render_diagram_map`, `qgis_render_catchment` and `qgis_render_from_duckdb`, and on compound `qgis_render` for those modes. Omitted arguments are not dispatched. A line's outline is the line; a point's outline is the marker stroke and the fill stays. OD flow width and the link-density ramp stay as they are until the caller sets the control. OD labels stay 8 pt and link-density labels stay 7 pt when the new label arguments are omitted. `breaks` stays on the choropleth.
 
 ---
 
