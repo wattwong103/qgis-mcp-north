@@ -3472,20 +3472,144 @@ def qgis_export_session(
 
 
 # ---------------------------------------------------------------------------
+# Tools — Expressions (1)
+# ---------------------------------------------------------------------------
+
+
+class ExpressionResult(BaseModel):
+    output_path: str
+    n_input: int
+    n_output: int
+    field_added: str | None = None
+
+
+_EXPRESSION_OUTPUTS = (".gpkg", ".geojson", ".json")
+
+
+@_maybe_tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False, idempotentHint=True, destructiveHint=False, openWorldHint=True
+    )
+)
+def qgis_expression(
+    layer_path: Annotated[str, Field(description="Vector layer to copy. The open project is left unchanged.")],
+    output_path: Annotated[str, Field(description="Absolute output path ending in .gpkg, .geojson, or .json.")],
+    expression: Annotated[
+        str | None,
+        Field(description="QGIS expression for a new column, e.g. \"sim\" - \"obs\" or \"trips\" / sum(\"trips\"). Requires field_name."),
+    ] = None,
+    field_name: Annotated[
+        str | None,
+        Field(description="Name of the column expression adds. Required when expression is set."),
+    ] = None,
+    filter: Annotated[
+        str | None,
+        Field(description="QGIS expression. Keeps features for which it is true. Runs before expression."),
+    ] = None,
+) -> ExpressionResult:
+    """Write a new layer from a QGIS expression: a calculated column, a filter, or both.
+
+    When to use: a difference column (``sim - obs``), a share (``trips / sum("trips")``),
+    or keeping features a filter selects. This is the supported path before
+    ``qgis_eval``. The open project is unchanged. Full mode only.
+
+    ``expression`` adds ``field_name`` on a copy of the layer. ``filter`` keeps
+    features for which it is true. When both are set, the filter runs first and
+    the column is computed on the kept features. At least one is required.
+    Output is GeoPackage or GeoJSON.
+
+    The expression may use fields, geometry, and QGIS built-in functions.
+    ``env`` and profile Python functions are refused.
+
+    Returns: ``ExpressionResult`` with ``n_input``, ``n_output``, and ``field_added``.
+
+    Chains into: ``qgis_render_choropleth``, ``qgis_style_graduated``,
+    ``qgis_layer_inspect`` on ``output_path``.
+    """
+    from qgis_mcp_workflows.errors import (
+        ExecutorError,
+        ExpressionEmptyError,
+        ExpressionError,
+        ExpressionUnsafeError,
+        InvalidArgumentError,
+        LayerNotFoundError,
+    )
+    from qgis_mcp_workflows.executors import get_executor
+
+    expr = (expression or "").strip()
+    filt = (filter or "").strip()
+    name = (field_name or "").strip()
+    if not expr and not filt:
+        raise InvalidArgumentError(
+            "qgis_expression needs expression or filter.",
+            next_step="pass expression and field_name to add a column, or filter to keep features, then retry qgis_expression",
+        )
+    if expr and not name:
+        raise InvalidArgumentError(
+            "expression requires field_name.",
+            next_step="pass field_name for the new column, then retry qgis_expression",
+        )
+    abs_layer = user_abs(layer_path)
+    abs_out = user_abs(output_path)
+    if os.path.splitext(abs_out)[1].lower() not in _EXPRESSION_OUTPUTS:
+        raise InvalidArgumentError(
+            f"output_path {output_path!r} must end in .gpkg or .geojson.",
+            next_step="pass a .gpkg or .geojson output_path, then retry qgis_expression",
+        )
+    params: dict = {"layer_path": abs_layer, "output_path": abs_out}
+    if expr:
+        params["expression"] = expr
+        params["field_name"] = name
+    if filt:
+        params["filter"] = filt
+    try:
+        result = get_executor().dispatch("apply_expression", params, timeout=300)
+    except ExecutorError as err:
+        message = err.message
+        if "EXPRESSION_EMPTY" in message:
+            raise ExpressionEmptyError(message) from err
+        if "EXPRESSION_UNSAFE" in message:
+            raise ExpressionUnsafeError(message) from err
+        if "EXPRESSION_PARSE" in message or "EXPRESSION_EVAL" in message:
+            raise ExpressionError(message) from err
+        if "LAYER_NOT_FOUND" in message:
+            raise LayerNotFoundError(abs_layer) from err
+        if "FIELD_EXISTS" in message or "EXPRESSION_ARGS" in message:
+            raise InvalidArgumentError(
+                message,
+                next_step="pass a new field_name, or expression with field_name, or a filter, then retry qgis_expression",
+            ) from err
+        raise
+    added = result.get("field_added")
+    return ExpressionResult(
+        output_path=user_abs(result["output_path"]),
+        n_input=int(result.get("n_input") or 0),
+        n_output=int(result.get("n_output") or 0),
+        field_added=added if added else None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tools — Escape hatch (1)
 # ---------------------------------------------------------------------------
 
 
 def qgis_eval(
-    code: Annotated[str, Field(description="PyQGIS source to execute.")],
+    code: Annotated[str, Field(description="PyQGIS source to execute. Try qgis_expression first for a calculated column or a filter.")],
     return_vars: Annotated[list[str] | None, Field(description="Local variable names to capture from the executed scope and return JSON-serialized.")] = None,
 ) -> EvalResult:
-    """Execute arbitrary PyQGIS. Escape hatch — prefer the workflow tools.
+    """Execute arbitrary PyQGIS. Escape hatch — try qgis_expression first.
 
-    When to use: only when no workflow tool fits — e.g., an unusual
+    When to use: a calculated column or a feature filter is qgis_expression,
+    not this tool. Use qgis_eval only when no workflow tool fits — an unusual
     processing algorithm, a custom symbology that ``qgis_style_*`` can't
     express, or interactive debugging. For routine work (load, style,
     render, export, batch, deck) use the dedicated tools.
+
+    ``allow_python_eval`` in ``~/.config/qgis-mcp-workflows/config.toml``
+    defaults to true, so this tool stays available. Set the key false, or
+    set ``QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL=0``, to refuse it. The
+    environment wins over the file. There is no CLI flag.
 
     In plugin transport, executes inside the running QGIS process. In
     headless transport, executes in the standalone PyQGIS subprocess.
@@ -3494,6 +3618,11 @@ def qgis_eval(
     Returns: ``EvalResult`` with stdout, stderr, captured ``return_values``
     (if ``return_vars`` was given), and exception traceback (if any).
     """
+    if not allow_python_eval():
+        from qgis_mcp_workflows.errors import PythonEvalDisabledError
+
+        raise PythonEvalDisabledError()
+
     from qgis_mcp_workflows.executors import get_executor
 
     params: dict = {"code": code}
@@ -3571,6 +3700,28 @@ def load_user_config() -> dict:
         logger.warning("ignoring %s (%s)", path, exc)
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def allow_python_eval() -> bool:
+    """Whether ``qgis_eval`` may run. Environment, then config.toml, then true.
+
+    ``QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL`` is ``1`` or ``0`` and wins over
+    the file. The file key is ``allow_python_eval`` (a TOML boolean). A missing
+    file, a missing key, or a value that is not a boolean leaves eval on.
+    """
+    env = os.environ.get("QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL", "").strip()
+    if env in ("1", "0"):
+        return env == "1"
+    if env:
+        logger.warning("Unknown QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL=%r; ignoring", env)
+    cfg = load_user_config()
+    if "allow_python_eval" not in cfg:
+        return True
+    value = cfg["allow_python_eval"]
+    if isinstance(value, bool):
+        return value
+    logger.warning("ignoring allow_python_eval=%r in %s", value, config_path())
+    return True
 
 
 def resolve_transport(cli: str | None) -> tuple[str, str]:

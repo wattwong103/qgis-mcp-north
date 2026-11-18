@@ -1,6 +1,6 @@
 # qgis-mcp-workflows — Design Doc
 
-Status: **v1.18.0**, 2026-11-18
+Status: **v1.19.0**, 2026-11-18
 Owner: North
 Upstream: forked from `nkarasiak/qgis-mcp` @ v0.2.1
 
@@ -12,7 +12,7 @@ This document is the spec. Implementation follows. If a tool's signature, respon
 
 Three problems with upstream that the fork solves:
 
-**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **27 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
+**Surface bloat.** Upstream ships 51 tools that mirror the PyQGIS API one-to-one. That's the wrong abstraction layer for an LLM. We cut to **28 workflow tools + 1 escape hatch (`qgis_eval`)**. Every remaining tool encapsulates an end-to-end action a user actually takes (render a choropleth, drop figures into a deck), not a single API call.
 
 **No headless mode.** Upstream requires QGIS Desktop running with the plugin enabled. That's incompatible with scheduled overnight runs, CI, or any automation. We add a **PyQGIS-subprocess transport** alongside the existing plugin transport. Same tools, two backends, selected by config or CLI flag.
 
@@ -49,6 +49,8 @@ Out of scope: replacing upstream as a general-purpose QGIS MCP. We intentionally
 **Two transports, one tool surface.** The MCP server exposes the same tools regardless of transport. A thin executor abstraction (`src/qgis_mcp_workflows/executors/{plugin,headless}.py`) hides the difference. Tools are written against the executor interface; they never directly speak socket or PyQGIS.
 
 **Transport selection.** CLI flag `--transport={plugin,headless,auto}`, then `QGIS_MCP_WORKFLOWS_TRANSPORT`, then `~/.config/qgis-mcp-workflows/config.toml` (`transport`, and optionally `host` / `port`), then `auto`. The server logs the chosen value and where it came from at startup, before any tool call. `auto` uses the plugin when port 9877 accepts a connection. If the port is closed and a QGIS Desktop process is running, `auto` does **not** fall through to headless: the call raises `PluginNotStartedError` telling the user that Run MCP was not started (toolbar button; Plugins menu **QGIS MCP**; the button's menu has Auto-start on startup, off until ticked). That is the open project the caller meant. If Desktop is not running, `auto` uses headless. If headless is unavailable too, `auto` still starts: every tool call re-probes the plugin port, switches to the plugin once Run MCP is listening, and otherwise raises `TransportUnavailableError` naming both reasons. Exiting at startup instead would close the MCP connection before the client could show any error. An explicit `--transport=headless` still fails at startup with `HeadlessUnavailableError`, and that error's `Next:` stays on headless (fix `QGIS_MCP_WORKFLOWS_QGIS_LAUNCHER`, restart with `--transport=headless`).
+
+**Python eval.** The same `config.toml` reads `allow_python_eval`, default true, so `qgis_eval` stays available and a replay's `--allow-eval` switch is unchanged. `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` (`1` or `0`) overrides the file. There is no CLI flag. An unknown value is ignored and the next source is used (environment, then the file, then the default). When the effective value is false, `qgis_eval` raises `PythonEvalDisabledError` before any code runs. The hint names `qgis_expression` and setting the key back to true.
 
 **Headless runtime.** Standalone PyQGIS via `qgis_process` (CLI) for simple ops, with a long-lived Python subprocess holding `QgsApplication` for complex ops. Headless mode forces `QT_QPA_PLATFORM=offscreen` and disables any GUI calls. Render only — no project save, no plugin install, no UI mutation.
 
@@ -96,7 +98,7 @@ Upstream's plugin and server stay untouched. If the user installs both, Claude D
 
 ---
 
-## 4. Tool surface (27 workflow + 1 escape hatch)
+## 4. Tool surface (28 workflow + 1 escape hatch)
 
 For each tool: signature, what it does, response shape, and the typical chain.
 
@@ -420,11 +422,32 @@ SessionExportResult = {"output_path": str, "n_figures": int, "n_calls": int, "n_
                        "skipped": [{"figure": str, "reason": str}], "warnings": [str]}
 ```
 
+### Expressions (1)
+
+#### `qgis_expression(layer_path: str, output_path: str, expression: str | None = None, field_name: str | None = None, filter: str | None = None) → ExpressionResult`
+
+Write a new file from a QGIS expression. `expression` adds `field_name` on a copy of the layer (a difference `sim - obs`, a share `"trips" / sum("trips")`). `filter` is its own expression and keeps the features for which it is true. At least one of `expression` or `filter` is required; a blank string counts as omitted. `expression` requires `field_name`. When both are set, the filter runs first and the column is computed on the kept features, so an aggregate sees that filtered set. The open project is unchanged (the layer is never added to it). The handler does not touch `iface`, so plugin and headless both run it. Output is GeoPackage (`.gpkg`) or GeoJSON (`.geojson` or `.json`). Anything else raises `InvalidArgumentError` before dispatch. Full mode only. Compound mode does not grow a kind for it; `qgis_export` stays as it is.
+
+Before any feature is written, the plugin builds each expression on a context that does not load the profile's Python expression functions (`python/expressions`). `referencedFunctions()` must be a subset of `QgsExpression.builtinFunctions()`, and `env` is refused by name even though it is built in (`ExpressionUnsafeError`). The hint says the expression may use fields, geometry, and built-in functions, and that Python stays on `qgis_eval`. A parse error, an unknown field, or an evaluation error (`ExpressionError`) names the QGIS message and the field names on the layer. A filter that keeps nothing raises `ExpressionEmptyError`; the hint says to check the expression with `qgis_layer_inspect`. A `field_name` that is already on the layer is refused.
+
+The new field is numeric when every value is a number or null, boolean when every value is boolean, and text otherwise.
+
+```python
+ExpressionResult = {
+    "output_path": str,
+    "n_input": int,
+    "n_output": int,
+    "field_added": str | None,  # the new column, or null when only a filter was set
+}
+```
+
+Chains into: `qgis_render_choropleth`, `qgis_style_graduated`, `qgis_layer_inspect`.
+
 ### Escape hatch (1)
 
 #### `qgis_eval(code: str, return_vars: list[str] | None = None) → EvalResult`
 
-Execute arbitrary PyQGIS. Available in plugin transport (executes in QGIS); in headless transport, runs in the standalone PyQGIS subprocess. `return_vars` lists local variables to capture and return JSON-serialized.
+Execute arbitrary PyQGIS. Try `qgis_expression` first for a calculated column or a filter. Available in plugin transport (executes in QGIS); in headless transport, runs in the standalone PyQGIS subprocess. `return_vars` lists local variables to capture and return JSON-serialized. Stays available while `allow_python_eval` is true (the default; see §2). When that flag is false, the call raises `PythonEvalDisabledError` and does not run the code.
 
 ```python
 EvalResult = {
@@ -435,7 +458,7 @@ EvalResult = {
 }
 ```
 
-Use for the long tail. Document explicitly that this is an escape hatch, not a first choice.
+Use for the long tail that `qgis_expression` and the workflow tools do not cover. This is an escape hatch, not a first choice.
 
 ---
 
@@ -670,7 +693,7 @@ Every typed error derives from `QgisMcpWorkflowsError`, which subclasses the SDK
 - 3D view. Not on the roadmap.
 - Map server / WMS / WFS. Not on the roadmap.
 
-If a v1 user needs any of these, the answer is: install upstream alongside, or write the call inside `qgis_eval`.
+If a v1 user needs any of these, the answer is: install upstream alongside, or write the call inside `qgis_eval`. A calculated column or a feature filter is `qgis_expression`, not `qgis_eval`.
 
 ---
 
@@ -711,6 +734,8 @@ If a v1 user needs any of these, the answer is: install upstream alongside, or w
 **v1.17 — first-use transport and paths.** ✅ `auto` refuses headless while QGIS Desktop is open and Run MCP is not listening (`PluginNotStartedError`). Drawn results carry `transport`. Tool paths expand `~`. `~/.config/qgis-mcp-workflows/config.toml` is read (CLI, then env, then the file). `qgis_figures_to_pptx` raises a typed error when the `pptx` extra is missing. `install.py` syncs the pipeline extras and names the real toolbar control.
 
 **v1.18 — polygon figure controls.** ✅ Optional `outline_color`, `outline_width_mm` and `fill_opacity` on `qgis_render_choropleth`, `qgis_style_graduated` and `qgis_style_categorized` (and the compound forwarders). Explicit `breaks` on the two graduated tools. `colors` on categorized, one hex per `classes` entry. Choropleth label size, font, colour and halo. Omitted arguments are not dispatched, so a v1.17.0 call draws the same figure.
+
+**v1.19 — expressions, eval still on.** ✅ `qgis_expression` writes a GeoPackage or GeoJSON from a QGIS expression (calculated column, filter, or both). `allow_python_eval` in `config.toml` defaults to true; `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL` overrides it. `qgis_eval` keeps running until the flag is set false. Full mode only.
 
 ---
 

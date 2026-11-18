@@ -3,6 +3,20 @@
 All notable changes to qgis-mcp-workflows are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.19.0 — 2026-11-18 — QGIS expressions, eval still on
+
+### Added
+
+- `qgis_expression` writes a GeoPackage or GeoJSON from a QGIS expression:
+  a calculated column (`field_name`), a filter, or both. The filter runs
+  first. The open project is unchanged. Full mode only. `env` and profile
+  Python expression functions are refused; fields, geometry, and built-in
+  functions are allowed.
+- `allow_python_eval` in `~/.config/qgis-mcp-workflows/config.toml` defaults
+  to true, so `qgis_eval` stays available. `QGIS_MCP_WORKFLOWS_ALLOW_PYTHON_EVAL`
+  (`1` / `0`) overrides the file. When the flag is false, `qgis_eval` raises
+  `PythonEvalDisabledError` and points at `qgis_expression`.
+
 ## v1.18.0 — 2026-11-18 — choropleth and style figure controls
 
 ### Added

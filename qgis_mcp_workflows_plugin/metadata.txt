@@ -18,7 +18,7 @@ about=Companion QGIS plugin for the qgis-mcp-workflows MCP server. Exposes a TCP
 
     Default socket port: 9877 (vs upstream nkarasiak/qgis-mcp on 9876).
 
-version=1.18.0
+version=1.19.0
 author=North
 email=
 tags=mcp,ai,claude,llm,workflows,transportation,research,pflow,gufm,drm
@@ -30,7 +30,8 @@ category=Plugins
 icon=icons/icon.png
 experimental=True
 deprecated=False
-changelog=1.17.0 : Run MCP is the control the errors name; auto does not draw headless while QGIS is open and that button is off.
+changelog=1.19.0 : qgis_expression writes a calculated column or a filtered copy; allow_python_eval defaults to true.
+ 1.17.0 : Run MCP is the control the errors name; auto does not draw headless while QGIS is open and that button is off.
  1.16.2 : get_field_values returns a layer's join keys; panel scales ignore CSV keys no zone carries.
  1.16.1 : Layout, diagram and heatmap units resolve without the QgsUnitTypes aliases
     QGIS 4 may drop (QGIS 4 not yet run); the heatmap radius stays in pixels on QGIS 3.28.

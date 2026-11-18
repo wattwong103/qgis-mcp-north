@@ -30,6 +30,7 @@ from qgis.core import (
     QgsColorBrewerColorRamp,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
+    QgsDistanceArea,
     QgsExpression,
     QgsExpressionContext,
     QgsExpressionContextUtils,
@@ -357,6 +358,7 @@ class QgisMCPServer(QObject):
                 "export_layout": self.export_layout,
                 "export_atlas": self.export_atlas,
                 "spatial_join": self.spatial_join,
+                "apply_expression": self.apply_expression,
                 "zonal_stats": self.zonal_stats,
                 "compose_layout": self.compose_layout,
                 "compose_panels": self.compose_panels,
@@ -4753,6 +4755,243 @@ class QgisMCPServer(QObject):
             "predicate": pred,
             "method": meth,
             "joined_fields": joined_names,
+        }
+
+    def _expression_context(self, layer):
+        """Fields, geometry, and this layer. Does not load python/expressions.
+
+        Profile Python expression functions register through the QGIS startup
+        loader. This context never asks for that loader. The safety check then
+        keeps the call to QgsExpression built-ins.
+        """
+        context = QgsExpressionContext()
+        context.appendScope(QgsExpressionContextUtils.layerScope(layer))
+        context.setFields(layer.fields())
+        if hasattr(context, "setDistanceArea"):
+            with contextlib.suppress(Exception):
+                area = QgsDistanceArea()
+                crs = layer.crs()
+                if crs.isValid():
+                    area.setSourceCrs(crs, QgsProject.instance().transformContext())
+                context.setDistanceArea(area)
+        return context
+
+    def _unwrap_expression_value(self, value):
+        if value is None:
+            return None
+        # qgis.core.NULL is a singleton. Match it by type so plugin import
+        # does not depend on that name being exported.
+        if type(value).__name__ == "NULL":
+            return None
+        if isinstance(value, QVariant) and value.isNull():
+            return None
+        if isinstance(value, QVariant):
+            return value.value()
+        return value
+
+    def _expression_is_true(self, value):
+        value = self._unwrap_expression_value(value)
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value not in ("", "0")
+        return bool(value)
+
+    def _expression_field_variant(self, values):
+        kinds = set()
+        for value in values:
+            value = self._unwrap_expression_value(value)
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                kinds.add("bool")
+            elif isinstance(value, int):
+                kinds.add("int")
+            elif isinstance(value, float):
+                kinds.add("float")
+            else:
+                kinds.add("other")
+        if "other" in kinds or ("bool" in kinds and len(kinds) > 1):
+            return QVariant.String
+        if kinds == {"bool"}:
+            return QVariant.Bool
+        if kinds == {"int"}:
+            return QVariant.LongLong
+        return QVariant.Double
+
+    def _expression_stored_value(self, value, qtype):
+        value = self._unwrap_expression_value(value)
+        if value is None:
+            return None
+        if qtype == QVariant.String and not isinstance(value, str):
+            return "%s" % (value,)
+        return value
+
+    def _prepare_safe_expression(self, text, context, field_names):
+        """Parse and refuse env and any function outside QgsExpression's built-ins.
+
+        Called before a feature is written and before the expression is evaluated.
+        """
+        expr = QgsExpression(text)
+        shown = ", ".join(field_names) if field_names else "(none)"
+        if not expr.isValid():
+            raise Exception(
+                "EXPRESSION_PARSE: %s. field names: %s" % (expr.parserErrorString(), shown)
+            )
+        builtins = set()
+        for name in QgsExpression.builtinFunctions():
+            builtins.add(name)
+        blocked = []
+        for name in expr.referencedFunctions():
+            if name.lower() == "env" or name not in builtins:
+                blocked.append(name)
+        if blocked:
+            blocked.sort()
+            raise Exception("EXPRESSION_UNSAFE: %s" % ", ".join(blocked))
+        for column in expr.referencedColumns():
+            if column not in field_names:
+                raise Exception(
+                    "EXPRESSION_PARSE: unknown field %s. field names: %s" % (column, shown)
+                )
+        if not expr.prepare(context):
+            detail = expr.parserErrorString() or expr.evalErrorString()
+            raise Exception("EXPRESSION_PARSE: %s. field names: %s" % (detail, shown))
+        return expr
+
+    def _expression_memory(self, source, features, name, extra_field=None, extra_values=None):
+        """In-memory copy. Not added to the open project."""
+        wkb_type = source.wkbType()
+        no_geom = wkb_type in (
+            getattr(QgsWkbTypes, "NoGeometry", None),
+            getattr(QgsWkbTypes, "Unknown", None),
+        )
+        if no_geom:
+            uri = "None"
+        else:
+            wkb = QgsWkbTypes.displayString(wkb_type) or "Point"
+            crs = source.crs().authid() or "EPSG:4326"
+            uri = "%s?crs=%s" % (wkb, crs)
+        mem = QgsVectorLayer(uri, name, "memory")
+        if not mem.isValid():
+            raise Exception("WRITE_FAILED: could not build a memory copy of the layer")
+        fields = QgsFields()
+        for field in source.fields():
+            fields.append(QgsField(field))
+        if extra_field is not None:
+            fields.append(extra_field)
+        provider = mem.dataProvider()
+        provider.addAttributes(fields.toList())
+        mem.updateFields()
+        out_feats = []
+        for index, feat in enumerate(features):
+            new_feat = QgsFeature(mem.fields())
+            attrs = list(feat.attributes())
+            if extra_values is not None:
+                attrs.append(extra_values[index])
+            new_feat.setAttributes(attrs)
+            geom = feat.geometry()
+            if geom is not None and not geom.isEmpty():
+                new_feat.setGeometry(QgsGeometry(geom))
+            out_feats.append(new_feat)
+        if out_feats:
+            provider.addFeatures(out_feats)
+        mem.updateExtents()
+        return mem
+
+    def _expression_eval_error(self, expr, field_names):
+        shown = ", ".join(field_names) if field_names else "(none)"
+        raise Exception(
+            "EXPRESSION_EVAL: %s. field names: %s" % (expr.evalErrorString(), shown)
+        )
+
+    def apply_expression(
+        self,
+        layer_path,
+        output_path,
+        expression=None,
+        field_name=None,
+        filter=None,
+        **kwargs,
+    ):
+        """Copy a layer with a calculated column, a filter, or both.
+
+        The filter runs first. The column is then computed on the kept
+        features, so an aggregate such as sum() sees that set. Nothing is
+        added to the open project.
+        """
+        expr_text = (expression or "").strip()
+        filter_text = (filter or "").strip()
+        added_name = (field_name or "").strip()
+        if not expr_text and not filter_text:
+            raise Exception("EXPRESSION_ARGS: pass expression and field_name, or filter")
+        if expr_text and not added_name:
+            raise Exception("EXPRESSION_ARGS: expression requires field_name")
+        ext = os.path.splitext(output_path)[1].lower()
+        if ext not in (".gpkg", ".geojson", ".json"):
+            raise Exception("EXPRESSION_ARGS: output_path must end in .gpkg or .geojson")
+
+        layer = QgsVectorLayer(layer_path, "_expr_src", "ogr")
+        if not layer.isValid():
+            raise Exception("LAYER_NOT_FOUND: %s" % layer_path)
+        field_names = [field.name() for field in layer.fields()]
+        if expr_text and added_name in field_names:
+            raise Exception(
+                "FIELD_EXISTS: %s. Available: %s" % (added_name, ", ".join(field_names))
+            )
+
+        source_ctx = self._expression_context(layer)
+        filter_expr = None
+        if filter_text:
+            filter_expr = self._prepare_safe_expression(filter_text, source_ctx, field_names)
+        if expr_text:
+            # Validate before the copy. Evaluated later on the kept features.
+            self._prepare_safe_expression(expr_text, source_ctx, field_names)
+
+        kept = []
+        n_input = 0
+        for feat in layer.getFeatures():
+            n_input += 1
+            if filter_expr is not None:
+                source_ctx.setFeature(feat)
+                value = filter_expr.evaluate(source_ctx)
+                if filter_expr.hasEvalError():
+                    self._expression_eval_error(filter_expr, field_names)
+                if not self._expression_is_true(value):
+                    continue
+            kept.append(feat)
+
+        if filter_text and not kept:
+            raise Exception("EXPRESSION_EMPTY: filter kept 0 of %s features." % n_input)
+
+        if expr_text:
+            work = self._expression_memory(layer, kept, "_expr_kept")
+            work_ctx = self._expression_context(work)
+            calc_expr = self._prepare_safe_expression(expr_text, work_ctx, field_names)
+            values = []
+            for feat in work.getFeatures():
+                work_ctx.setFeature(feat)
+                value = calc_expr.evaluate(work_ctx)
+                if calc_expr.hasEvalError():
+                    self._expression_eval_error(calc_expr, field_names)
+                values.append(self._unwrap_expression_value(value))
+            qtype = self._expression_field_variant(values)
+            stored = [self._expression_stored_value(value, qtype) for value in values]
+            out = self._expression_memory(
+                layer, kept, "expression", QgsField(added_name, qtype), stored
+            )
+        else:
+            out = self._expression_memory(layer, kept, "expression")
+
+        written = self._write_vector_layer(out, output_path)
+        return {
+            "output_path": os.path.abspath(written),
+            "n_input": n_input,
+            "n_output": len(kept),
+            "field_added": added_name if expr_text else None,
         }
 
     def _zonal_stat_flags(self, stat_names):
